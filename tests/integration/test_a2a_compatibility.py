@@ -7,7 +7,7 @@ Message objects that other A2A agents can accept.
 """
 
 import pytest
-from a2a_adapters.integrations.n8n import N8nAgentAdapter
+from a2a_adapter.integrations.n8n import N8nAgentAdapter
 from a2a.types import MessageSendParams, Message, Role, Part, TextPart
 
 

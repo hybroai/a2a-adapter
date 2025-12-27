@@ -1,4 +1,4 @@
 """
-Tests for a2a-adapters package.
+Tests for a2a-adapter package.
 """
 

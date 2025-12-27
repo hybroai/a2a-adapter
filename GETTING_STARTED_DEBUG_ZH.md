@@ -17,7 +17,7 @@ Complete environment setup and run your first debug test in 5 minutes.
 ### Method 1: Automatic Setup (Recommended)
 
 ```bash
-cd "/Users/caijiangnan/Desktop/HYBRO AI/multiple-agents/hybro open source/a2a-adapters"
+cd "/Users/caijiangnan/Desktop/HYBRO AI/multiple-agents/hybro open source/a2a-adapter"
 
 # Run setup script
 ./setup_dev.sh
@@ -32,7 +32,7 @@ This script will automatically:
 ### Method 2: Manual Setup
 
 ```bash
-cd "/Users/caijiangnan/Desktop/HYBRO AI/multiple-agents/hybro open source/a2a-adapters"
+cd "/Users/caijiangnan/Desktop/HYBRO AI/multiple-agents/hybro open source/a2a-adapter"
 
 # Create virtual environment
 python3 -m venv venv
@@ -44,7 +44,7 @@ source venv/bin/activate
 pip install -e ".[dev]"
 
 # Verify installation
-python -c "import a2a_adapters; print('✅ Installation successful!')"
+python -c "import a2a_adapter; print('✅ Installation successful!')"
 ```
 
 ## 🧪 第二步：运行第一个测试
@@ -124,12 +124,12 @@ python debug_scripts/03_test_server_client.py
 ### 1. 打开项目
 
 ```bash
-code "/Users/caijiangnan/Desktop/HYBRO AI/multiple-agents/hybro open source/a2a-adapters"
+code "/Users/caijiangnan/Desktop/HYBRO AI/multiple-agents/hybro open source/a2a-adapter"
 ```
 
 ### 2. 设置断点
 
-在 `a2a_adapters/adapter.py` 文件中，点击行号左侧设置断点：
+在 `a2a_adapter/adapter.py` 文件中，点击行号左侧设置断点：
 
 ```python
 async def handle(self, params: MessageSendParams) -> Message | Task:
@@ -160,7 +160,7 @@ async def handle(self, params: MessageSendParams) -> Message | Task:
 
 ```python
 import asyncio
-from a2a_adapters import load_a2a_agent
+from a2a_adapter import load_a2a_agent
 from a2a.types import MessageSendParams, Message, TextPart
 
 async def my_agent(inputs: dict) -> str:
@@ -208,7 +208,7 @@ python my_debug.py
 ```python
 import asyncio
 import logging
-from a2a_adapters.integrations.n8n import N8nAgentAdapter
+from a2a_adapter.integrations.n8n import N8nAgentAdapter
 from a2a.types import MessageSendParams, Message, TextPart
 
 # 启用详细日志
@@ -259,9 +259,9 @@ python debug_scripts/04_benchmark.py
 遇到问题时，按顺序检查：
 
 - [ ] 虚拟环境已激活？`which python`
-- [ ] 包已安装？`pip list | grep a2a-adapters`
+- [ ] 包已安装？`pip list | grep a2a-adapter`
 - [ ] Python 版本正确？`python --version` (>= 3.9)
-- [ ] 能导入包？`python -c "import a2a_adapters"`
+- [ ] 能导入包？`python -c "import a2a_adapter"`
 - [ ] 端口未被占用？`lsof -i :9000`
 - [ ] 环境变量已设置？（如 OPENAI_API_KEY）
 

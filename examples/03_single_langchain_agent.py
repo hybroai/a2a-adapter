@@ -18,7 +18,7 @@ import os
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
-from a2a_adapters import load_a2a_agent, serve_agent
+from a2a_adapter import load_a2a_agent, serve_agent
 from a2a.types import AgentCard, AgentCapabilities, AgentSkill
 
 

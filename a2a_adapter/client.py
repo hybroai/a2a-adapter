@@ -170,7 +170,7 @@ def build_agent_app(
         
     Example:
         >>> from a2a.types import AgentCard
-        >>> from a2a_adapters.integrations.n8n import N8nAgentAdapter
+        >>> from a2a_adapter.integrations.n8n import N8nAgentAdapter
         >>> 
         >>> card = AgentCard(
         ...     name="Math Agent",
@@ -214,7 +214,7 @@ def serve_agent(
 
     Example:
         >>> from a2a.types import AgentCard
-        >>> from a2a_adapters import load_a2a_agent, serve_agent
+        >>> from a2a_adapter import load_a2a_agent, serve_agent
         >>>
         >>> adapter = await load_a2a_agent({
         ...     "adapter": "n8n",

@@ -1,6 +1,6 @@
-# A2A Adapters Examples
+# A2A Adapter Examples
 
-This directory contains complete, runnable examples demonstrating how to use the A2A Adapters SDK with different agent frameworks.
+This directory contains complete, runnable examples demonstrating how to use the A2A Adapter SDK with different agent frameworks.
 
 ## Prerequisites
 
@@ -8,12 +8,12 @@ Install the required dependencies:
 
 ```bash
 # Install base package
-pip install a2a-adapters
+pip install a2a-adapter
 
 # Install framework-specific dependencies as needed
-pip install a2a-adapters[crewai]    # For CrewAI examples
-pip install a2a-adapters[langchain]  # For LangChain examples
-pip install a2a-adapters[langgraph]  # For LangGraph examples
+pip install a2a-adapter[crewai]    # For CrewAI examples
+pip install a2a-adapter[langchain]  # For LangChain examples
+pip install a2a-adapter[langgraph]  # For LangGraph examples
 
 # Or install all at once
 pip install -r requirements.txt
@@ -111,7 +111,7 @@ Edit the client script to:
 
 ### Example 5: Custom Adapter
 
-Create custom adapters using two different approaches:
+Create custom adapter using two different approaches:
 
 ```bash
 python examples/05_custom_adapter.py
@@ -212,10 +212,10 @@ If you get import errors:
 
 ```bash
 # Install missing framework
-pip install a2a-adapters[crewai]  # or [langchain], [langgraph]
+pip install a2a-adapter[crewai]  # or [langchain], [langgraph]
 
 # Or install all
-pip install a2a-adapters[all]
+pip install a2a-adapter[all]
 ```
 
 ### OpenAI API Key
@@ -237,7 +237,7 @@ load_dotenv()
 ## Next Steps
 
 1. **Modify Examples**: Change prompts, models, or logic
-2. **Create Custom Adapters**: Integrate your own agent frameworks
+2. **Create Custom Adapter**: Integrate your own agent frameworks
 3. **Build Multi-Agent Systems**: Connect multiple A2A agents
 4. **Deploy to Production**: Use Docker, Kubernetes, or serverless
 

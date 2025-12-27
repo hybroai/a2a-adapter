@@ -3,7 +3,7 @@ Unit tests for BaseAgentAdapter.
 """
 
 import pytest
-from a2a_adapters.adapter import BaseAgentAdapter
+from a2a_adapter.adapter import BaseAgentAdapter
 from a2a.types import Message, MessageSendParams, TextContent
 
 

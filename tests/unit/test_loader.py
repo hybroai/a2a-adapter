@@ -3,8 +3,8 @@ Unit tests for adapter loader.
 """
 
 import pytest
-from a2a_adapters.loader import load_a2a_agent
-from a2a_adapters.integrations.callable import CallableAgentAdapter
+from a2a_adapter.loader import load_a2a_agent
+from a2a_adapter.integrations.callable import CallableAgentAdapter
 
 
 async def mock_callable(inputs: dict) -> str:

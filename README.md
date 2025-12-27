@@ -1,4 +1,4 @@
-# A2A Adapters
+# A2A Adapter
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
@@ -47,29 +47,29 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design documentation.
 ### Basic Installation
 
 ```bash
-pip install a2a-adapters
+pip install a2a-adapter
 ```
 
 ### With Framework Support
 
 ```bash
 # For n8n (HTTP webhooks)
-pip install a2a-adapters
+pip install a2a-adapter
 
 # For CrewAI
-pip install a2a-adapters[crewai]
+pip install a2a-adapter[crewai]
 
 # For LangChain
-pip install a2a-adapters[langchain]
+pip install a2a-adapter[langchain]
 
 # For LangGraph
-pip install a2a-adapters[langgraph]
+pip install a2a-adapter[langgraph]
 
 # Install all frameworks
-pip install a2a-adapters[all]
+pip install a2a-adapter[all]
 
 # For development
-pip install a2a-adapters[dev]
+pip install a2a-adapter[dev]
 ```
 
 ## Quick Start
@@ -81,7 +81,7 @@ For the fastest way to get started, use the included examples:
 ```bash
 # Clone and setup
 git clone <repository>
-cd a2a-adapters
+cd a2a-adapter
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -e .
@@ -108,7 +108,7 @@ Expose an n8n workflow as an A2A agent:
 
 ```python
 import asyncio
-from a2a_adapters import load_a2a_agent, serve_agent
+from a2a_adapter import load_a2a_agent, serve_agent
 from a2a.types import AgentCard
 
 async def main():
@@ -138,7 +138,7 @@ Expose a CrewAI crew as an A2A agent:
 ```python
 import asyncio
 from crewai import Crew, Agent, Task
-from a2a_adapters import load_a2a_agent, serve_agent
+from a2a_adapter import load_a2a_agent, serve_agent
 from a2a.types import AgentCard
 
 # Create your crew
@@ -172,7 +172,7 @@ Expose a LangChain chain with streaming support:
 import asyncio
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from a2a_adapters import load_a2a_agent, serve_agent
+from a2a_adapter import load_a2a_agent, serve_agent
 from a2a.types import AgentCard
 
 # Create chain
@@ -206,7 +206,7 @@ Create a custom agent with any async function:
 
 ```python
 import asyncio
-from a2a_adapters import load_a2a_agent, serve_agent
+from a2a_adapter import load_a2a_agent, serve_agent
 from a2a.types import AgentCard
 
 async def my_agent_function(inputs: dict) -> str:
@@ -237,7 +237,7 @@ asyncio.run(main())
 For full control, subclass `BaseAgentAdapter`:
 
 ```python
-from a2a_adapters import BaseAgentAdapter
+from a2a_adapter import BaseAgentAdapter
 from a2a.types import Message, MessageSendParams, TextPart
 
 class SentimentAnalyzer(BaseAgentAdapter):
@@ -385,7 +385,7 @@ python examples/04_single_agent_client.py
 
 ```bash
 # Install dev dependencies
-pip install a2a-adapters[dev]
+pip install a2a-adapter[dev]
 
 # Run unit tests
 pytest tests/unit/
@@ -488,7 +488,7 @@ Check if this adapter supports streaming responses.
 
 We welcome contributions! To add support for a new framework:
 
-1. Create `a2a_adapters/integrations/{framework}.py`
+1. Create `a2a_adapter/integrations/{framework}.py`
 2. Implement a class extending `BaseAgentAdapter`
 3. Add to `loader.py` factory function
 4. Update `integrations/__init__.py`
@@ -550,9 +550,9 @@ Powered by the [A2A Protocol](https://github.com/a2a-protocol/a2a-protocol)
 
 ## Support
 
-- 📚 [Documentation](https://github.com/hybro-ai/a2a-adapters)
-- 🐛 [Issue Tracker](https://github.com/hybro-ai/a2a-adapters/issues)
-- 💬 [Discussions](https://github.com/hybro-ai/a2a-adapters/discussions)
+- 📚 [Documentation](https://github.com/hybro-ai/a2a-adapter)
+- 🐛 [Issue Tracker](https://github.com/hybro-ai/a2a-adapter/issues)
+- 💬 [Discussions](https://github.com/hybro-ai/a2a-adapter/discussions)
 
 ---
 

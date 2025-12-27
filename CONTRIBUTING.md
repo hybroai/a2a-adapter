@@ -10,7 +10,7 @@ This project adheres to a code of conduct. By participating, you are expected to
 
 ### Reporting Bugs
 
-1. Check if the bug has already been reported in [Issues](https://github.com/hybro-ai/a2a-adapters/issues)
+1. Check if the bug has already been reported in [Issues](https://github.com/hybro-ai/a2a-adapter/issues)
 2. If not, create a new issue with:
    - Clear title and description
    - Steps to reproduce
@@ -20,7 +20,7 @@ This project adheres to a code of conduct. By participating, you are expected to
 
 ### Suggesting Features
 
-1. Check [Issues](https://github.com/hybro-ai/a2a-adapters/issues) for existing feature requests
+1. Check [Issues](https://github.com/hybro-ai/a2a-adapter/issues) for existing feature requests
 2. Create a new issue with:
    - Clear use case description
    - Proposed API or implementation approach
@@ -32,7 +32,7 @@ We welcome adapters for new agent frameworks! Here's how to add one:
 
 #### 1. Create the Adapter File
 
-Create `a2a_adapters/integrations/{framework}.py`:
+Create `a2a_adapter/integrations/{framework}.py`:
 
 ```python
 """
@@ -74,7 +74,7 @@ class {Framework}AgentAdapter(BaseAgentAdapter):
 
 #### 2. Update the Loader
 
-Add your adapter to `a2a_adapters/loader.py`:
+Add your adapter to `a2a_adapter/loader.py`:
 
 ```python
 elif adapter_type == "{framework}":
@@ -93,7 +93,7 @@ elif adapter_type == "{framework}":
 
 #### 3. Update Integrations __init__
 
-Add to `a2a_adapters/integrations/__init__.py`:
+Add to `a2a_adapter/integrations/__init__.py`:
 
 ```python
 __all__ = [
@@ -128,7 +128,7 @@ Example: Single {Framework} Agent Server
 """
 
 import asyncio
-from a2a_adapters import load_a2a_agent, serve_agent
+from a2a_adapter import load_a2a_agent, serve_agent
 from a2a.types import AgentCard
 
 async def main():
@@ -158,7 +158,7 @@ Unit tests for {Framework}AgentAdapter.
 """
 
 import pytest
-from a2a_adapters.integrations.{framework} import {Framework}AgentAdapter
+from a2a_adapter.integrations.{framework} import {Framework}AgentAdapter
 from a2a.types import Message, MessageSendParams, TextPart
 
 
@@ -199,8 +199,8 @@ async def test_{framework}_adapter_basic():
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/hybro-ai/a2a-adapters.git
-cd a2a-adapters
+git clone https://github.com/hybro-ai/a2a-adapter.git
+cd a2a-adapter
 ```
 
 ### 2. Create Virtual Environment
@@ -224,7 +224,7 @@ pip install -e ".[all,dev]"
 pytest
 
 # Run with coverage
-pytest --cov=a2a_adapters --cov-report=html
+pytest --cov=a2a_adapter --cov-report=html
 
 # Run specific test file
 pytest tests/unit/test_adapter.py
@@ -237,20 +237,20 @@ pytest -v
 
 ```bash
 # Format code with Black
-black a2a_adapters/ examples/ tests/
+black a2a_adapter/ examples/ tests/
 
 # Check with Ruff
-ruff check a2a_adapters/ examples/ tests/
+ruff check a2a_adapter/ examples/ tests/
 
 # Type checking with mypy
-mypy a2a_adapters/
+mypy a2a_adapter/
 ```
 
 ## Project Structure
 
 ```
-a2a-adapters/
-├── a2a_adapters/           # Main package
+a2a-adapter/
+├── a2a_adapter/           # Main package
 │   ├── __init__.py         # Package exports
 │   ├── adapter.py          # BaseAgentAdapter
 │   ├── loader.py           # Adapter factory
@@ -338,7 +338,7 @@ Examples:
 
 (For maintainers)
 
-1. Update version in `pyproject.toml` and `a2a_adapters/__init__.py`
+1. Update version in `pyproject.toml` and `a2a_adapter/__init__.py`
 2. Update CHANGELOG.md
 3. Create git tag: `git tag v0.1.0`
 4. Push tag: `git push origin v0.1.0`
@@ -348,8 +348,8 @@ Examples:
 ## Getting Help
 
 - 📚 Read the [README](README.md) and [ARCHITECTURE](ARCHITECTURE.md)
-- 💬 Join [Discussions](https://github.com/hybro-ai/a2a-adapters/discussions)
-- 🐛 Check [Issues](https://github.com/hybro-ai/a2a-adapters/issues)
+- 💬 Join [Discussions](https://github.com/hybro-ai/a2a-adapter/discussions)
+- 🐛 Check [Issues](https://github.com/hybro-ai/a2a-adapter/issues)
 - 📧 Contact maintainers
 
 ## License

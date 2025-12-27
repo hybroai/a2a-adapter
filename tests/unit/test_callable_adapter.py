@@ -3,7 +3,7 @@ Unit tests for CallableAgentAdapter.
 """
 
 import pytest
-from a2a_adapters.integrations.callable import CallableAgentAdapter
+from a2a_adapter.integrations.callable import CallableAgentAdapter
 from a2a.types import Message, MessageSendParams, TextContent
 
 

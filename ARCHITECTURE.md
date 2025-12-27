@@ -260,7 +260,7 @@ Users can create custom adapters in two ways:
 For full control over the adapter lifecycle:
 
 ```python
-from a2a_adapters import BaseAgentAdapter
+from a2a_adapter import BaseAgentAdapter
 
 class MyCustomAdapter(BaseAgentAdapter):
     async def to_framework(self, params): ...
@@ -286,7 +286,7 @@ adapter = await load_a2a_agent({
 
 To add support for a new framework:
 
-1. Create `a2a_adapters/integrations/{framework}.py`
+1. Create `a2a_adapter/integrations/{framework}.py`
 2. Implement a class extending `BaseAgentAdapter`
 3. Add to `loader.py` factory
 4. Update `integrations/__init__.py`
