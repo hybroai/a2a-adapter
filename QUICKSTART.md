@@ -5,7 +5,7 @@ Get up and running with A2A Adapters in 5 minutes!
 ## Installation
 
 ```bash
-pip install a2a-adapters
+pip install a2a-adapter
 ```
 
 ## Your First A2A Agent
@@ -15,7 +15,7 @@ Let's create a simple echo agent using the callable adapter:
 ```python
 # my_first_agent.py
 import asyncio
-from a2a_adapters import load_a2a_agent, serve_agent
+from a2a_adapter import load_a2a_agent, serve_agent
 from a2a.types import AgentCard
 
 # Define your agent logic
@@ -101,7 +101,7 @@ python test_client.py
 ### Use with LangChain
 
 ```bash
-pip install a2a-adapters[langchain] langchain-openai
+pip install a2a-adapter[langchain] langchain-openai
 export OPENAI_API_KEY="your-key"
 ```
 
@@ -126,7 +126,7 @@ adapter = await load_a2a_agent({
 ### Use with CrewAI
 
 ```bash
-pip install a2a-adapters[crewai]
+pip install a2a-adapter[crewai]
 export OPENAI_API_KEY="your-key"
 ```
 
@@ -155,7 +155,7 @@ adapter = await load_a2a_agent({
 ### Create Custom Adapter
 
 ```python
-from a2a_adapters import BaseAgentAdapter
+from a2a_adapter import BaseAgentAdapter
 from a2a.types import Message, MessageSendParams, TextPart
 
 class MyCustomAdapter(BaseAgentAdapter):
@@ -236,9 +236,9 @@ serve_agent(..., port=8001)
 
 ```bash
 # Install the specific framework support
-pip install a2a-adapters[langchain]
-pip install a2a-adapters[crewai]
-pip install a2a-adapters[all]  # All frameworks
+pip install a2a-adapter[langchain]
+pip install a2a-adapter[crewai]
+pip install a2a-adapter[all]  # All frameworks
 ```
 
 ### Connection Refused

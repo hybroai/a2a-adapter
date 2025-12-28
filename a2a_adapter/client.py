@@ -9,7 +9,9 @@ from typing import AsyncGenerator
 
 import uvicorn
 from a2a.server.apps import A2AStarletteApplication
-from a2a.server.request_handlers.request_handler import RequestHandler, UnsupportedOperationError
+from a2a.server.request_handlers.request_handler import RequestHandler
+from a2a.types import UnsupportedOperationError
+from a2a.utils.errors import ServerError
 from a2a.server.context import ServerCallContext
 from a2a.types import (
     AgentCard,
@@ -95,7 +97,7 @@ class AdapterRequestHandler(RequestHandler):
         context: ServerCallContext
     ) -> GetTaskResponse:
         """Get task status - not supported."""
-        raise UnsupportedOperationError("Task operations are not supported")
+        raise ServerError(error=UnsupportedOperationError())
 
     async def on_cancel_task(
         self,
@@ -103,7 +105,7 @@ class AdapterRequestHandler(RequestHandler):
         context: ServerCallContext
     ) -> CancelTaskResponse:
         """Cancel task - not supported."""
-        raise UnsupportedOperationError("Task operations are not supported")
+        raise ServerError(error=UnsupportedOperationError())
 
     async def on_resubscribe_to_task(
         self,
@@ -111,7 +113,7 @@ class AdapterRequestHandler(RequestHandler):
         context: ServerCallContext
     ) -> AsyncGenerator[TaskStatusUpdateEvent, None]:
         """Resubscribe to task - not supported."""
-        raise UnsupportedOperationError("Task operations are not supported")
+        raise ServerError(error=UnsupportedOperationError())
         yield  # Make this an async generator
 
     # Push notification methods (not supported by default)
@@ -122,7 +124,7 @@ class AdapterRequestHandler(RequestHandler):
         context: ServerCallContext
     ) -> SetTaskPushNotificationConfigResponse:
         """Set push notification config - not supported."""
-        raise UnsupportedOperationError("Push notifications are not supported")
+        raise ServerError(error=UnsupportedOperationError())
 
     async def on_get_task_push_notification_config(
         self,
@@ -130,7 +132,7 @@ class AdapterRequestHandler(RequestHandler):
         context: ServerCallContext
     ) -> GetTaskPushNotificationConfigResponse:
         """Get push notification config - not supported."""
-        raise UnsupportedOperationError("Push notifications are not supported")
+        raise ServerError(error=UnsupportedOperationError())
 
     async def on_list_task_push_notification_config(
         self,
@@ -138,7 +140,7 @@ class AdapterRequestHandler(RequestHandler):
         context: ServerCallContext
     ) -> ListTaskPushNotificationConfigResponse:
         """List push notification configs - not supported."""
-        raise UnsupportedOperationError("Push notifications are not supported")
+        raise ServerError(error=UnsupportedOperationError())
 
     async def on_delete_task_push_notification_config(
         self,
@@ -146,7 +148,7 @@ class AdapterRequestHandler(RequestHandler):
         context: ServerCallContext
     ) -> DeleteTaskPushNotificationConfigResponse:
         """Delete push notification config - not supported."""
-        raise UnsupportedOperationError("Push notifications are not supported")
+        raise ServerError(error=UnsupportedOperationError())
 
 
 def build_agent_app(
@@ -168,7 +170,7 @@ def build_agent_app(
         
     Example:
         >>> from a2a.types import AgentCard
-        >>> from a2a_adapters.integrations.n8n import N8nAgentAdapter
+        >>> from a2a_adapter.integrations.n8n import N8nAgentAdapter
         >>> 
         >>> card = AgentCard(
         ...     name="Math Agent",
@@ -212,7 +214,7 @@ def serve_agent(
 
     Example:
         >>> from a2a.types import AgentCard
-        >>> from a2a_adapters import load_a2a_agent, serve_agent
+        >>> from a2a_adapter import load_a2a_agent, serve_agent
         >>>
         >>> adapter = await load_a2a_agent({
         ...     "adapter": "n8n",
@@ -224,7 +226,6 @@ def serve_agent(
     app = build_agent_app(agent_card, adapter)
 
     # Use uvicorn.run directly (not inside asyncio.run context)
-    import uvicorn
     uvicorn.run(
         app,
         host=host,

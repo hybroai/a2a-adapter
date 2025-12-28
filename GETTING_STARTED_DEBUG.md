@@ -17,7 +17,7 @@ Complete environment setup and run your first debug test in 5 minutes.
 ### Method 1: Automatic Setup (Recommended)
 
 ```bash
-cd "/Users/caijiangnan/Desktop/HYBRO AI/multiple-agents/hybro open source/a2a-adapters"
+cd "/Users/caijiangnan/Desktop/HYBRO AI/multiple-agents/hybro open source/a2a-adapter"
 
 # Run setup script
 ./setup_dev.sh
@@ -32,7 +32,7 @@ This script will automatically:
 ### Method 2: Manual Setup
 
 ```bash
-cd "/Users/caijiangnan/Desktop/HYBRO AI/multiple-agents/hybro open source/a2a-adapters"
+cd "/Users/caijiangnan/Desktop/HYBRO AI/multiple-agents/hybro open source/a2a-adapter"
 
 # Create virtual environment
 python3 -m venv venv
@@ -44,7 +44,7 @@ source venv/bin/activate
 pip install -e ".[dev]"
 
 # Verify installation
-python -c "import a2a_adapters; print('✅ Installation successful!')"
+python -c "import a2a_adapter; print('✅ Installation successful!')"
 ```
 
 ## 🧪 Step 2: Run Your First Test
@@ -106,7 +106,7 @@ python examples/04_single_agent_client.py
 ## 🔍 Step 4: Debug with VS Code
 
 1. Open project in VS Code
-2. Set breakpoint in `a2a_adapters/adapter.py`
+2. Set breakpoint in `a2a_adapter/adapter.py`
 3. Press F5 to start debugging
 4. Select "🧪 Debug: Simple Test"
 

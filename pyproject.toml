@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "a2a-adapters"
+name = "a2a-adapter"
 version = "0.1.0"
 description = "A2A Protocol Adapter SDK for integrating various agent frameworks"
 readme = "README.md"
@@ -49,12 +49,12 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hybro-ai/a2a-adapters"
-Documentation = "https://github.com/hybro-ai/a2a-adapters#readme"
-Repository = "https://github.com/hybro-ai/a2a-adapters"
+Homepage = "https://github.com/hybro-ai/a2a-adapter"
+Documentation = "https://github.com/hybro-ai/a2a-adapter#readme"
+Repository = "https://github.com/hybro-ai/a2a-adapter"
 
 [tool.setuptools]
-packages = ["a2a_adapters", "a2a_adapters.integrations"]
+packages = ["a2a_adapter", "a2a_adapter.integrations"]
 
 [tool.black]
 line-length = 100

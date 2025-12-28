@@ -17,8 +17,8 @@ python3 --version
 
 # Check if package is installed
 echo "Checking package installation..."
-python3 -c "import a2a_adapters; print('✓ a2a_adapters installed')" 2>/dev/null || {
-    echo "❌ a2a_adapters not installed, please run:"
+python3 -c "import a2a_adapter; print('✓ a2a_adapter installed')" 2>/dev/null || {
+    echo "❌ a2a_adapter not installed, please run:"
     echo "  source .venv/bin/activate && pip install -e ."
     exit 1
 }

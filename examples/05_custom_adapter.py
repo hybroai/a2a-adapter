@@ -14,7 +14,7 @@ Usage:
 import asyncio
 from typing import Any, Dict
 
-from a2a_adapters import BaseAgentAdapter, load_a2a_agent, serve_agent
+from a2a_adapter import BaseAgentAdapter, load_a2a_agent, serve_agent
 from a2a.types import AgentCard, AgentCapabilities, Message, MessageSendParams, TextPart
 
 

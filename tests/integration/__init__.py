@@ -1,4 +1,4 @@
 """
-Integration tests for a2a-adapters.
+Integration tests for a2a-adapter.
 """
 
