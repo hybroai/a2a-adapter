@@ -412,14 +412,11 @@ Check if this adapter supports streaming responses.
 
 ## Framework Support
 
-| Framework           | Adapter                 | Streaming   | Status     |
-| ------------------- | ----------------------- | ----------- | ---------- |
-| **n8n**             | `N8nAgentAdapter`       | ❌          | ✅ Stable  |
-| **CrewAI**          | `CrewAIAgentAdapter`    | ❌          | ✅ Stable  |
-| **LangChain**       | `LangChainAgentAdapter` | ✅          | ✅ Stable  |
-| **Custom Function** | `CallableAgentAdapter`  | ✅ Optional | ✅ Stable  |
-| **AutoGen**         | -                       | -           | 🔜 Planned |
-| **Semantic Kernel** | -                       | -           | 🔜 Planned |
+| Framework     | Adapter                 | Non-Streaming | Streaming  | Status     |
+| ------------- | ----------------------- | ------------- | ---------- | ---------- |
+| **n8n**       | `N8nAgentAdapter`       | ✅            | 🔜 Planned | ✅ Stable  |
+| **CrewAI**    | `CrewAIAgentAdapter`    | 🔜 Planned    | 🔜 Planned | 🔜 Planned |
+| **LangChain** | `LangChainAgentAdapter` | 🔜 Planned    | 🔜 Planned | 🔜 Planned |
 
 ## 🤝 Contributing
 
@@ -447,10 +444,10 @@ We welcome contributions from the community! Whether you're fixing bugs, adding 
 
 - [x] Core adapter abstraction
 - [x] N8n adapter
-- [x] CrewAI adapter
-- [x] LangChain adapter with streaming
-- [x] Callable adapter
-- [x] Comprehensive examples
+- [ ] CrewAI adapter
+- [ ] LangChain adapter with streaming
+- [ ] Callable adapter
+- [ ] Comprehensive examples
 - [ ] Task support (async execution pattern)
 - [ ] Artifact support (file uploads/downloads)
 - [ ] AutoGen adapter
