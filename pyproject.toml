@@ -7,7 +7,7 @@ name = "a2a-adapter"
 version = "0.1.2"
 description = "A2A Protocol Adapter SDK for integrating various agent frameworks"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 authors = [
     {name = "HYBRO AI", email = "info@hybro.ai"}
 ]
@@ -15,7 +15,7 @@ requires-python = ">=3.11"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache-2.0 License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
