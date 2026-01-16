@@ -16,6 +16,10 @@ A Python SDK that enables seamless integration of various agent frameworks (n8n,
 - 🌊 **Streaming support** - Built-in streaming for real-time responses
 - 🎯 **Production ready** - Type-safe, well-tested, and actively maintained
 
+**▶️ Demo: n8n → A2A Agent**
+
+[![A2A Adapter Demo](https://img.youtube.com/vi/rHWi7tLQ444/0.jpg)](https://youtu.be/rHWi7tLQ444)
+
 ## Features
 
 ✨ **Framework Agnostic**: Integrate n8n workflows, CrewAI crews, LangChain chains, and more
