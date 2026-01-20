@@ -7,12 +7,12 @@
 
 **🚀 Open Source A2A Protocol Adapter SDK - Make Any Agent Framework A2A-Compatible in 3 Lines**
 
-A Python SDK that enables seamless integration of various agent frameworks (n8n, CrewAI, LangChain, etc.) with the [A2A (Agent-to-Agent) Protocol](https://github.com/a2aproject/A2A). Build interoperable AI agent systems that can communicate across different platforms and frameworks.
+A Python SDK that enables seamless integration of various agent frameworks (n8n, LangGraph, CrewAI, LangChain, etc.) with the [A2A (Agent-to-Agent) Protocol](https://github.com/a2aproject/A2A). Build interoperable AI agent systems that can communicate across different platforms and frameworks.
 
 **✨ Key Benefits:**
 
 - 🔌 **3-line setup** - Expose any agent as A2A-compliant
-- 🌐 **Framework agnostic** - Works with n8n, CrewAI, LangChain, and more
+- 🌐 **Framework agnostic** - Works with n8n, LangGraph, CrewAI, LangChain, and more
 - 🌊 **Streaming support** - Built-in streaming for real-time responses
 - 🎯 **Production ready** - Type-safe, well-tested, and actively maintained
 
@@ -22,9 +22,9 @@ A Python SDK that enables seamless integration of various agent frameworks (n8n,
 
 ## Features
 
-✨ **Framework Agnostic**: Integrate n8n workflows, CrewAI crews, LangChain chains, and more
+✨ **Framework Agnostic**: Integrate n8n workflows, LangGraph workflows, CrewAI crews, LangChain chains, and more
 🔌 **Simple API**: 3-line setup to expose any agent as A2A-compliant
-🌊 **Streaming Support**: Built-in streaming for LangChain and custom adapters
+🌊 **Streaming Support**: Built-in streaming for LangGraph, LangChain, and custom adapters
 🎯 **Type Safe**: Leverages official A2A SDK types
 🔧 **Extensible**: Easy to add custom adapters for new frameworks
 📦 **Minimal Dependencies**: Optional dependencies per framework
@@ -40,9 +40,10 @@ A Python SDK that enables seamless integration of various agent frameworks (n8n,
 ┌─────────────────┐
 │  A2A Adapter    │  (This SDK)
 │   - N8n         │
+│   - LangGraph   │
 │   - CrewAI      │
 │   - LangChain   │
-│   - Custom      │
+│   - Callable    │
 └────────┬────────┘
          │
          ▼
@@ -157,6 +158,17 @@ adapter = await load_a2a_agent({
 })
 ```
 
+### LangGraph Workflow → A2A Agent (with Streaming)
+
+```python
+adapter = await load_a2a_agent({
+    "adapter": "langgraph",
+    "graph": your_compiled_graph,
+    "input_key": "messages",
+    "output_key": "output"
+})
+```
+
 ### Custom Function → A2A Agent
 
 ```python
@@ -230,9 +242,35 @@ class StreamingAdapter(BaseAgentAdapter):
         return True
 ```
 
-### Using with LangGraph
+### LangGraph Workflow as A2A Server
 
-Integrate A2A agents into LangGraph workflows:
+Expose a LangGraph workflow as an A2A server:
+
+```python
+from langgraph.graph import StateGraph, END
+
+# Build your workflow
+builder = StateGraph(YourState)
+builder.add_node("process", process_node)
+builder.set_entry_point("process")
+builder.add_edge("process", END)
+graph = builder.compile()
+
+# Expose as A2A agent
+adapter = await load_a2a_agent({
+    "adapter": "langgraph",
+    "graph": graph,
+    "input_key": "messages",
+    "output_key": "output"
+})
+serve_agent(agent_card=card, adapter=adapter, port=9002)
+```
+
+See [examples/07_langgraph_server.py](https://github.com/hybroai/a2a-adapter/blob/main/examples/07_langgraph_server.py) for complete example.
+
+### Using A2A Agents from LangGraph
+
+Call A2A agents from within a LangGraph workflow:
 
 ```python
 from langgraph.graph import StateGraph
@@ -291,6 +329,19 @@ See [examples/06_langgraph_single_agent.py](https://github.com/hybroai/a2a-adapt
 }
 ```
 
+### LangGraph Adapter
+
+```python
+{
+    "adapter": "langgraph",
+    "graph": compiled_graph,      # Required: CompiledGraph from StateGraph.compile()
+    "input_key": "messages",      # Optional, default: "messages" (for chat) or "input"
+    "output_key": None,           # Optional, extracts specific key from final state
+    "async_mode": False,          # Optional, enables async task execution
+    "async_timeout": 300          # Optional, timeout for async mode (default: 300s)
+}
+```
+
 ### Callable Adapter
 
 ```python
@@ -310,7 +361,8 @@ The `examples/` directory contains complete working examples:
 - **03_single_langchain_agent.py** - LangChain streaming agent
 - **04_single_agent_client.py** - A2A client for testing
 - **05_custom_adapter.py** - Custom adapter implementations
-- **06_langgraph_single_agent.py** - LangGraph + A2A integration
+- **06_langgraph_single_agent.py** - Calling A2A agents from LangGraph
+- **07_langgraph_server.py** - LangGraph workflow as A2A server
 
 Run any example:
 
@@ -416,11 +468,13 @@ Check if this adapter supports streaming responses.
 
 ## Framework Support
 
-| Framework     | Adapter                 | Non-Streaming | Streaming  | Status     |
-| ------------- | ----------------------- | ------------- | ---------- | ---------- |
-| **n8n**       | `N8nAgentAdapter`       | ✅            | 🔜 Planned | ✅ Stable  |
-| **CrewAI**    | `CrewAIAgentAdapter`    | 🔜 Planned    | 🔜 Planned | 🔜 Planned |
-| **LangChain** | `LangChainAgentAdapter` | 🔜 Planned    | 🔜 Planned | 🔜 Planned |
+| Framework     | Adapter                  | Non-Streaming | Streaming | Async Tasks | Status    |
+| ------------- | ------------------------ | ------------- | --------- | ----------- | --------- |
+| **n8n**       | `N8nAgentAdapter`        | ✅            | ❌        | ✅          | ✅ Stable |
+| **LangGraph** | `LangGraphAgentAdapter`  | ✅            | ✅        | ✅          | ✅ Stable |
+| **CrewAI**    | `CrewAIAgentAdapter`     | ✅            | ❌        | ✅          | ✅ Stable |
+| **LangChain** | `LangChainAgentAdapter`  | ✅            | ✅        | ❌          | ✅ Stable |
+| **Callable**  | `CallableAgentAdapter`   | ✅            | ✅        | ❌          | ✅ Stable |
 
 ## 🤝 Contributing
 
@@ -447,12 +501,13 @@ We welcome contributions from the community! Whether you're fixing bugs, adding 
 ## Roadmap
 
 - [x] Core adapter abstraction
-- [x] N8n adapter
-- [ ] CrewAI adapter
-- [ ] LangChain adapter with streaming
-- [ ] Callable adapter
-- [ ] Comprehensive examples
-- [ ] Task support (async execution pattern)
+- [x] N8n adapter (with async task support)
+- [x] LangGraph adapter (with streaming and async tasks)
+- [x] CrewAI adapter (with async task support)
+- [x] LangChain adapter (with streaming)
+- [x] Callable adapter (with streaming)
+- [x] Comprehensive examples
+- [x] Task support (async execution pattern)
 - [ ] Artifact support (file uploads/downloads)
 - [ ] AutoGen adapter
 - [ ] Semantic Kernel adapter

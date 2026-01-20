@@ -38,7 +38,8 @@ export N8N_WEBHOOK_URL="https://your-n8n-instance.com/webhook/agent"
 | `03_single_langchain_agent.py` | LangChain chat agent | 8002 | LangChain | ✅ |
 | `04_single_agent_client.py` | A2A client for testing | - | A2A SDK | - |
 | `05_custom_adapter.py` | Custom adapter examples | 8003 | Custom | ❌ |
-| `06_langgraph_single_agent.py` | LangGraph + A2A integration | - | LangGraph | - |
+| `06_langgraph_single_agent.py` | Call A2A agents from LangGraph | - | LangGraph | - |
+| `07_langgraph_server.py` | LangGraph workflow as A2A server | 9002 | LangGraph | ✅ |
 
 ## Running Examples
 
@@ -121,7 +122,7 @@ Choose between:
 1. **Subclassing BaseAgentAdapter** - Full control
 2. **Using CallableAgentAdapter** - Simpler approach
 
-### Example 6: LangGraph Integration
+### Example 6: Call A2A Agents from LangGraph
 
 Use A2A agents within a LangGraph workflow:
 
@@ -137,6 +138,29 @@ This demonstrates how to:
 - Call A2A agents from LangGraph nodes
 - Conditionally route to different agents
 - Compose multiple agents in a workflow
+
+### Example 7: LangGraph Workflow as A2A Server
+
+Expose a LangGraph workflow as an A2A-compliant server:
+
+```bash
+# Set OpenAI API key (optional, for LLM version)
+export OPENAI_API_KEY="your-key"
+
+# Start the LangGraph A2A server
+python examples/07_langgraph_server.py
+
+# Or with real LLM integration
+USE_LLM=true python examples/07_langgraph_server.py
+```
+
+The research agent will be available at `http://localhost:9002` with streaming support.
+
+This demonstrates how to:
+- Wrap LangGraph workflows as A2A servers
+- Support streaming responses
+- Handle both simple and chat-style inputs
+- Extract output from workflow state
 
 ## Testing Your Agents
 

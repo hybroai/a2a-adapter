@@ -6,18 +6,51 @@ agent, providing maximum flexibility for custom implementations.
 """
 
 import json
+import logging
+import uuid
 from typing import Any, AsyncIterator, Callable, Dict
 
-from a2a.types import Message, MessageSendParams, Task, TextPart
+from a2a.types import (
+    Message,
+    MessageSendParams,
+    Task,
+    TextPart,
+    Role,
+    Part,
+)
+from ..adapter import BaseAgentAdapter
+
+logger = logging.getLogger(__name__)
 
 
-class CallableAgentAdapter:
+class CallableAgentAdapter(BaseAgentAdapter):
     """
     Adapter for integrating custom async functions as A2A agents.
-    
+
     This adapter wraps any async callable (function, coroutine) and handles
     the A2A protocol translation. The callable should accept a dictionary
     input and return either a string or dictionary output.
+
+    For streaming support, the callable should be an async generator that
+    yields string chunks.
+
+    Example (non-streaming):
+        >>> async def my_agent(inputs: dict) -> str:
+        ...     message = inputs["message"]
+        ...     return f"Processed: {message}"
+        >>>
+        >>> adapter = CallableAgentAdapter(func=my_agent)
+
+    Example (streaming):
+        >>> async def my_streaming_agent(inputs: dict):
+        ...     message = inputs["message"]
+        ...     for word in message.split():
+        ...         yield word + " "
+        >>>
+        >>> adapter = CallableAgentAdapter(
+        ...     func=my_streaming_agent,
+        ...     supports_streaming=True
+        ... )
     """
 
     def __init__(
@@ -27,7 +60,7 @@ class CallableAgentAdapter:
     ):
         """
         Initialize the callable adapter.
-        
+
         Args:
             func: An async callable that processes the agent logic.
                   For non-streaming: Should accept Dict[str, Any] and return str or Dict.
@@ -37,34 +70,185 @@ class CallableAgentAdapter:
         self.func = func
         self._supports_streaming = supports_streaming
 
-    async def handle(self, params: MessageSendParams) -> Message | Task:
-        """Handle a non-streaming A2A message request."""
-        framework_input = await self.to_framework(params)
-        framework_output = await self.call_framework(framework_input, params)
-        return await self.from_framework(framework_output, params)
+    # ---------- Input mapping ----------
+
+    async def to_framework(self, params: MessageSendParams) -> Dict[str, Any]:
+        """
+        Convert A2A message parameters to a dictionary for the callable.
+
+        Extracts the user's message and relevant metadata.
+
+        Args:
+            params: A2A message parameters
+
+        Returns:
+            Dictionary with input data for the callable
+        """
+        user_message = ""
+
+        # Extract message from A2A params (new format with message.parts)
+        if hasattr(params, "message") and params.message:
+            msg = params.message
+            if hasattr(msg, "parts") and msg.parts:
+                text_parts = []
+                for part in msg.parts:
+                    # Handle Part(root=TextPart(...)) structure
+                    if hasattr(part, "root") and hasattr(part.root, "text"):
+                        text_parts.append(part.root.text)
+                    # Handle direct TextPart
+                    elif hasattr(part, "text"):
+                        text_parts.append(part.text)
+                user_message = self._join_text_parts(text_parts)
+
+        # Legacy support for messages array (deprecated)
+        elif getattr(params, "messages", None):
+            last = params.messages[-1]
+            content = getattr(last, "content", "")
+            if isinstance(content, str):
+                user_message = content.strip()
+            elif isinstance(content, list):
+                text_parts = []
+                for item in content:
+                    txt = getattr(item, "text", None)
+                    if txt and isinstance(txt, str) and txt.strip():
+                        text_parts.append(txt.strip())
+                user_message = self._join_text_parts(text_parts)
+
+        # Extract metadata
+        context_id = self._extract_context_id(params)
+
+        # Build input dictionary with useful fields
+        return {
+            "message": user_message,
+            "context_id": context_id,
+            "params": params,  # Full params for advanced use cases
+        }
+
+    @staticmethod
+    def _join_text_parts(parts: list[str]) -> str:
+        """Join text parts into a single string."""
+        if not parts:
+            return ""
+        text = " ".join(p.strip() for p in parts if p)
+        return text.strip()
+
+    def _extract_context_id(self, params: MessageSendParams) -> str | None:
+        """Extract context_id from MessageSendParams."""
+        if hasattr(params, "message") and params.message:
+            return getattr(params.message, "context_id", None)
+        return None
+
+    # ---------- Framework call ----------
+
+    async def call_framework(
+        self, framework_input: Dict[str, Any], params: MessageSendParams
+    ) -> Any:
+        """
+        Execute the callable function with the provided input.
+
+        Args:
+            framework_input: Input dictionary for the function
+            params: Original A2A parameters (for context)
+
+        Returns:
+            Function execution output
+
+        Raises:
+            Exception: If function execution fails
+        """
+        logger.debug("Invoking callable with input keys: %s", list(framework_input.keys()))
+        result = await self.func(framework_input)
+        logger.debug("Callable returned: %s", type(result).__name__)
+        return result
+
+    # ---------- Output mapping ----------
+
+    async def from_framework(
+        self, framework_output: Any, params: MessageSendParams
+    ) -> Message | Task:
+        """
+        Convert callable output to A2A Message.
+
+        Args:
+            framework_output: Output from the callable
+            params: Original A2A parameters
+
+        Returns:
+            A2A Message with the function's response
+        """
+        response_text = self._extract_output_text(framework_output)
+        context_id = self._extract_context_id(params)
+
+        return Message(
+            role=Role.agent,
+            message_id=str(uuid.uuid4()),
+            context_id=context_id,
+            parts=[Part(root=TextPart(text=response_text))],
+        )
+
+    def _extract_output_text(self, framework_output: Any) -> str:
+        """
+        Extract text content from callable output.
+
+        Args:
+            framework_output: Output from the callable
+
+        Returns:
+            Extracted text string
+        """
+        # Dictionary output
+        if isinstance(framework_output, dict):
+            # Try common output keys
+            for key in ["response", "output", "result", "answer", "text", "message"]:
+                if key in framework_output:
+                    return str(framework_output[key])
+            # Fallback: serialize as JSON
+            return json.dumps(framework_output, indent=2)
+
+        # String or other type - convert to string
+        return str(framework_output)
+
+    # ---------- Streaming support ----------
 
     async def handle_stream(
         self, params: MessageSendParams
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         Handle a streaming A2A message request.
-        
+
         The wrapped function must be an async generator for streaming to work.
+
+        Args:
+            params: A2A message parameters
+
+        Yields:
+            Server-Sent Events compatible dictionaries with streaming chunks
+
+        Raises:
+            NotImplementedError: If streaming is not enabled for this adapter
         """
         if not self._supports_streaming:
             raise NotImplementedError(
-                "CallableAgentAdapter: streaming not enabled for this function"
+                "CallableAgentAdapter: streaming not enabled for this function. "
+                "Initialize with supports_streaming=True and provide an async generator."
             )
 
         framework_input = await self.to_framework(params)
+        context_id = self._extract_context_id(params)
+        message_id = str(uuid.uuid4())
+
+        logger.debug("Starting streaming call")
+
+        accumulated_text = ""
 
         # Call the async generator function
         async for chunk in self.func(framework_input):
             # Convert chunk to string if needed
             text = str(chunk) if not isinstance(chunk, str) else chunk
 
-            # Yield SSE-compatible event
             if text:
+                accumulated_text += text
+                # Yield SSE-compatible event
                 yield {
                     "event": "message",
                     "data": json.dumps({
@@ -73,100 +257,30 @@ class CallableAgentAdapter:
                     }),
                 }
 
+        # Send final message with complete response
+        final_message = Message(
+            role=Role.agent,
+            message_id=message_id,
+            context_id=context_id,
+            parts=[Part(root=TextPart(text=accumulated_text))],
+        )
+
         # Send completion event
         yield {
             "event": "done",
-            "data": json.dumps({"status": "completed"}),
+            "data": json.dumps({
+                "status": "completed",
+                "message": final_message.model_dump() if hasattr(final_message, "model_dump") else str(final_message),
+            }),
         }
 
+        logger.debug("Streaming call completed")
+
     def supports_streaming(self) -> bool:
-        """Check if this adapter supports streaming."""
+        """
+        Check if this adapter supports streaming.
+
+        Returns:
+            True if streaming is enabled, False otherwise
+        """
         return self._supports_streaming
-
-    async def to_framework(self, params: MessageSendParams) -> Dict[str, Any]:
-        """
-        Convert A2A message parameters to a dictionary for the callable.
-        
-        Args:
-            params: A2A message parameters
-            
-        Returns:
-            Dictionary with input data for the callable
-        """
-        # Extract text from the last user message
-        user_message = ""
-        if params.messages:
-            last_message = params.messages[-1]
-            if hasattr(last_message, "content"):
-                if isinstance(last_message.content, list):
-                    # Extract text from content blocks
-                    text_parts = [
-                        item.text
-                        for item in last_message.content
-                        if hasattr(item, "text")
-                    ]
-                    user_message = " ".join(text_parts)
-                elif isinstance(last_message.content, str):
-                    user_message = last_message.content
-
-        # Build input dictionary
-        return {
-            "message": user_message,
-            "messages": params.messages,
-            "session_id": getattr(params, "session_id", None),
-            "context": getattr(params, "context", None),
-        }
-
-    async def call_framework(
-        self, framework_input: Dict[str, Any], params: MessageSendParams
-    ) -> Any:
-        """
-        Execute the callable function with the provided input.
-        
-        Args:
-            framework_input: Input dictionary for the function
-            params: Original A2A parameters (for context)
-            
-        Returns:
-            Function execution output
-            
-        Raises:
-            Exception: If function execution fails
-        """
-        result = await self.func(framework_input)
-        return result
-
-    async def from_framework(
-        self, framework_output: Any, params: MessageSendParams
-    ) -> Message | Task:
-        """
-        Convert callable output to A2A Message.
-        
-        Args:
-            framework_output: Output from the callable
-            params: Original A2A parameters
-            
-        Returns:
-            A2A Message with the function's response
-        """
-        # Convert output to string
-        if isinstance(framework_output, dict):
-            # If output has a 'response' or 'output' key, use that
-            if "response" in framework_output:
-                response_text = str(framework_output["response"])
-            elif "output" in framework_output:
-                response_text = str(framework_output["output"])
-            else:
-                response_text = json.dumps(framework_output, indent=2)
-        else:
-            response_text = str(framework_output)
-
-        return Message(
-            role="assistant",
-            content=[TextPart(type="text", text=response_text)],
-        )
-
-    def supports_streaming(self) -> bool:
-        """Check if this adapter supports streaming responses."""
-        return False
-

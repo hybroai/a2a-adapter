@@ -1,11 +1,11 @@
 """
-CrewAI adapter for A2A Protocol.
+LangGraph adapter for A2A Protocol.
 
-This adapter enables CrewAI crews to be exposed as A2A-compliant agents
-by translating A2A messages to crew inputs and crew outputs back to A2A.
+This adapter enables LangGraph compiled workflows to be exposed as A2A-compliant
+agents with support for both streaming and non-streaming modes.
 
 Supports two modes:
-- Synchronous (default): Blocks until crew completes, returns Message
+- Synchronous (default): Blocks until workflow completes, returns Message
 - Async Task Mode: Returns Task immediately, processes in background, supports polling
 """
 
@@ -14,7 +14,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, AsyncIterator, Dict
 
 from a2a.types import (
     Message,
@@ -40,58 +40,83 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-class CrewAIAgentAdapter(BaseAgentAdapter):
+class LangGraphAgentAdapter(BaseAgentAdapter):
     """
-    Adapter for integrating CrewAI crews as A2A agents.
+    Adapter for integrating LangGraph compiled workflows as A2A agents.
 
-    This adapter handles the translation between A2A protocol messages
-    and CrewAI's crew execution model.
+    This adapter works with LangGraph's CompiledGraph objects (the result of
+    calling .compile() on a StateGraph) and supports both streaming and
+    non-streaming execution modes.
 
-    Supports two execution modes:
+    Supports three execution patterns:
 
     1. **Synchronous Mode** (default):
-       - Blocks until the crew completes execution
-       - Returns a Message with the crew result
-       - Best for quick crews (< 30 seconds)
+       - Blocks until the workflow completes
+       - Returns a Message with the final result
+       - Best for quick workflows (< 30 seconds)
 
-    2. **Async Task Mode** (async_mode=True):
+    2. **Streaming Mode**:
+       - Streams intermediate results as they're produced
+       - Uses LangGraph's astream() method
+       - Best for real-time feedback during execution
+
+    3. **Async Task Mode** (async_mode=True):
        - Returns a Task with state="working" immediately
-       - Processes the crew execution in the background
+       - Processes the workflow in the background
        - Clients can poll get_task() for status updates
-       - Best for long-running crews
+       - Best for long-running workflows
 
     Example:
-        >>> from crewai import Crew, Agent, Task as CrewTask
+        >>> from langgraph.graph import StateGraph
+        >>> from typing import TypedDict
         >>>
-        >>> researcher = Agent(role="Researcher", ...)
-        >>> task = CrewTask(description="Research topic", agent=researcher)
-        >>> crew = Crew(agents=[researcher], tasks=[task])
+        >>> class State(TypedDict):
+        ...     messages: list
+        ...     output: str
         >>>
-        >>> adapter = CrewAIAgentAdapter(crew=crew)
+        >>> def process(state: State) -> State:
+        ...     return {"output": f"Processed: {state['messages'][-1]}"}
+        >>>
+        >>> builder = StateGraph(State)
+        >>> builder.add_node("process", process)
+        >>> builder.set_entry_point("process")
+        >>> builder.set_finish_point("process")
+        >>> graph = builder.compile()
+        >>>
+        >>> adapter = LangGraphAgentAdapter(graph=graph)
     """
 
     def __init__(
         self,
-        crew: Any,  # Type: crewai.Crew (avoiding hard dependency)
-        inputs_key: str = "inputs",
+        graph: Any,  # Type: CompiledGraph (avoiding hard dependency)
+        input_key: str = "messages",
+        output_key: str | None = None,
+        state_key: str | None = None,
         async_mode: bool = False,
         task_store: "TaskStore | None" = None,
-        async_timeout: int = 600,  # 10 minutes default for crews
+        async_timeout: int = 300,
     ):
         """
-        Initialize the CrewAI adapter.
+        Initialize the LangGraph adapter.
 
         Args:
-            crew: A CrewAI Crew instance to execute
-            inputs_key: The key name for passing inputs to the crew (default: "inputs")
+            graph: A LangGraph CompiledGraph instance (result of StateGraph.compile())
+            input_key: The key in the state dict for input messages (default: "messages").
+                       Set to "input" for simple string input workflows.
+            output_key: Optional key to extract from final state. If None, the adapter
+                        will try common keys like "output", "response", "messages".
+            state_key: Optional key to use when extracting state for streaming events.
+                       If None, uses output_key or auto-detection.
             async_mode: If True, return Task immediately and process in background.
-                        If False (default), block until crew completes.
+                        If False (default), block until workflow completes.
             task_store: Optional TaskStore for persisting task state. If not provided
                         and async_mode is True, uses InMemoryTaskStore.
-            async_timeout: Timeout for async task execution in seconds (default: 600).
+            async_timeout: Timeout for async task execution in seconds (default: 300).
         """
-        self.crew = crew
-        self.inputs_key = inputs_key
+        self.graph = graph
+        self.input_key = input_key
+        self.output_key = output_key
+        self.state_key = state_key or output_key
 
         # Async task mode configuration
         self.async_mode = async_mode
@@ -114,7 +139,7 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
         """
         Handle a non-streaming A2A message request.
 
-        In sync mode (default): Blocks until crew completes, returns Message.
+        In sync mode (default): Blocks until workflow completes, returns Message.
         In async mode: Returns Task immediately, processes in background.
         """
         if self.async_mode:
@@ -123,7 +148,7 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
             return await self._handle_sync(params)
 
     async def _handle_sync(self, params: MessageSendParams) -> Message:
-        """Handle request synchronously - blocks until crew completes."""
+        """Handle request synchronously - blocks until workflow completes."""
         framework_input = await self.to_framework(params)
         framework_output = await self.call_framework(framework_input, params)
         result = await self.from_framework(framework_output, params)
@@ -136,7 +161,7 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
                 role=Role.agent,
                 message_id=str(uuid.uuid4()),
                 context_id=result.context_id,
-                parts=[Part(root=TextPart(text="Crew completed"))],
+                parts=[Part(root=TextPart(text="Workflow completed"))],
             )
         return result
 
@@ -171,7 +196,7 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
 
         # Start background processing with timeout
         bg_task = asyncio.create_task(
-            self._execute_crew_with_timeout(task_id, context_id, params)
+            self._execute_workflow_with_timeout(task_id, context_id, params)
         )
         self._background_tasks[task_id] = bg_task
 
@@ -192,16 +217,16 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
 
         return task
 
-    async def _execute_crew_with_timeout(
+    async def _execute_workflow_with_timeout(
         self,
         task_id: str,
         context_id: str,
         params: MessageSendParams,
     ) -> None:
-        """Execute the crew with a timeout wrapper."""
+        """Execute the workflow with a timeout wrapper."""
         try:
             await asyncio.wait_for(
-                self._execute_crew_background(task_id, context_id, params),
+                self._execute_workflow_background(task_id, context_id, params),
                 timeout=self.async_timeout,
             )
         except asyncio.TimeoutError:
@@ -215,7 +240,7 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
                 role=Role.agent,
                 message_id=str(uuid.uuid4()),
                 context_id=context_id,
-                parts=[Part(root=TextPart(text=f"Crew timed out after {self.async_timeout} seconds"))],
+                parts=[Part(root=TextPart(text=f"Workflow timed out after {self.async_timeout} seconds"))],
             )
 
             timeout_task = Task(
@@ -229,17 +254,17 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
             )
             await self.task_store.save(timeout_task)
 
-    async def _execute_crew_background(
+    async def _execute_workflow_background(
         self,
         task_id: str,
         context_id: str,
         params: MessageSendParams,
     ) -> None:
-        """Execute the CrewAI crew in the background and update task state."""
+        """Execute the LangGraph workflow in the background and update task state."""
         try:
             logger.debug("Starting background execution for task %s", task_id)
 
-            # Execute the crew
+            # Execute the workflow
             framework_input = await self.to_framework(params)
             framework_output = await self.call_framework(framework_input, params)
 
@@ -294,7 +319,7 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
                 role=Role.agent,
                 message_id=str(uuid.uuid4()),
                 context_id=context_id,
-                parts=[Part(root=TextPart(text=f"Crew failed: {str(e)}"))],
+                parts=[Part(root=TextPart(text=f"Workflow failed: {str(e)}"))],
             )
 
             failed_task = Task(
@@ -313,15 +338,17 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
 
     async def to_framework(self, params: MessageSendParams) -> Dict[str, Any]:
         """
-        Convert A2A message parameters to CrewAI crew inputs.
+        Convert A2A message parameters to LangGraph state input.
 
-        Extracts the user's message and prepares it as input for the crew.
+        Supports two common input patterns:
+        1. Messages-based: {"messages": [{"role": "user", "content": "..."}]}
+        2. Simple input: {"input": "user message text"}
 
         Args:
             params: A2A message parameters
 
         Returns:
-            Dictionary with crew input data
+            Dictionary with graph state input
         """
         user_message = ""
 
@@ -353,16 +380,19 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
                         text_parts.append(txt.strip())
                 user_message = self._join_text_parts(text_parts)
 
-        # Extract context_id from the message
-        context_id = self._extract_context_id(params)
-
-        # Build crew inputs
-        # CrewAI typically expects a dict with task-specific keys
-        return {
-            self.inputs_key: user_message,
-            "message": user_message,
-            "context_id": context_id,
-        }
+        # Build graph input based on input_key
+        if self.input_key == "messages":
+            # LangGraph message format (for chat-like workflows)
+            # Try to use LangChain message format if available
+            try:
+                from langchain_core.messages import HumanMessage
+                return {"messages": [HumanMessage(content=user_message)]}
+            except ImportError:
+                # Fallback to dict format
+                return {"messages": [{"role": "user", "content": user_message}]}
+        else:
+            # Simple input key (e.g., "input", "query", etc.)
+            return {self.input_key: user_message}
 
     @staticmethod
     def _join_text_parts(parts: list[str]) -> str:
@@ -382,51 +412,39 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
 
     async def call_framework(
         self, framework_input: Dict[str, Any], params: MessageSendParams
-    ) -> Any:
+    ) -> Dict[str, Any]:
         """
-        Execute the CrewAI crew with the provided inputs.
+        Execute the LangGraph workflow with the provided input.
 
         Args:
-            framework_input: Input dictionary for the crew
+            framework_input: Input state dictionary for the graph
             params: Original A2A parameters (for context)
 
         Returns:
-            CrewAI crew execution output
+            Final state from the graph execution
 
         Raises:
-            Exception: If crew execution fails
+            Exception: If graph execution fails
         """
-        logger.debug("Executing CrewAI crew with inputs: %s", framework_input)
-
-        # CrewAI supports async execution via kickoff_async
-        try:
-            result = await self.crew.kickoff_async(inputs=framework_input)
-            logger.debug("CrewAI crew returned: %s", type(result).__name__)
-            return result
-        except AttributeError:
-            # Fallback for older CrewAI versions without async support
-            # Note: This will block the event loop
-            logger.warning("CrewAI kickoff_async not available, using sync fallback")
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None, lambda: self.crew.kickoff(inputs=framework_input)
-            )
-            return result
+        logger.debug("Invoking LangGraph with input: %s", framework_input)
+        result = await self.graph.ainvoke(framework_input)
+        logger.debug("LangGraph returned state with keys: %s", list(result.keys()) if isinstance(result, dict) else type(result).__name__)
+        return result
 
     # ---------- Output mapping ----------
 
     async def from_framework(
-        self, framework_output: Any, params: MessageSendParams
+        self, framework_output: Dict[str, Any], params: MessageSendParams
     ) -> Message | Task:
         """
-        Convert CrewAI crew output to A2A Message.
+        Convert LangGraph final state to A2A Message.
 
         Args:
-            framework_output: Output from crew execution
+            framework_output: Final state from graph execution
             params: Original A2A parameters
 
         Returns:
-            A2A Message with the crew's response
+            A2A Message with the workflow's response
         """
         response_text = self._extract_output_text(framework_output)
         context_id = self._extract_context_id(params)
@@ -440,32 +458,192 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
 
     def _extract_output_text(self, framework_output: Any) -> str:
         """
-        Extract text content from CrewAI output.
+        Extract text content from LangGraph state.
+
+        Handles various output patterns:
+        - output_key specified: extract that key
+        - "messages" key: extract last message content
+        - Common keys: "output", "response", "result", "answer"
 
         Args:
-            framework_output: Output from the crew
+            framework_output: Final state from the graph
 
         Returns:
             Extracted text string
         """
-        # CrewOutput object with raw attribute
-        if hasattr(framework_output, "raw"):
-            return str(framework_output.raw)
+        if not isinstance(framework_output, dict):
+            return str(framework_output)
 
-        # CrewOutput object with result attribute
-        if hasattr(framework_output, "result"):
-            return str(framework_output.result)
+        # Use output_key if specified
+        if self.output_key and self.output_key in framework_output:
+            return self._extract_value_text(framework_output[self.output_key])
 
-        # Dictionary output
-        if isinstance(framework_output, dict):
-            for key in ["output", "result", "response", "answer", "text"]:
-                if key in framework_output:
-                    return str(framework_output[key])
-            # Fallback: serialize as JSON
-            return json.dumps(framework_output, indent=2)
+        # Try "messages" key (common in chat workflows)
+        if "messages" in framework_output:
+            messages = framework_output["messages"]
+            if messages and len(messages) > 0:
+                last_message = messages[-1]
+                return self._extract_message_content(last_message)
 
-        # String or other type - convert to string
-        return str(framework_output)
+        # Try common output keys
+        for key in ["output", "response", "result", "answer", "text", "content"]:
+            if key in framework_output:
+                return self._extract_value_text(framework_output[key])
+
+        # Fallback: serialize entire state (excluding internal keys)
+        clean_state = {k: v for k, v in framework_output.items() if not k.startswith("_")}
+        return json.dumps(clean_state, indent=2, default=str)
+
+    def _extract_value_text(self, value: Any) -> str:
+        """Extract text from a value (handles strings, dicts, lists)."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            # Try common text keys in dict
+            for key in ["text", "content", "output"]:
+                if key in value:
+                    return str(value[key])
+            return json.dumps(value, indent=2, default=str)
+        if isinstance(value, list):
+            # Join list items
+            return "\n".join(self._extract_value_text(item) for item in value)
+        return str(value)
+
+    def _extract_message_content(self, message: Any) -> str:
+        """Extract content from a message object (LangChain or dict)."""
+        # LangChain message with content attribute
+        if hasattr(message, "content"):
+            content = message.content
+            if isinstance(content, str):
+                return content
+            elif isinstance(content, list):
+                text_parts = []
+                for item in content:
+                    if isinstance(item, str):
+                        text_parts.append(item)
+                    elif hasattr(item, "text"):
+                        text_parts.append(item.text)
+                return " ".join(text_parts)
+            return str(content)
+
+        # Dict message
+        if isinstance(message, dict):
+            if "content" in message:
+                return str(message["content"])
+            if "text" in message:
+                return str(message["text"])
+
+        return str(message)
+
+    # ---------- Streaming support ----------
+
+    async def handle_stream(
+        self, params: MessageSendParams
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Handle a streaming A2A message request.
+
+        Uses LangGraph's astream() or astream_events() to yield intermediate
+        results as the workflow executes.
+
+        Args:
+            params: A2A message parameters
+
+        Yields:
+            Server-Sent Events compatible dictionaries with streaming chunks
+        """
+        framework_input = await self.to_framework(params)
+        context_id = self._extract_context_id(params)
+        message_id = str(uuid.uuid4())
+
+        logger.debug("Starting LangGraph stream with input: %s", framework_input)
+
+        accumulated_text = ""
+        last_state = None
+
+        # Stream from LangGraph
+        async for state in self.graph.astream(framework_input):
+            last_state = state
+
+            # Extract text from current state
+            text = self._extract_streaming_text(state)
+
+            if text and text != accumulated_text:
+                # Calculate the new chunk (delta)
+                new_content = text[len(accumulated_text):] if text.startswith(accumulated_text) else text
+                accumulated_text = text
+
+                if new_content:
+                    yield {
+                        "event": "message",
+                        "data": json.dumps({
+                            "type": "content",
+                            "content": new_content,
+                        }),
+                    }
+
+        # Use final state if we have it, otherwise use accumulated
+        final_text = self._extract_output_text(last_state) if last_state else accumulated_text
+
+        # Send final message with complete response
+        final_message = Message(
+            role=Role.agent,
+            message_id=message_id,
+            context_id=context_id,
+            parts=[Part(root=TextPart(text=final_text))],
+        )
+
+        # Send completion event
+        yield {
+            "event": "done",
+            "data": json.dumps({
+                "status": "completed",
+                "message": final_message.model_dump() if hasattr(final_message, "model_dump") else str(final_message),
+            }),
+        }
+
+        logger.debug("LangGraph stream completed")
+
+    def _extract_streaming_text(self, state: Any) -> str:
+        """
+        Extract text from intermediate streaming state.
+
+        Args:
+            state: Intermediate state from astream()
+
+        Returns:
+            Current text content
+        """
+        if not isinstance(state, dict):
+            return str(state)
+
+        # Use state_key if specified
+        if self.state_key and self.state_key in state:
+            return self._extract_value_text(state[self.state_key])
+
+        # Try messages (for chat workflows)
+        if "messages" in state:
+            messages = state["messages"]
+            if messages:
+                # Get content from last message
+                last = messages[-1]
+                return self._extract_message_content(last)
+
+        # Try common keys
+        for key in ["output", "response", "text", "content"]:
+            if key in state:
+                return self._extract_value_text(state[key])
+
+        return ""
+
+    def supports_streaming(self) -> bool:
+        """
+        Check if the graph supports streaming.
+
+        Returns:
+            True if the graph has an astream method
+        """
+        return hasattr(self.graph, "astream")
 
     # ---------- Async Task Support ----------
 
@@ -502,9 +680,6 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
     async def cancel_task(self, task_id: str) -> Task | None:
         """
         Attempt to cancel a running task.
-
-        Note: CrewAI crews cannot be gracefully interrupted once started.
-        This will mark the task as cancelled but the crew may continue running.
 
         Args:
             task_id: The ID of the task to cancel
@@ -579,7 +754,3 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
         await self.close()
-
-    def supports_streaming(self) -> bool:
-        """CrewAI does not support streaming responses."""
-        return False

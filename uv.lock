@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -18,7 +18,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/fa/4c/502dc34d0ee1f4b5f
 
 [[package]]
 name = "a2a-adapter"
-version = "0.1.0"
+version = "0.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "a2a" },

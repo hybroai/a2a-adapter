@@ -51,15 +51,18 @@ Our SDK focuses solely on **framework adaptation** — translating between A2A m
 │  ┌──────────────────────▼───────────────────────────────┐   │
 │  │            Framework Adapters (concrete)             │   │
 │  │   ┌────────────┐  ┌──────────────┐  ┌─────────────┐ │   │
-│  │   │ N8nAdapter │  │ CrewAIAdapter│  │LangChainAdap│ │   │
+│  │   │ N8nAdapter │  │LangGraphAdapt│  │ CrewAIAdapt │ │   │
 │  │   └────────────┘  └──────────────┘  └─────────────┘ │   │
+│  │   ┌────────────────┐  ┌────────────────┐            │   │
+│  │   │LangChainAdapter│  │CallableAdapter │            │   │
+│  │   └────────────────┘  └────────────────┘            │   │
 │  └──────────────────────────────────────────────────────┘   │
 └────────────────────────┬────────────────────────────────────┘
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │              Underlying Agent Implementations               │
-│             (n8n workflows / CrewAI crews / Chains)         │
+│  (n8n workflows / LangGraph graphs / CrewAI / LangChain)    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -108,8 +111,9 @@ async def load_a2a_agent(config: Dict[str, Any]) -> BaseAgentAdapter
 
 | Adapter | Required Config | Optional Config |
 |---------|----------------|-----------------|
-| `n8n` | `webhook_url` | `timeout`, `headers` |
-| `crewai` | `crew` | `inputs_key` |
+| `n8n` | `webhook_url` | `timeout`, `headers`, `async_mode`, `task_store` |
+| `langgraph` | `graph` | `input_key`, `output_key`, `async_mode`, `task_store` |
+| `crewai` | `crew` | `inputs_key`, `async_mode`, `task_store` |
 | `langchain` | `runnable` | `input_key`, `output_key` |
 | `callable` | `callable` | `supports_streaming` |
 
@@ -173,9 +177,59 @@ Bridges our `BaseAgentAdapter` with the official A2A SDK's handler interface:
 - Integrates with A2A SDK's `TaskStore` (InMemoryTaskStore or DatabaseTaskStore)
 - Task cancellation support via `cancel_task()`
 
+#### LangGraph Adapter (`langgraph.py`)
+
+**Purpose:** Expose LangGraph compiled workflows as A2A agents
+
+**Execution Modes:**
+
+1. **Synchronous Mode** (default):
+   - Blocks until workflow completes
+   - Returns A2A `Message` with final state output
+   - Best for quick workflows
+
+2. **Streaming Mode**:
+   - Uses `graph.astream()` to yield intermediate states
+   - Streams tokens/content as workflow progresses
+   - Best for real-time feedback
+
+3. **Async Task Mode** (`async_mode=True`):
+   - Returns A2A `Task` immediately with `state=working`
+   - Executes workflow in background
+   - Clients poll `get_task()` for status updates
+   - Best for long-running workflows
+
+**Flow (Sync/Streaming Mode):**
+1. Extract user message text from A2A message
+2. Build input state (messages format or simple input)
+3. Call `graph.ainvoke()` or `graph.astream()`
+4. Extract output from final state (configurable output_key)
+5. Return A2A Message
+
+**Key Features:**
+- Works with any LangGraph `CompiledGraph`
+- Full streaming support via `astream()`
+- Flexible input handling (messages or simple keys)
+- Intelligent output extraction from state
+- Async Task Mode for long-running workflows
+- Task cancellation support
+
 #### CrewAI Adapter (`crewai.py`)
 
 **Purpose:** Expose CrewAI crews as A2A agents
+
+**Execution Modes:**
+
+1. **Synchronous Mode** (default):
+   - Blocks until crew completes
+   - Returns A2A `Message` with crew output
+   - Best for quick crews
+
+2. **Async Task Mode** (`async_mode=True`):
+   - Returns A2A `Task` immediately
+   - Executes crew in background
+   - Clients poll `get_task()` for status
+   - Best for long-running crews (10+ minutes)
 
 **Flow:**
 1. Extract user message and format as crew inputs
@@ -186,6 +240,8 @@ Bridges our `BaseAgentAdapter` with the official A2A SDK's handler interface:
 - Async execution via `kickoff_async`
 - Fallback to sync execution for older CrewAI versions
 - Configurable input key name
+- Async Task Mode for long-running crews
+- Task cancellation support
 
 #### LangChain Adapter (`langchain.py`)
 

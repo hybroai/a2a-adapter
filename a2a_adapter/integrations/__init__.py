@@ -5,6 +5,7 @@ This package contains concrete adapter implementations for various agent framewo
 - n8n: HTTP webhook-based workflows
 - CrewAI: Multi-agent collaboration framework
 - LangChain: LLM application framework with LCEL support
+- LangGraph: Stateful workflow orchestration framework
 - Callable: Generic Python async function adapter
 """
 
@@ -12,6 +13,7 @@ __all__ = [
     "N8nAgentAdapter",
     "CrewAIAgentAdapter",
     "LangChainAgentAdapter",
+    "LangGraphAgentAdapter",
     "CallableAgentAdapter",
 ]
 
@@ -26,8 +28,10 @@ def __getattr__(name: str):
     elif name == "LangChainAgentAdapter":
         from .langchain import LangChainAgentAdapter
         return LangChainAgentAdapter
+    elif name == "LangGraphAgentAdapter":
+        from .langgraph import LangGraphAgentAdapter
+        return LangGraphAgentAdapter
     elif name == "CallableAgentAdapter":
         from .callable import CallableAgentAdapter
         return CallableAgentAdapter
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-

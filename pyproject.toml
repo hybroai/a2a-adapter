@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "a2a-adapter"
-version = "0.1.3"
+version = "0.1.4"
 description = "A2A Protocol Adapter SDK for integrating various agent frameworks"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -72,7 +72,11 @@ disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
