@@ -26,7 +26,7 @@ Example:
     >>> asyncio.run(main())
 """
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 from .adapter import BaseAgentAdapter
 from .client import build_agent_app, serve_agent
