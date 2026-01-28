@@ -7,6 +7,11 @@ by forwarding A2A messages to n8n webhooks.
 Supports two modes:
 - Synchronous (default): Blocks until n8n workflow completes, returns Message
 - Async Task Mode: Returns Task immediately, processes in background, supports polling
+
+Supports flexible input handling:
+- input_mapper: Custom function for full control over input transformation
+- parse_json_input: Automatic JSON parsing for structured inputs
+- message_field: Simple text mapping to a single key (default fallback)
 """
 
 import json
@@ -15,7 +20,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 import httpx
 from httpx import HTTPStatusError, ConnectError, ReadTimeout
@@ -94,6 +99,10 @@ class N8nAgentAdapter(BaseAgentAdapter):
         async_mode: bool = False,
         task_store: "TaskStore | None" = None,
         async_timeout: int = 300,
+        # Flexible input handling parameters
+        parse_json_input: bool = True,
+        input_mapper: Callable[[str, str | None], Dict[str, Any]] | None = None,
+        default_inputs: Dict[str, Any] | None = None,
     ):
         """
         Initialize the n8n adapter.
@@ -107,12 +116,18 @@ class N8nAgentAdapter(BaseAgentAdapter):
             payload_template: Optional base payload dict to merge with message.
                               Use this to add static fields your n8n workflow expects.
             message_field: Field name for the user message (default: "message").
-                           Change this if your n8n workflow expects a different field name.
+                           Used as fallback when JSON parsing fails or is disabled.
             async_mode: If True, return Task immediately and process in background.
                         If False (default), block until workflow completes.
             task_store: Optional TaskStore for persisting task state. If not provided
                         and async_mode is True, uses InMemoryTaskStore.
             async_timeout: Timeout for async task execution in seconds (default: 300).
+            parse_json_input: If True (default), attempt to parse input as JSON and use
+                              the parsed dict directly as webhook payload.
+            input_mapper: Optional custom function to transform raw input to webhook payload.
+                          Signature: (raw_input: str, context_id: str | None) -> dict.
+                          When provided, this takes highest priority over other methods.
+            default_inputs: Optional dict of default values to merge with parsed inputs.
         """
         self.webhook_url = webhook_url
         self.timeout = timeout
@@ -122,6 +137,11 @@ class N8nAgentAdapter(BaseAgentAdapter):
         self.payload_template = dict(payload_template) if payload_template else {}
         self.message_field = message_field
         self._client: httpx.AsyncClient | None = None
+
+        # Flexible input handling configuration
+        self.parse_json_input = parse_json_input
+        self.input_mapper = input_mapper
+        self.default_inputs = default_inputs or {}
         
         # Async task mode configuration
         self.async_mode = async_mode
@@ -190,7 +210,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
         """
         # Generate IDs
         task_id = str(uuid.uuid4())
-        context_id = self._extract_context_id(params) or str(uuid.uuid4())
+        context_id = self.extract_context_id(params) or str(uuid.uuid4())
         
         # Extract the initial message for history
         initial_message = None
@@ -366,12 +386,6 @@ class N8nAgentAdapter(BaseAgentAdapter):
             
             await self.task_store.save(failed_task)
 
-    def _extract_context_id(self, params: MessageSendParams) -> str | None:
-        """Extract context_id from MessageSendParams."""
-        if hasattr(params, "message") and params.message:
-            return getattr(params.message, "context_id", None)
-        return None
-
     def _extract_response_text(self, framework_output: Dict[str, Any] | list) -> str:
         """Extract response text from n8n webhook output."""
         if isinstance(framework_output, list):
@@ -398,9 +412,10 @@ class N8nAgentAdapter(BaseAgentAdapter):
         """
         Build the n8n webhook payload from A2A params.
 
-        Extracts the latest user message text and constructs a JSON-serializable
-        payload for posting to an n8n webhook. Supports custom payload templates
-        and message field names for flexibility with different n8n workflows.
+        Processing priority:
+        1. input_mapper (custom function) - highest priority
+        2. parse_json_input (auto JSON parsing)
+        3. message_field (fallback for plain text)
 
         Args:
             params: A2A message parameters.
@@ -408,44 +423,46 @@ class N8nAgentAdapter(BaseAgentAdapter):
         Returns:
             dict with the user message and any configured template fields.
         """
-        user_message = ""
+        # Use base class utility for raw input extraction
+        raw_input = self.extract_raw_input(params)
+        context_id = self.extract_context_id(params)
 
-        # Extract message from A2A params (new format with message.parts)
-        if hasattr(params, "message") and params.message:
-            msg = params.message
-            if hasattr(msg, "parts") and msg.parts:
-                text_parts = []
-                for part in msg.parts:
-                    # Handle Part(root=TextPart(...)) structure
-                    if hasattr(part, "root") and hasattr(part.root, "text"):
-                        text_parts.append(part.root.text)
-                    # Handle direct TextPart
-                    elif hasattr(part, "text"):
-                        text_parts.append(part.text)
-                user_message = self._join_text_parts(text_parts)
+        # Priority 1: Custom input_mapper function (highest priority)
+        if self.input_mapper is not None:
+            try:
+                mapped_inputs = self.input_mapper(raw_input, context_id)
+                logger.debug("Used input_mapper to transform input")
+                # Merge: payload_template < default_inputs < mapped_inputs
+                return {
+                    **self.payload_template,
+                    **self.default_inputs,
+                    **mapped_inputs,
+                }
+            except Exception as e:
+                logger.warning("input_mapper failed: %s, falling back", e)
 
-        # Legacy support for messages array
-        elif getattr(params, "messages", None):
-            last = params.messages[-1]
-            content = getattr(last, "content", "")
-            if isinstance(content, str):
-                user_message = content.strip()
-            elif isinstance(content, list):
-                text_parts: list[str] = []
-                for item in content:
-                    txt = getattr(item, "text", None)
-                    if txt and isinstance(txt, str) and txt.strip():
-                        text_parts.append(txt.strip())
-                user_message = self._join_text_parts(text_parts)
+        # Priority 2: Auto JSON parsing
+        if self.parse_json_input:
+            parsed = self.try_parse_json(raw_input)
+            if parsed is not None:
+                logger.debug("Parsed JSON input")
+                # Merge: payload_template < default_inputs < parsed
+                return {
+                    **self.payload_template,
+                    **self.default_inputs,
+                    **parsed,
+                }
 
-        # Extract context_id from the message (used for multi-turn conversation tracking)
-        context_id = None
-        if hasattr(params, "message") and params.message:
-            context_id = getattr(params.message, "context_id", None)
+        # Priority 3: Fallback to simple text mapping with message_field
+        logger.debug("Using message_field '%s' fallback for plain text input", self.message_field)
+        return self._build_default_payload(raw_input, context_id)
 
+    def _build_default_payload(self, user_message: str, context_id: str | None) -> Dict[str, Any]:
+        """Build default payload with message_field."""
         # Build payload with custom template support
         payload: Dict[str, Any] = {
             **self.payload_template,  # Start with template (e.g., {"name": "A2A Agent"})
+            **self.default_inputs,    # Add default inputs
             self.message_field: user_message,  # Add message with custom field name
         }
 
@@ -460,16 +477,6 @@ class N8nAgentAdapter(BaseAgentAdapter):
                 payload["context_id"] = context_id
 
         return payload
-
-    @staticmethod
-    def _join_text_parts(parts: list[str]) -> str:
-        """
-        Join text parts into a single string.
-        """
-        if not parts:
-            return ""
-        text = " ".join(p.strip() for p in parts if p)
-        return text.strip()
 
     # ---------- Framework call ----------
 
@@ -575,10 +582,8 @@ class N8nAgentAdapter(BaseAgentAdapter):
             # Fallback for unexpected types
             response_text = str(framework_output)
 
-        # Preserve context_id from the request for multi-turn conversation tracking
-        context_id = None
-        if hasattr(params, "message") and params.message:
-            context_id = getattr(params.message, "context_id", None)
+        # Use base class utility for context_id extraction
+        context_id = self.extract_context_id(params)
 
         return Message(
             role=Role.agent,

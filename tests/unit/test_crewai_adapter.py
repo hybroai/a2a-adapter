@@ -3,6 +3,7 @@ Unit tests for CrewAIAgentAdapter.
 """
 
 import asyncio
+import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,14 +24,30 @@ def make_message_send_params(text: str, context_id: str | None = None) -> Messag
     )
 
 
+def make_message_send_params_with_dict_text(data: dict, context_id: str | None = None) -> MessageSendParams:
+    """Helper to create MessageSendParams where text is a dict (edge case)."""
+    # Create a mock Part where root.text returns a dict
+    mock_part = MagicMock()
+    mock_part.root.text = data  # This is the edge case: text is dict, not str
+
+    mock_message = MagicMock()
+    mock_message.parts = [mock_part]
+    mock_message.context_id = context_id
+
+    params = MagicMock(spec=MessageSendParams)
+    params.message = mock_message
+    return params
+
+
 class TestCrewAIAdapterBasic:
     """Basic functionality tests for CrewAIAgentAdapter."""
 
     @pytest.mark.asyncio
     async def test_to_framework_extracts_message_text(self):
-        """Test that to_framework extracts message text correctly."""
+        """Test that to_framework extracts message text correctly (plain text fallback)."""
         mock_crew = MagicMock()
-        adapter = CrewAIAgentAdapter(crew=mock_crew)
+        # Disable JSON parsing to test plain text fallback
+        adapter = CrewAIAgentAdapter(crew=mock_crew, parse_json_input=False)
 
         params = make_message_send_params("hello world")
         payload = await adapter.to_framework(params)
@@ -40,9 +57,9 @@ class TestCrewAIAdapterBasic:
 
     @pytest.mark.asyncio
     async def test_to_framework_custom_inputs_key(self):
-        """Test that custom inputs_key is used."""
+        """Test that custom inputs_key is used for plain text."""
         mock_crew = MagicMock()
-        adapter = CrewAIAgentAdapter(crew=mock_crew, inputs_key="query")
+        adapter = CrewAIAgentAdapter(crew=mock_crew, inputs_key="query", parse_json_input=False)
 
         params = make_message_send_params("test query")
         payload = await adapter.to_framework(params)
@@ -54,7 +71,7 @@ class TestCrewAIAdapterBasic:
     async def test_to_framework_handles_multiple_parts(self):
         """Test that multiple text parts are joined correctly."""
         mock_crew = MagicMock()
-        adapter = CrewAIAgentAdapter(crew=mock_crew)
+        adapter = CrewAIAgentAdapter(crew=mock_crew, parse_json_input=False)
 
         # Create params with multiple text parts
         params = MessageSendParams(
@@ -72,6 +89,195 @@ class TestCrewAIAdapterBasic:
 
         assert "part one" in payload["message"]
         assert "part two" in payload["message"]
+
+
+class TestCrewAIAdapterDictTextHandling:
+    """Tests for handling dict type in part.root.text (edge case fix)."""
+
+    @pytest.mark.asyncio
+    async def test_to_framework_handles_dict_text(self):
+        """Test that dict type in part.root.text is handled correctly."""
+        mock_crew = MagicMock()
+        adapter = CrewAIAgentAdapter(crew=mock_crew)
+
+        # Create params where text is a dict (edge case)
+        params = make_message_send_params_with_dict_text(
+            {"customer_domain": "example.com", "project_description": "Test project"},
+            context_id="ctx-123"
+        )
+        payload = await adapter.to_framework(params)
+
+        # Should parse the dict directly as JSON input
+        assert payload["customer_domain"] == "example.com"
+        assert payload["project_description"] == "Test project"
+
+    @pytest.mark.asyncio
+    async def test_extract_raw_input_converts_dict_to_json(self):
+        """Test that _extract_raw_input converts dict to JSON string."""
+        mock_crew = MagicMock()
+        adapter = CrewAIAgentAdapter(crew=mock_crew, parse_json_input=False)
+
+        # Create params where text is a dict
+        params = make_message_send_params_with_dict_text(
+            {"key": "value"},
+            context_id="ctx-123"
+        )
+        raw_input = adapter._extract_raw_input(params)
+
+        # Should be a JSON string
+        assert isinstance(raw_input, str)
+        parsed = json.loads(raw_input)
+        assert parsed["key"] == "value"
+
+
+class TestCrewAIAdapterJSONParsing:
+    """Tests for automatic JSON input parsing."""
+
+    @pytest.mark.asyncio
+    async def test_to_framework_parses_json_input(self):
+        """Test that JSON input is automatically parsed."""
+        mock_crew = MagicMock()
+        adapter = CrewAIAgentAdapter(crew=mock_crew)  # parse_json_input=True by default
+
+        json_input = json.dumps({
+            "customer_domain": "example.com",
+            "project_description": "Build a marketing strategy"
+        })
+        params = make_message_send_params(json_input, context_id="ctx-456")
+        payload = await adapter.to_framework(params)
+
+        # Should parse JSON and use keys directly
+        assert payload["customer_domain"] == "example.com"
+        assert payload["project_description"] == "Build a marketing strategy"
+        assert payload["context_id"] == "ctx-456"
+
+    @pytest.mark.asyncio
+    async def test_to_framework_falls_back_for_plain_text(self):
+        """Test fallback to inputs_key for non-JSON input."""
+        mock_crew = MagicMock()
+        adapter = CrewAIAgentAdapter(crew=mock_crew)
+
+        # Plain text that's not valid JSON
+        params = make_message_send_params("Create a marketing campaign", context_id="ctx-789")
+        payload = await adapter.to_framework(params)
+
+        # Should fallback to inputs_key mode
+        assert payload["inputs"] == "Create a marketing campaign"
+        assert payload["message"] == "Create a marketing campaign"
+
+    @pytest.mark.asyncio
+    async def test_to_framework_disables_json_parsing(self):
+        """Test that JSON parsing can be disabled."""
+        mock_crew = MagicMock()
+        adapter = CrewAIAgentAdapter(crew=mock_crew, parse_json_input=False)
+
+        json_input = json.dumps({"customer_domain": "example.com"})
+        params = make_message_send_params(json_input)
+        payload = await adapter.to_framework(params)
+
+        # Should NOT parse JSON, use inputs_key instead
+        assert "customer_domain" not in payload
+        assert payload["inputs"] == json_input
+
+
+class TestCrewAIAdapterInputMapper:
+    """Tests for custom input_mapper function."""
+
+    @pytest.mark.asyncio
+    async def test_to_framework_uses_input_mapper(self):
+        """Test that custom input_mapper is used when provided."""
+        mock_crew = MagicMock()
+
+        def custom_mapper(raw_input: str, context_id: str | None) -> dict:
+            # Custom parsing logic
+            return {
+                "customer_domain": "mapped.com",
+                "raw_query": raw_input,
+            }
+
+        adapter = CrewAIAgentAdapter(crew=mock_crew, input_mapper=custom_mapper)
+        params = make_message_send_params("any input", context_id="ctx-mapper")
+        payload = await adapter.to_framework(params)
+
+        assert payload["customer_domain"] == "mapped.com"
+        assert payload["raw_query"] == "any input"
+        assert payload["context_id"] == "ctx-mapper"
+
+    @pytest.mark.asyncio
+    async def test_input_mapper_takes_priority_over_json(self):
+        """Test that input_mapper takes priority over JSON parsing."""
+        mock_crew = MagicMock()
+
+        def override_mapper(raw_input: str, context_id: str | None) -> dict:
+            return {"overridden": True}
+
+        adapter = CrewAIAgentAdapter(
+            crew=mock_crew,
+            input_mapper=override_mapper,
+            parse_json_input=True
+        )
+
+        json_input = json.dumps({"customer_domain": "example.com"})
+        params = make_message_send_params(json_input)
+        payload = await adapter.to_framework(params)
+
+        # input_mapper should override JSON parsing
+        assert payload["overridden"] is True
+        assert "customer_domain" not in payload
+
+    @pytest.mark.asyncio
+    async def test_input_mapper_failure_falls_back_to_json(self):
+        """Test that failed input_mapper falls back to JSON parsing."""
+        mock_crew = MagicMock()
+
+        def failing_mapper(raw_input: str, context_id: str | None) -> dict:
+            raise ValueError("Intentional failure")
+
+        adapter = CrewAIAgentAdapter(crew=mock_crew, input_mapper=failing_mapper)
+
+        json_input = json.dumps({"fallback_key": "fallback_value"})
+        params = make_message_send_params(json_input)
+        payload = await adapter.to_framework(params)
+
+        # Should fall back to JSON parsing
+        assert payload["fallback_key"] == "fallback_value"
+
+
+class TestCrewAIAdapterDefaultInputs:
+    """Tests for default_inputs parameter."""
+
+    @pytest.mark.asyncio
+    async def test_default_inputs_merged_with_json(self):
+        """Test that default_inputs are merged with parsed JSON."""
+        mock_crew = MagicMock()
+        adapter = CrewAIAgentAdapter(
+            crew=mock_crew,
+            default_inputs={"default_key": "default_value", "customer_domain": "default.com"}
+        )
+
+        # JSON input overrides customer_domain but default_key should remain
+        json_input = json.dumps({"customer_domain": "user.com"})
+        params = make_message_send_params(json_input)
+        payload = await adapter.to_framework(params)
+
+        assert payload["customer_domain"] == "user.com"  # Overridden by user
+        assert payload["default_key"] == "default_value"  # Default preserved
+
+    @pytest.mark.asyncio
+    async def test_default_inputs_used_with_plain_text(self):
+        """Test that default_inputs are used with plain text input."""
+        mock_crew = MagicMock()
+        adapter = CrewAIAgentAdapter(
+            crew=mock_crew,
+            default_inputs={"customer_domain": "default.com"},
+            parse_json_input=False
+        )
+
+        params = make_message_send_params("plain text query")
+        payload = await adapter.to_framework(params)
+
+        assert payload["customer_domain"] == "default.com"
+        assert payload["inputs"] == "plain text query"
 
 
 class TestCrewAIAdapterContextId:

@@ -3,12 +3,21 @@ Core adapter abstraction for A2A Protocol integration.
 
 This module defines the BaseAgentAdapter abstract class that all framework-specific
 adapters must implement.
+
+Common capabilities provided to all adapters:
+- Input mapping: input_mapper, parse_json_input, default_inputs
+- Timeout configuration: timeout (sync mode)
+- Raw input extraction utilities
 """
 
+import json
+import logging
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Dict
+from typing import Any, AsyncIterator, Callable, Dict
 
 from a2a.types import Message, MessageSendParams, Task
+
+logger = logging.getLogger(__name__)
 
 
 class BaseAgentAdapter(ABC):
@@ -24,11 +33,201 @@ class BaseAgentAdapter(ABC):
     2. call_framework: Execute the framework-specific logic
     3. from_framework: Convert framework output back to A2A Message/Task
     
+    Common Input Handling (available to all adapters):
+    
+    All adapters can use these input mapping features (in priority order):
+    
+    1. **input_mapper** (highest priority):
+       Custom function for full control over input transformation.
+       Signature: (raw_input: str, context_id: str | None) -> dict
+    
+    2. **parse_json_input** (default: True):
+       Automatically parse JSON input and pass directly to framework.
+       Perfect for structured inputs.
+    
+    3. **Framework-specific fallback**:
+       Each adapter has its own fallback behavior (e.g., inputs_key for CrewAI).
+    
     For adapters that support async task execution, the adapter can:
     - Return a Task with state="submitted" or "working" immediately
     - Run the actual work in the background
     - Allow clients to poll for task status via get_task()
     """
+
+    # Common configuration attributes (can be set by subclasses)
+    timeout: int = 30  # Default sync timeout in seconds
+    parse_json_input: bool = True
+    input_mapper: Callable[[str, str | None], Dict[str, Any]] | None = None
+    default_inputs: Dict[str, Any] | None = None
+
+    # ---------- Common Input Utilities ----------
+
+    def extract_raw_input(self, params: MessageSendParams) -> str:
+        """
+        Extract raw text content from A2A message parameters.
+        
+        This utility method handles:
+        - New format: message.parts with Part(root=TextPart(...)) structure
+        - Legacy format: messages array (deprecated)
+        - Edge case: part.root.text returning dict instead of str
+        
+        All adapters can use this method to extract user input consistently.
+        
+        Args:
+            params: A2A message parameters
+            
+        Returns:
+            Extracted text as string
+        """
+        user_message = ""
+
+        # Extract message from A2A params (new format with message.parts)
+        if hasattr(params, "message") and params.message:
+            msg = params.message
+            if hasattr(msg, "parts") and msg.parts:
+                text_parts = []
+                for part in msg.parts:
+                    # Handle Part(root=TextPart(...)) structure
+                    if hasattr(part, "root") and hasattr(part.root, "text"):
+                        text_value = part.root.text
+                        # Handle dict type - convert to JSON string
+                        if isinstance(text_value, dict):
+                            text_parts.append(json.dumps(text_value, ensure_ascii=False))
+                        elif isinstance(text_value, str):
+                            text_parts.append(text_value)
+                        else:
+                            text_parts.append(str(text_value))
+                    # Handle direct TextPart
+                    elif hasattr(part, "text"):
+                        text_value = part.text
+                        if isinstance(text_value, dict):
+                            text_parts.append(json.dumps(text_value, ensure_ascii=False))
+                        elif isinstance(text_value, str):
+                            text_parts.append(text_value)
+                        else:
+                            text_parts.append(str(text_value))
+                user_message = self._join_text_parts(text_parts)
+
+        # Legacy support for messages array (deprecated)
+        elif getattr(params, "messages", None):
+            last = params.messages[-1]
+            content = getattr(last, "content", "")
+            if isinstance(content, str):
+                user_message = content.strip()
+            elif isinstance(content, dict):
+                user_message = json.dumps(content, ensure_ascii=False)
+            elif isinstance(content, list):
+                text_parts = []
+                for item in content:
+                    txt = getattr(item, "text", None)
+                    if txt is not None:
+                        if isinstance(txt, dict):
+                            text_parts.append(json.dumps(txt, ensure_ascii=False))
+                        elif isinstance(txt, str) and txt.strip():
+                            text_parts.append(txt.strip())
+                user_message = self._join_text_parts(text_parts)
+
+        return user_message
+
+    def extract_context_id(self, params: MessageSendParams) -> str | None:
+        """
+        Extract context_id from MessageSendParams.
+        
+        Args:
+            params: A2A message parameters
+            
+        Returns:
+            The context_id string or None if not present
+        """
+        if hasattr(params, "message") and params.message:
+            return getattr(params.message, "context_id", None)
+        return None
+
+    def try_parse_json(self, raw_input: str) -> Dict[str, Any] | None:
+        """
+        Attempt to parse raw input as JSON object.
+        
+        Args:
+            raw_input: Raw text input
+            
+        Returns:
+            Parsed dict if successful, None otherwise
+        """
+        if not raw_input or not raw_input.strip():
+            return None
+
+        raw_input = raw_input.strip()
+
+        # Quick check: must start with { to be a JSON object
+        if not raw_input.startswith("{"):
+            return None
+
+        try:
+            parsed = json.loads(raw_input)
+            if isinstance(parsed, dict):
+                return parsed
+            return None
+        except json.JSONDecodeError:
+            return None
+
+    def apply_input_mapping(
+        self,
+        params: MessageSendParams,
+        fallback_key: str = "input",
+    ) -> Dict[str, Any]:
+        """
+        Apply the standard input mapping pipeline.
+        
+        Processing priority:
+        1. input_mapper (custom function) - highest priority
+        2. parse_json_input (auto JSON parsing)
+        3. fallback_key (simple text mapping)
+        
+        Args:
+            params: A2A message parameters
+            fallback_key: Key to use for plain text when JSON parsing fails
+            
+        Returns:
+            Dictionary with mapped input data
+        """
+        raw_input = self.extract_raw_input(params)
+        context_id = self.extract_context_id(params)
+        defaults = self.default_inputs or {}
+
+        # Priority 1: Custom input_mapper function
+        if self.input_mapper is not None:
+            try:
+                mapped_inputs = self.input_mapper(raw_input, context_id)
+                logger.debug("Used input_mapper to transform input")
+                return {**defaults, **mapped_inputs, "context_id": context_id}
+            except Exception as e:
+                logger.warning("input_mapper failed: %s, falling back", e)
+
+        # Priority 2: Auto JSON parsing
+        if self.parse_json_input:
+            parsed = self.try_parse_json(raw_input)
+            if parsed is not None:
+                logger.debug("Parsed JSON input")
+                return {**defaults, **parsed, "context_id": context_id}
+
+        # Priority 3: Fallback to simple text mapping
+        logger.debug("Using fallback_key '%s' for plain text input", fallback_key)
+        return {
+            **defaults,
+            fallback_key: raw_input,
+            "message": raw_input,
+            "context_id": context_id,
+        }
+
+    @staticmethod
+    def _join_text_parts(parts: list[str]) -> str:
+        """Join text parts into a single string."""
+        if not parts:
+            return ""
+        text = " ".join(p.strip() for p in parts if p)
+        return text.strip()
+
+    # ---------- Core Handler ----------
 
     async def handle(self, params: MessageSendParams) -> Message | Task:
         """

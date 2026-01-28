@@ -7,6 +7,11 @@ agents with support for both streaming and non-streaming modes.
 Supports two modes:
 - Synchronous (default): Blocks until workflow completes, returns Message
 - Async Task Mode: Returns Task immediately, processes in background, supports polling
+
+Supports flexible input handling:
+- input_mapper: Custom function for full control over input transformation
+- parse_json_input: Automatic JSON parsing for structured inputs
+- input_key: Simple text mapping to a single key (default fallback)
 """
 
 import asyncio
@@ -14,7 +19,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Dict
+from typing import Any, AsyncIterator, Callable, Dict
 
 from a2a.types import (
     Message,
@@ -66,6 +71,18 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
        - Clients can poll get_task() for status updates
        - Best for long-running workflows
 
+    Input Handling (in priority order):
+
+    1. **input_mapper** (highest priority):
+       Custom function for full control over input transformation.
+       Signature: (raw_input: str, context_id: str | None) -> dict
+
+    2. **parse_json_input** (default: True):
+       Automatically parse JSON input and pass directly to graph.
+
+    3. **input_key** (fallback):
+       Map plain text to a single key when JSON parsing fails.
+
     Example:
         >>> from langgraph.graph import StateGraph
         >>> from typing import TypedDict
@@ -83,7 +100,13 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
         >>> builder.set_finish_point("process")
         >>> graph = builder.compile()
         >>>
+        >>> # Basic usage
         >>> adapter = LangGraphAgentAdapter(graph=graph)
+        >>>
+        >>> # With custom input mapper
+        >>> def my_mapper(raw_input: str, context_id: str | None) -> dict:
+        ...     return {"messages": [{"role": "user", "content": raw_input}]}
+        >>> adapter = LangGraphAgentAdapter(graph=graph, input_mapper=my_mapper)
     """
 
     def __init__(
@@ -95,6 +118,11 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
         async_mode: bool = False,
         task_store: "TaskStore | None" = None,
         async_timeout: int = 300,
+        timeout: int = 60,  # Sync mode timeout
+        # Flexible input handling parameters
+        parse_json_input: bool = True,
+        input_mapper: Callable[[str, str | None], Dict[str, Any]] | None = None,
+        default_inputs: Dict[str, Any] | None = None,
     ):
         """
         Initialize the LangGraph adapter.
@@ -103,6 +131,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
             graph: A LangGraph CompiledGraph instance (result of StateGraph.compile())
             input_key: The key in the state dict for input messages (default: "messages").
                        Set to "input" for simple string input workflows.
+                       Used as fallback when JSON parsing fails or is disabled.
             output_key: Optional key to extract from final state. If None, the adapter
                         will try common keys like "output", "response", "messages".
             state_key: Optional key to use when extracting state for streaming events.
@@ -112,11 +141,24 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
             task_store: Optional TaskStore for persisting task state. If not provided
                         and async_mode is True, uses InMemoryTaskStore.
             async_timeout: Timeout for async task execution in seconds (default: 300).
+            timeout: Timeout for sync mode execution in seconds (default: 60).
+            parse_json_input: If True (default), attempt to parse input as JSON and use
+                              the parsed dict directly as graph state.
+            input_mapper: Optional custom function to transform raw input to graph state.
+                          Signature: (raw_input: str, context_id: str | None) -> dict.
+                          When provided, this takes highest priority over other methods.
+            default_inputs: Optional dict of default values to merge with parsed inputs.
         """
         self.graph = graph
         self.input_key = input_key
         self.output_key = output_key
         self.state_key = state_key or output_key
+        self.timeout = timeout
+
+        # Flexible input handling configuration
+        self.parse_json_input = parse_json_input
+        self.input_mapper = input_mapper
+        self.default_inputs = default_inputs or {}
 
         # Async task mode configuration
         self.async_mode = async_mode
@@ -171,7 +213,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
         """
         # Generate IDs
         task_id = str(uuid.uuid4())
-        context_id = self._extract_context_id(params) or str(uuid.uuid4())
+        context_id = self.extract_context_id(params) or str(uuid.uuid4())
 
         # Extract the initial message for history
         initial_message = None
@@ -340,9 +382,10 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
         """
         Convert A2A message parameters to LangGraph state input.
 
-        Supports two common input patterns:
-        1. Messages-based: {"messages": [{"role": "user", "content": "..."}]}
-        2. Simple input: {"input": "user message text"}
+        Processing priority:
+        1. input_mapper (custom function) - highest priority
+        2. parse_json_input (auto JSON parsing)
+        3. input_key (fallback for plain text)
 
         Args:
             params: A2A message parameters
@@ -350,63 +393,50 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
         Returns:
             Dictionary with graph state input
         """
-        user_message = ""
+        # Use base class utility for raw input extraction
+        raw_input = self.extract_raw_input(params)
+        context_id = self.extract_context_id(params)
 
-        # Extract message from A2A params (new format with message.parts)
-        if hasattr(params, "message") and params.message:
-            msg = params.message
-            if hasattr(msg, "parts") and msg.parts:
-                text_parts = []
-                for part in msg.parts:
-                    # Handle Part(root=TextPart(...)) structure
-                    if hasattr(part, "root") and hasattr(part.root, "text"):
-                        text_parts.append(part.root.text)
-                    # Handle direct TextPart
-                    elif hasattr(part, "text"):
-                        text_parts.append(part.text)
-                user_message = self._join_text_parts(text_parts)
+        # Priority 1: Custom input_mapper function (highest priority)
+        if self.input_mapper is not None:
+            try:
+                mapped_inputs = self.input_mapper(raw_input, context_id)
+                logger.debug("Used input_mapper to transform input")
+                return {**self.default_inputs, **mapped_inputs}
+            except Exception as e:
+                logger.warning("input_mapper failed: %s, falling back", e)
 
-        # Legacy support for messages array (deprecated)
-        elif getattr(params, "messages", None):
-            last = params.messages[-1]
-            content = getattr(last, "content", "")
-            if isinstance(content, str):
-                user_message = content.strip()
-            elif isinstance(content, list):
-                text_parts = []
-                for item in content:
-                    txt = getattr(item, "text", None)
-                    if txt and isinstance(txt, str) and txt.strip():
-                        text_parts.append(txt.strip())
-                user_message = self._join_text_parts(text_parts)
+        # Priority 2: Auto JSON parsing
+        if self.parse_json_input:
+            parsed = self.try_parse_json(raw_input)
+            if parsed is not None:
+                logger.debug("Parsed JSON input")
+                # Remove context_id from parsed input as LangGraph doesn't need it
+                parsed_clean = {k: v for k, v in parsed.items() if k != "context_id"}
+                return {**self.default_inputs, **parsed_clean}
 
-        # Build graph input based on input_key
+        # Priority 3: Fallback to text mapping with input_key
+        logger.debug("Using input_key '%s' fallback for plain text input", self.input_key)
+        return self._build_default_input(raw_input)
+
+    def _build_default_input(self, user_message: str) -> Dict[str, Any]:
+        """Build default input based on input_key."""
+        base_input = dict(self.default_inputs)
+
         if self.input_key == "messages":
             # LangGraph message format (for chat-like workflows)
             # Try to use LangChain message format if available
             try:
                 from langchain_core.messages import HumanMessage
-                return {"messages": [HumanMessage(content=user_message)]}
+                base_input["messages"] = [HumanMessage(content=user_message)]
             except ImportError:
                 # Fallback to dict format
-                return {"messages": [{"role": "user", "content": user_message}]}
+                base_input["messages"] = [{"role": "user", "content": user_message}]
         else:
             # Simple input key (e.g., "input", "query", etc.)
-            return {self.input_key: user_message}
+            base_input[self.input_key] = user_message
 
-    @staticmethod
-    def _join_text_parts(parts: list[str]) -> str:
-        """Join text parts into a single string."""
-        if not parts:
-            return ""
-        text = " ".join(p.strip() for p in parts if p)
-        return text.strip()
-
-    def _extract_context_id(self, params: MessageSendParams) -> str | None:
-        """Extract context_id from MessageSendParams."""
-        if hasattr(params, "message") and params.message:
-            return getattr(params.message, "context_id", None)
-        return None
+        return base_input
 
     # ---------- Framework call ----------
 
@@ -425,11 +455,20 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
 
         Raises:
             Exception: If graph execution fails
+            asyncio.TimeoutError: If execution exceeds timeout (sync mode)
         """
         logger.debug("Invoking LangGraph with input: %s", framework_input)
-        result = await self.graph.ainvoke(framework_input)
-        logger.debug("LangGraph returned state with keys: %s", list(result.keys()) if isinstance(result, dict) else type(result).__name__)
-        return result
+
+        try:
+            result = await asyncio.wait_for(
+                self.graph.ainvoke(framework_input),
+                timeout=self.timeout,
+            )
+            logger.debug("LangGraph returned state with keys: %s", list(result.keys()) if isinstance(result, dict) else type(result).__name__)
+            return result
+        except asyncio.TimeoutError:
+            logger.error("LangGraph workflow timed out after %s seconds", self.timeout)
+            raise RuntimeError(f"Workflow timed out after {self.timeout} seconds")
 
     # ---------- Output mapping ----------
 
@@ -447,7 +486,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
             A2A Message with the workflow's response
         """
         response_text = self._extract_output_text(framework_output)
-        context_id = self._extract_context_id(params)
+        context_id = self.extract_context_id(params)
 
         return Message(
             role=Role.agent,
@@ -553,7 +592,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
             Server-Sent Events compatible dictionaries with streaming chunks
         """
         framework_input = await self.to_framework(params)
-        context_id = self._extract_context_id(params)
+        context_id = self.extract_context_id(params)
         message_id = str(uuid.uuid4())
 
         logger.debug("Starting LangGraph stream with input: %s", framework_input)

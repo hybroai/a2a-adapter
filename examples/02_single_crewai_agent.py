@@ -4,6 +4,11 @@ Example: Single CrewAI Agent Server
 This example demonstrates how to expose a CrewAI crew as an A2A-compliant agent.
 The crew performs research tasks using multiple specialized agents.
 
+Demonstrates three input handling modes:
+1. JSON Input (default): Send structured JSON matching tasks.yaml variables
+2. Custom input_mapper: Full control over input transformation
+3. Plain text with default_inputs: Fallback for simple text inputs
+
 Prerequisites:
 - crewai package installed: pip install crewai
 - OpenAI API key set in environment: OPENAI_API_KEY
@@ -13,6 +18,7 @@ Usage:
 """
 
 import asyncio
+import json
 import os
 
 from crewai import Agent, Crew, Process
@@ -53,18 +59,75 @@ def create_research_crew():
     return crew
 
 
+# Custom input mapper example (for complex parsing logic)
+def custom_input_mapper(raw_input: str, context_id: str | None) -> dict:
+    """
+    Custom input mapper that handles both JSON and text inputs.
+    
+    This is useful when you need complex validation or transformation logic.
+    """
+    try:
+        # Try to parse as JSON first
+        data = json.loads(raw_input)
+        return {
+            "customer_domain": data.get("domain", "unknown"),
+            "project_description": data.get("description", raw_input),
+            "research_topic": data.get("topic", "general research"),
+        }
+    except json.JSONDecodeError:
+        # Fallback for plain text
+        return {
+            "customer_domain": "general",
+            "project_description": raw_input,
+            "research_topic": raw_input,
+        }
+
+
 async def main():
     """Start serving a CrewAI crew as an A2A agent."""
     
     # Create the research crew
     crew = create_research_crew()
     
-    # Load the adapter
-    adapter = await load_a2a_agent({
+    # =================================================================
+    # Example 1: Default JSON parsing (recommended for structured input)
+    # =================================================================
+    # Client sends: {"customer_domain": "example.com", "project_description": "..."}
+    # Adapter automatically parses JSON and passes to crew
+    adapter_json_mode = await load_a2a_agent({
         "adapter": "crewai",
         "crew": crew,
-        "inputs_key": "inputs",
+        # parse_json_input=True by default
     })
+    
+    # =================================================================
+    # Example 2: Custom input_mapper (for complex transformation)
+    # =================================================================
+    # Use when you need custom validation/transformation logic
+    adapter_custom_mapper = await load_a2a_agent({
+        "adapter": "crewai",
+        "crew": crew,
+        "input_mapper": custom_input_mapper,
+    })
+    
+    # =================================================================
+    # Example 3: Plain text with default values
+    # =================================================================
+    # Client sends: "Research the AI market trends"
+    # Adapter maps to inputs_key and merges default_inputs
+    adapter_plain_text = await load_a2a_agent({
+        "adapter": "crewai",
+        "crew": crew,
+        "parse_json_input": False,  # Disable JSON parsing
+        "inputs_key": "research_topic",
+        "default_inputs": {
+            "customer_domain": "general",
+            "project_description": "User research request",
+        }
+    })
+    
+    # Use the JSON mode adapter for this example
+    adapter = adapter_json_mode
     
     # Define the agent card
     agent_card = AgentCard(
@@ -95,6 +158,9 @@ async def main():
     
     # Start serving the agent
     print("Starting Research Crew Agent on port 8001...")
+    print("\nInput modes supported:")
+    print('  1. JSON: {"customer_domain": "example.com", "project_description": "..."}')
+    print('  2. Plain text: "Research the AI market trends"')
     serve_agent(agent_card=agent_card, adapter=adapter, port=8001)
 
 

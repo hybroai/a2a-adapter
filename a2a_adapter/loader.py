@@ -21,13 +21,19 @@ async def load_a2a_agent(config: Dict[str, Any]) -> BaseAgentAdapter:
         config: Configuration dictionary with at least an 'adapter' key.
                 Additional keys depend on the adapter type:
 
+                Common optional parameters (all adapters):
+                - parse_json_input: Auto-parse JSON input (default: True)
+                - input_mapper: Custom function for input transformation
+                - default_inputs: Default values to merge with parsed inputs
+
+                Adapter-specific parameters:
                 - n8n: requires 'webhook_url', optional 'timeout', 'headers',
-                       'payload_template', 'message_field', 'async_mode'
+                       'payload_template', 'message_field', 'async_mode', 'async_timeout'
                 - crewai: requires 'crew' (CrewAI Crew instance),
-                          optional 'inputs_key', 'async_mode'
-                - langchain: requires 'runnable', optional 'input_key', 'output_key'
+                          optional 'inputs_key', 'timeout', 'async_mode', 'async_timeout'
+                - langchain: requires 'runnable', optional 'input_key', 'output_key', 'timeout'
                 - langgraph: requires 'graph' (CompiledGraph instance),
-                             optional 'input_key', 'output_key', 'async_mode'
+                             optional 'input_key', 'output_key', 'timeout', 'async_mode', 'async_timeout'
                 - callable: requires 'callable' (async function),
                             optional 'supports_streaming'
 
@@ -108,6 +114,10 @@ async def load_a2a_agent(config: Dict[str, Any]) -> BaseAgentAdapter:
             async_mode=config.get("async_mode", False),
             task_store=config.get("task_store"),
             async_timeout=config.get("async_timeout", 300),
+            # Flexible input handling parameters
+            parse_json_input=config.get("parse_json_input", True),
+            input_mapper=config.get("input_mapper"),
+            default_inputs=config.get("default_inputs"),
         )
 
     elif adapter_type == "crewai":
@@ -123,6 +133,11 @@ async def load_a2a_agent(config: Dict[str, Any]) -> BaseAgentAdapter:
             async_mode=config.get("async_mode", False),
             task_store=config.get("task_store"),
             async_timeout=config.get("async_timeout", 600),
+            timeout=config.get("timeout", 300),
+            # New flexible input handling parameters
+            parse_json_input=config.get("parse_json_input", True),
+            input_mapper=config.get("input_mapper"),
+            default_inputs=config.get("default_inputs"),
         )
 
     elif adapter_type == "langchain":
@@ -136,6 +151,11 @@ async def load_a2a_agent(config: Dict[str, Any]) -> BaseAgentAdapter:
             runnable=runnable,
             input_key=config.get("input_key", "input"),
             output_key=config.get("output_key"),
+            timeout=config.get("timeout", 60),
+            # Flexible input handling parameters
+            parse_json_input=config.get("parse_json_input", True),
+            input_mapper=config.get("input_mapper"),
+            default_inputs=config.get("default_inputs"),
         )
 
     elif adapter_type == "langgraph":
@@ -153,6 +173,11 @@ async def load_a2a_agent(config: Dict[str, Any]) -> BaseAgentAdapter:
             async_mode=config.get("async_mode", False),
             task_store=config.get("task_store"),
             async_timeout=config.get("async_timeout", 300),
+            timeout=config.get("timeout", 60),
+            # Flexible input handling parameters
+            parse_json_input=config.get("parse_json_input", True),
+            input_mapper=config.get("input_mapper"),
+            default_inputs=config.get("default_inputs"),
         )
 
     elif adapter_type == "callable":
