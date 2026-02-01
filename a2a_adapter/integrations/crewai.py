@@ -200,7 +200,7 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
         """
         # Generate IDs
         task_id = str(uuid.uuid4())
-        context_id = self._extract_context_id(params) or str(uuid.uuid4())
+        context_id = self.extract_context_id(params) or str(uuid.uuid4())
 
         # Extract the initial message for history
         initial_message = None
@@ -381,8 +381,8 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
             Dictionary with crew input data matching tasks.yaml variables
         """
         # Extract raw message content
-        raw_input = self._extract_raw_input(params)
-        context_id = self._extract_context_id(params)
+        raw_input = self.extract_raw_input(params)
+        context_id = self.extract_context_id(params)
 
         # Priority 1: Custom input_mapper function (highest priority)
         if self.input_mapper is not None:
@@ -394,9 +394,9 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
             except Exception as e:
                 logger.warning("input_mapper failed: %s, falling back to parse_json_input", e)
 
-        # Priority 2: Auto JSON parsing
+        # Priority 2: Auto JSON parsing (using base class utility)
         if self.parse_json_input:
-            parsed = self._try_parse_json(raw_input)
+            parsed = self.try_parse_json(raw_input)
             if parsed is not None:
                 logger.debug("Parsed JSON input: %s", parsed)
                 # Merge: default_inputs < parsed < context_id
@@ -411,113 +411,6 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
             "context_id": context_id,
         }
 
-    def _extract_raw_input(self, params: MessageSendParams) -> str:
-        """
-        Extract raw text content from A2A message parameters.
-
-        Handles both new format (message.parts) and legacy format (messages array).
-        Also safely handles cases where part.root.text returns dict instead of str.
-
-        Args:
-            params: A2A message parameters
-
-        Returns:
-            Extracted text as string
-        """
-        user_message = ""
-
-        # Extract message from A2A params (new format with message.parts)
-        if hasattr(params, "message") and params.message:
-            msg = params.message
-            if hasattr(msg, "parts") and msg.parts:
-                text_parts = []
-                for part in msg.parts:
-                    # Handle Part(root=TextPart(...)) structure
-                    if hasattr(part, "root") and hasattr(part.root, "text"):
-                        text_value = part.root.text
-                        # FIX: Handle dict type - convert to JSON string
-                        if isinstance(text_value, dict):
-                            text_parts.append(json.dumps(text_value, ensure_ascii=False))
-                        elif isinstance(text_value, str):
-                            text_parts.append(text_value)
-                        else:
-                            # For other types, convert to string
-                            text_parts.append(str(text_value))
-                    # Handle direct TextPart
-                    elif hasattr(part, "text"):
-                        text_value = part.text
-                        if isinstance(text_value, dict):
-                            text_parts.append(json.dumps(text_value, ensure_ascii=False))
-                        elif isinstance(text_value, str):
-                            text_parts.append(text_value)
-                        else:
-                            text_parts.append(str(text_value))
-                user_message = self._join_text_parts(text_parts)
-
-        # Legacy support for messages array (deprecated)
-        elif getattr(params, "messages", None):
-            last = params.messages[-1]
-            content = getattr(last, "content", "")
-            if isinstance(content, str):
-                user_message = content.strip()
-            elif isinstance(content, dict):
-                # Handle dict content
-                user_message = json.dumps(content, ensure_ascii=False)
-            elif isinstance(content, list):
-                text_parts = []
-                for item in content:
-                    txt = getattr(item, "text", None)
-                    if txt is not None:
-                        if isinstance(txt, dict):
-                            text_parts.append(json.dumps(txt, ensure_ascii=False))
-                        elif isinstance(txt, str) and txt.strip():
-                            text_parts.append(txt.strip())
-                user_message = self._join_text_parts(text_parts)
-
-        return user_message
-
-    def _try_parse_json(self, raw_input: str) -> Dict[str, Any] | None:
-        """
-        Attempt to parse raw input as JSON.
-
-        Args:
-            raw_input: Raw text input
-
-        Returns:
-            Parsed dict if successful, None otherwise
-        """
-        if not raw_input or not raw_input.strip():
-            return None
-
-        raw_input = raw_input.strip()
-
-        # Quick check: must start with { to be a JSON object
-        if not raw_input.startswith("{"):
-            return None
-
-        try:
-            parsed = json.loads(raw_input)
-            if isinstance(parsed, dict):
-                return parsed
-            else:
-                logger.debug("JSON parsed but not a dict, ignoring: %s", type(parsed))
-                return None
-        except json.JSONDecodeError:
-            return None
-
-    @staticmethod
-    def _join_text_parts(parts: list[str]) -> str:
-        """Join text parts into a single string."""
-        if not parts:
-            return ""
-        text = " ".join(p.strip() for p in parts if p)
-        return text.strip()
-
-    def _extract_context_id(self, params: MessageSendParams) -> str | None:
-        """Extract context_id from MessageSendParams."""
-        if hasattr(params, "message") and params.message:
-            return getattr(params.message, "context_id", None)
-        return None
 
     # ---------- Framework call ----------
 
@@ -561,9 +454,9 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
                     timeout=self.timeout,
                 )
                 return result
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             logger.error("CrewAI crew timed out after %s seconds", self.timeout)
-            raise RuntimeError(f"Crew timed out after {self.timeout} seconds")
+            raise RuntimeError(f"Crew timed out after {self.timeout} seconds") from e
 
     # ---------- Output mapping ----------
 
@@ -581,7 +474,7 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
             A2A Message with the crew's response
         """
         response_text = self._extract_output_text(framework_output)
-        context_id = self._extract_context_id(params)
+        context_id = self.extract_context_id(params)
 
         return Message(
             role=Role.agent,

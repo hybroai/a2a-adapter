@@ -466,9 +466,9 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
             )
             logger.debug("LangGraph returned state with keys: %s", list(result.keys()) if isinstance(result, dict) else type(result).__name__)
             return result
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             logger.error("LangGraph workflow timed out after %s seconds", self.timeout)
-            raise RuntimeError(f"Workflow timed out after {self.timeout} seconds")
+            raise RuntimeError(f"Workflow timed out after {self.timeout} seconds") from e
 
     # ---------- Output mapping ----------
 

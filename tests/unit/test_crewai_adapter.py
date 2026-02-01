@@ -122,7 +122,7 @@ class TestCrewAIAdapterDictTextHandling:
             {"key": "value"},
             context_id="ctx-123"
         )
-        raw_input = adapter._extract_raw_input(params)
+        raw_input = adapter.extract_raw_input(params)
 
         # Should be a JSON string
         assert isinstance(raw_input, str)

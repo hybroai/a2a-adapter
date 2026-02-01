@@ -178,9 +178,9 @@ class LangChainAgentAdapter(BaseAgentAdapter):
             )
             logger.debug("LangChain runnable returned: %s", type(result).__name__)
             return result
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             logger.error("LangChain runnable timed out after %s seconds", self.timeout)
-            raise RuntimeError(f"Runnable timed out after {self.timeout} seconds")
+            raise RuntimeError(f"Runnable timed out after {self.timeout} seconds") from e
 
     # ---------- Output mapping ----------
 
