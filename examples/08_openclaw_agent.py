@@ -11,7 +11,7 @@ Requirements:
 - Valid OpenClaw configuration at ~/.openclaw/config.yaml
 
 Usage:
-    # Start the A2A server
+    # Start the A2A server (async mode with push notifications)
     python examples/08_openclaw_agent.py
 
     # In another terminal, test with curl:
@@ -21,6 +21,19 @@ Usage:
 
     # Poll for task completion:
     curl http://localhost:9008/task/{task_id}
+
+    # With push notifications (agent will POST to your webhook when task completes):
+    curl -X POST http://localhost:9008/message/send \
+        -H "Content-Type: application/json" \
+        -d '{
+            "message": {"role": "user", "parts": [{"text": "Write a hello world function"}]},
+            "configuration": {
+                "pushNotificationConfig": {
+                    "url": "https://your-webhook.example.com/callback",
+                    "token": "your-secret-token"
+                }
+            }
+        }'
 """
 
 import asyncio
@@ -48,15 +61,17 @@ async def setup_agent():
     """Set up and return the agent configuration."""
     
     # Load the OpenClaw adapter
+    # async_mode=True (default): returns Task immediately and processes in background
+    #   - Supports polling via GET /task/{task_id}
+    #   - Supports push notifications (webhook callbacks on completion)
     # async_mode=False: blocks until command completes, returns Message directly
-    # async_mode=True: returns Task immediately and processes in background (requires polling)
     adapter = await load_a2a_agent({
         "adapter": "openclaw",
         "session_id": "a2a-demo-session",  # Optional: auto-generated if not provided
         "agent_id": None,  # Optional: use default agent
         "thinking": "low",  # Thinking level: off|minimal|low|medium|high|xhigh
         "timeout": 300,  # Command timeout in seconds
-        "async_mode": False,  # Block until command completes, return Message directly
+        "async_mode": True,  # Return Task immediately, process in background
         # "openclaw_path": "openclaw",  # Path to openclaw binary
         # "working_directory": None,  # Working directory for subprocess
         # "env_vars": {},  # Additional environment variables
@@ -73,7 +88,7 @@ async def setup_agent():
         defaultOutputModes=["text"],
         capabilities=AgentCapabilities(
             streaming=False,  # OpenClaw CLI doesn't support streaming
-            pushNotifications=False,
+            pushNotifications=True,  # Supports webhook callbacks on task completion
         ),
         skills=[
             AgentSkill(
@@ -109,6 +124,7 @@ def main():
     logger.info("Starting OpenClaw A2A agent server on http://localhost:%d", AGENT_PORT)
     logger.info("Agent card: %s", agent_card.name)
     logger.info("Async mode: %s", adapter.supports_async_tasks())
+    logger.info("Push notifications: %s", adapter.supports_push_notifications())
     
     # Start the A2A server (this will block)
     # This will handle:
@@ -116,6 +132,7 @@ def main():
     # - GET /task/{task_id} - Poll for task status
     # - POST /task/{task_id}/cancel - Cancel a running task
     # - DELETE /task/{task_id} - Delete a completed task
+    # - POST /task/{task_id}/pushNotificationConfig - Set webhook for task updates
     serve_agent(
         agent_card=agent_card,
         adapter=adapter,

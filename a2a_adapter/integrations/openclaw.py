@@ -7,6 +7,12 @@ by wrapping the OpenClaw CLI as a subprocess.
 Supports two modes:
 - Synchronous (async_mode=False): Blocks until command completes, returns Message
 - Async Task Mode (default): Returns Task immediately, processes in background, supports polling
+
+Push Notifications (A2A-compliant):
+- When push_notification_config is provided in MessageSendParams, the adapter will
+  POST task updates to the configured webhook URL using StreamResponse format
+- Payload contains full Task object (including artifacts) per A2A spec section 4.3.3
+- Supports Bearer token authentication for webhook calls
 """
 
 import asyncio
@@ -18,6 +24,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict
 
+import httpx
+
 from a2a.types import (
     Artifact,
     FilePart,
@@ -25,6 +33,7 @@ from a2a.types import (
     Message,
     MessageSendParams,
     Part,
+    PushNotificationConfig,
     Role,
     Task,
     TaskState,
@@ -156,6 +165,10 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
         self._background_tasks: Dict[str, asyncio.Task[None]] = {}
         self._background_processes: Dict[str, AsyncProcess] = {}
         self._cancelled_tasks: set[str] = set()
+        
+        # Push notification configuration per task
+        self._push_configs: Dict[str, PushNotificationConfig] = {}
+        self._http_client: httpx.AsyncClient | None = None
 
         # Initialize task store for async mode
         if async_mode:
@@ -205,8 +218,9 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
 
         1. Creates a Task with state="working"
         2. Saves the task to the TaskStore
-        3. Starts a background coroutine to execute the command
-        4. Returns the Task immediately
+        3. Stores push notification config if provided
+        4. Starts a background coroutine to execute the command
+        5. Returns the Task immediately
         """
         # Generate IDs
         task_id = str(uuid.uuid4())
@@ -216,6 +230,14 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
         initial_message = None
         if hasattr(params, "message") and params.message:
             initial_message = params.message
+
+        # Extract and store push notification config if provided
+        push_config = getattr(params, "configuration", None)
+        if push_config and hasattr(push_config, "push_notification_config"):
+            pn_config = push_config.push_notification_config
+            if pn_config and pn_config.url:
+                self._push_configs[task_id] = pn_config
+                logger.debug("Stored push notification config for task %s: %s", task_id, pn_config.url)
 
         # Create initial task with "working" state
         now = datetime.now(timezone.utc).isoformat()
@@ -244,6 +266,8 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             self._background_tasks.pop(task_id, None)
             self._background_processes.pop(task_id, None)
             self._cancelled_tasks.discard(task_id)
+            # Clean up push config after task completes
+            self._push_configs.pop(task_id, None)
             # Check for unhandled exceptions (shouldn't happen, but log if they do)
             if not t.cancelled():
                 exc = t.exception()
@@ -306,6 +330,9 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             )
             await self.task_store.save(timeout_task)
 
+            # Send push notification for timeout failure
+            await self._send_push_notification(task_id, timeout_task)
+
     async def _execute_command_background(
         self,
         task_id: str,
@@ -316,6 +343,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
         Execute the OpenClaw command in the background and update task state.
 
         This runs as a background coroutine after the initial Task is returned.
+        Sends push notifications on completion/failure if configured.
         """
         try:
             logger.debug("Starting background execution for task %s", task_id)
@@ -361,6 +389,9 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             await self.task_store.save(completed_task)
             logger.debug("Task %s completed successfully", task_id)
 
+            # Send push notification for completion
+            await self._send_push_notification(task_id, completed_task)
+
         except asyncio.CancelledError:
             # Task was cancelled - don't update state, cancel_task() handles it
             logger.debug("Task %s was cancelled", task_id)
@@ -393,6 +424,9 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             )
 
             await self.task_store.save(failed_task)
+
+            # Send push notification for failure
+            await self._send_push_notification(task_id, failed_task)
 
     async def _call_framework_with_tracking(
         self,
@@ -820,6 +854,141 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
         else:
             return "application/octet-stream"
 
+    # ---------- Push Notification Support ----------
+
+    def supports_push_notifications(self) -> bool:
+        """Check if this adapter supports push notifications."""
+        return self.async_mode
+
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        """Get or create the HTTP client for push notifications."""
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=30.0)
+        return self._http_client
+
+    async def _send_push_notification(self, task_id: str, task: Task) -> bool:
+        """
+        Send a push notification for a task status update.
+
+        Per A2A spec section 4.3.3, push notifications use StreamResponse format.
+        We send the full Task object (including artifacts) wrapped in StreamResponse.
+
+        Args:
+            task_id: The task ID
+            task: The updated Task object
+
+        Returns:
+            True if notification was sent successfully, False otherwise
+        """
+        push_config = self._push_configs.get(task_id)
+        if not push_config or not push_config.url:
+            return False
+
+        try:
+            client = await self._get_http_client()
+
+            # A2A-compliant: Send full Task wrapped in StreamResponse format
+            # This ensures artifacts (with response content) are included
+            payload = {
+                "task": task.model_dump(mode="json")
+            }
+
+            # Build headers
+            headers = {"Content-Type": "application/json"}
+
+            # Add Bearer token if provided
+            if push_config.token:
+                headers["Authorization"] = f"Bearer {push_config.token}"
+
+            # Send the notification
+            response = await client.post(
+                push_config.url,
+                json=payload,
+                headers=headers,
+            )
+
+            if response.status_code in (200, 201, 202, 204):
+                logger.info(
+                    "Push notification sent for task %s to %s (status=%s)",
+                    task_id,
+                    push_config.url,
+                    task.status.state,
+                )
+                return True
+            else:
+                logger.warning(
+                    "Push notification failed for task %s: HTTP %s - %s",
+                    task_id,
+                    response.status_code,
+                    response.text[:200],
+                )
+                return False
+
+        except Exception as e:
+            logger.error(
+                "Failed to send push notification for task %s: %s",
+                task_id,
+                e,
+            )
+            return False
+
+    async def set_push_notification_config(
+        self, task_id: str, config: PushNotificationConfig
+    ) -> bool:
+        """
+        Set or update push notification config for a task.
+
+        Args:
+            task_id: The task ID
+            config: The push notification configuration
+
+        Returns:
+            True if config was set successfully
+        """
+        if not self.async_mode:
+            raise RuntimeError(
+                "Push notifications are only available in async mode. "
+                "Initialize adapter with async_mode=True"
+            )
+
+        task = await self.task_store.get(task_id)
+        if not task:
+            return False
+
+        self._push_configs[task_id] = config
+        logger.debug("Set push notification config for task %s: %s", task_id, config.url)
+        return True
+
+    async def get_push_notification_config(
+        self, task_id: str
+    ) -> PushNotificationConfig | None:
+        """
+        Get push notification config for a task.
+
+        Args:
+            task_id: The task ID
+
+        Returns:
+            The push notification config, or None if not set
+        """
+        return self._push_configs.get(task_id)
+
+    async def delete_push_notification_config(self, task_id: str) -> bool:
+        """
+        Delete push notification config for a task.
+
+        Args:
+            task_id: The task ID
+
+        Returns:
+            True if config was deleted, False if not found
+        """
+        if task_id in self._push_configs:
+            del self._push_configs[task_id]
+            logger.debug("Deleted push notification config for task %s", task_id)
+            return True
+        return False
+
     # ---------- Async Task Support ----------
 
     def supports_async_tasks(self) -> bool:
@@ -950,6 +1119,10 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             )
             await self.task_store.save(canceled_task)
             logger.debug("Task %s marked as canceled", task_id)
+
+            # Send push notification for cancellation
+            await self._send_push_notification(task_id, canceled_task)
+
             return canceled_task
 
         return None
@@ -983,6 +1156,12 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
         self._background_tasks.clear()
         self._background_processes.clear()
         self._cancelled_tasks.clear()
+        self._push_configs.clear()
+
+        # Close HTTP client
+        if self._http_client:
+            await self._http_client.aclose()
+            self._http_client = None
 
     async def __aenter__(self):
         """Async context manager entry."""

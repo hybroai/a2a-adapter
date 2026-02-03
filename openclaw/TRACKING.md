@@ -136,6 +136,18 @@ send_message() ──► Task(state=working)
 - [ ] Update `README.md` with OpenClaw adapter docs
 - [ ] Update `ARCHITECTURE.md` with OpenClaw section
 
+### Phase 5: Push Notification Support ✅
+
+- [x] Add `supports_push_notifications()` method to adapter
+- [x] Add `_push_configs` dict to track push configs per task
+- [x] Add `_send_push_notification()` method to POST to webhook
+- [x] Update `_handle_async()` to extract push config from params
+- [x] Update `_execute_command_background()` to send notifications on completion/failure
+- [x] Update `cancel_task()` to send notification on cancellation
+- [x] Add `set_push_notification_config()`, `get_push_notification_config()`, `delete_push_notification_config()` methods
+- [x] Update `AdapterRequestHandler` to support push notification operations
+- [x] Update example to use `pushNotifications=True` in agent card
+
 ---
 
 ## Critical Design Decisions
@@ -297,6 +309,45 @@ def _context_id_to_session_id(self, context_id: str | None) -> str:
 
 **Mitigation**: Use unique session IDs per A2A context; document recommendation.
 
+### Issue 7: Push Notification Delivery ✅ RESOLVED
+
+**Risk**: Webhook delivery may fail due to network issues, invalid URLs, or authentication problems.
+
+**Solution Implemented**: The adapter handles push notification failures gracefully:
+
+```python
+async def _send_push_notification(self, task_id: str, task: Task) -> bool:
+    """Send push notification with error handling."""
+    push_config = self._push_configs.get(task_id)
+    if not push_config or not push_config.url:
+        return False
+
+    try:
+        # Build headers with Bearer token if provided
+        headers = {"Content-Type": "application/json"}
+        if push_config.token:
+            headers["Authorization"] = f"Bearer {push_config.token}"
+
+        # Send TaskStatusUpdateEvent payload
+        response = await client.post(push_config.url, json=payload, headers=headers)
+        
+        if response.status_code in (200, 201, 202, 204):
+            logger.info("Push notification sent for task %s", task_id)
+            return True
+        else:
+            logger.warning("Push notification failed: HTTP %s", response.status_code)
+            return False
+    except Exception as e:
+        logger.error("Failed to send push notification: %s", e)
+        return False
+```
+
+**Behavior**:
+- Push notifications are sent on task completion, failure, timeout, and cancellation
+- Bearer token authentication is supported via `PushNotificationConfig.token`
+- Failures are logged but don't affect task state (task still completes/fails normally)
+- HTTP client is reused for efficiency and properly closed on adapter shutdown
+
 ---
 
 ## API Reference
@@ -334,6 +385,12 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
     async def get_task(self, task_id: str) -> Task | None: ...
     async def cancel_task(self, task_id: str) -> Task | None: ...
     async def delete_task(self, task_id: str) -> bool: ...
+    
+    # Push notification support
+    def supports_push_notifications(self) -> bool: ...
+    async def set_push_notification_config(self, task_id: str, config: PushNotificationConfig) -> bool: ...
+    async def get_push_notification_config(self, task_id: str) -> PushNotificationConfig | None: ...
+    async def delete_push_notification_config(self, task_id: str) -> bool: ...
     
     # Lifecycle
     async def close(self) -> None: ...
@@ -484,11 +541,12 @@ openclaw agent \
 
 | File | Status | Description |
 |------|--------|-------------|
-| `a2a_adapter/integrations/openclaw.py` | ✅ Created | Main adapter implementation (~920 lines) |
+| `a2a_adapter/integrations/openclaw.py` | ✅ Created | Main adapter implementation (~1100 lines) |
+| `a2a_adapter/client.py` | ✅ Modified | Added push notification and task support to RequestHandler |
 | `a2a_adapter/loader.py` | ✅ Modified | Register openclaw adapter |
 | `a2a_adapter/integrations/__init__.py` | ✅ Modified | Export OpenClawAgentAdapter |
 | `tests/unit/test_openclaw_adapter.py` | ✅ Created | 53 unit tests |
-| `examples/08_openclaw_agent.py` | ✅ Created | Usage example |
+| `examples/08_openclaw_agent.py` | ✅ Created | Usage example with push notifications |
 | `README.md` | ⏳ Pending | Add OpenClaw documentation |
 | `ARCHITECTURE.md` | ⏳ Pending | Add OpenClaw section |
 
@@ -501,6 +559,7 @@ openclaw agent \
 | 2025-01-30 | 0.1.0 | Initial design and implementation plan |
 | 2025-01-31 | 0.2.0 | Core implementation complete (async/sync modes, task lifecycle) |
 | 2025-01-31 | 0.3.0 | Added context_id to session_id mapping for multi-tenancy |
+| 2025-02-01 | 0.4.0 | Added push notification support for webhook callbacks |
 
 ---
 
