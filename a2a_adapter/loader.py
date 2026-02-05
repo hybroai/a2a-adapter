@@ -30,6 +30,10 @@ async def load_a2a_agent(config: Dict[str, Any]) -> BaseAgentAdapter:
                              optional 'input_key', 'output_key', 'async_mode'
                 - callable: requires 'callable' (async function),
                             optional 'supports_streaming'
+                - openclaw: optional 'session_id', 'agent_id', 'thinking',
+                            'timeout', 'openclaw_path', 'working_directory',
+                            'env_vars', 'async_mode', 'task_store',
+                            'task_ttl_seconds', 'cleanup_interval_seconds'
 
     Returns:
         Configured BaseAgentAdapter instance
@@ -85,6 +89,15 @@ async def load_a2a_agent(config: Dict[str, Any]) -> BaseAgentAdapter:
         >>> adapter = await load_a2a_agent({
         ...     "adapter": "callable",
         ...     "callable": my_agent
+        ... })
+
+        >>> # Load OpenClaw adapter
+        >>> adapter = await load_a2a_agent({
+        ...     "adapter": "openclaw",
+        ...     "session_id": "my-session",
+        ...     "agent_id": "main",
+        ...     "thinking": "low",
+        ...     "timeout": 300,
         ... })
     """
     adapter_type = config.get("adapter")
@@ -167,8 +180,25 @@ async def load_a2a_agent(config: Dict[str, Any]) -> BaseAgentAdapter:
             supports_streaming=config.get("supports_streaming", False),
         )
 
+    elif adapter_type == "openclaw":
+        from .integrations.openclaw import OpenClawAgentAdapter
+
+        return OpenClawAgentAdapter(
+            session_id=config.get("session_id"),
+            agent_id=config.get("agent_id"),
+            thinking=config.get("thinking", "low"),
+            timeout=config.get("timeout", 600),
+            openclaw_path=config.get("openclaw_path", "openclaw"),
+            working_directory=config.get("working_directory"),
+            env_vars=config.get("env_vars"),
+            async_mode=config.get("async_mode", True),
+            task_store=config.get("task_store"),
+            task_ttl_seconds=config.get("task_ttl_seconds", 3600),
+            cleanup_interval_seconds=config.get("cleanup_interval_seconds", 300),
+        )
+
     else:
         raise ValueError(
             f"Unknown adapter type: {adapter_type}. "
-            f"Supported types: n8n, crewai, langchain, langgraph, callable"
+            f"Supported types: n8n, crewai, langchain, langgraph, callable, openclaw"
         )

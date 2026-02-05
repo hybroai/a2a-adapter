@@ -7,7 +7,7 @@
 
 **🚀 Open Source A2A Protocol Adapter SDK - Make Any Agent Framework A2A-Compatible in 3 Lines**
 
-A Python SDK that enables seamless integration of various agent frameworks (n8n, LangGraph, CrewAI, LangChain, etc.) with the [A2A (Agent-to-Agent) Protocol](https://github.com/a2aproject/A2A). Build interoperable AI agent systems that can communicate across different platforms and frameworks.
+A Python SDK that enables seamless integration of various agent frameworks (n8n, LangGraph, CrewAI, LangChain, etc.) and personal AI agents (OpenClaw) with the [A2A (Agent-to-Agent) Protocol](https://github.com/a2aproject/A2A). Build interoperable AI agent systems that can communicate across different platforms and frameworks.
 
 **✨ Key Benefits:**
 
@@ -22,7 +22,7 @@ A Python SDK that enables seamless integration of various agent frameworks (n8n,
 
 ## Features
 
-✨ **Framework Agnostic**: Integrate n8n workflows, LangGraph workflows, CrewAI crews, LangChain chains, and more
+✨ **Framework Agnostic**: Integrate n8n workflows, LangGraph workflows, CrewAI crews, LangChain chains, OpenClaw personal agents, and more
 🔌 **Simple API**: 3-line setup to expose any agent as A2A-compliant
 🌊 **Streaming Support**: Built-in streaming for LangGraph, LangChain, and custom adapters
 🎯 **Type Safe**: Leverages official A2A SDK types
@@ -43,12 +43,13 @@ A Python SDK that enables seamless integration of various agent frameworks (n8n,
 │   - LangGraph   │
 │   - CrewAI      │
 │   - LangChain   │
+│   - OpenClaw    │
 │   - Callable    │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│  Your Agent     │  (n8n workflow / CrewAI crew / Chain)
+│  Your Agent     │  (n8n workflow / CrewAI crew / Chain / OpenClaw)
 └─────────────────┘
 ```
 
@@ -178,6 +179,16 @@ async def my_agent(inputs: dict) -> str:
 adapter = await load_a2a_agent({
     "adapter": "callable",
     "callable": my_agent
+})
+```
+
+### OpenClaw Agent → A2A Agent
+
+```python
+adapter = await load_a2a_agent({
+    "adapter": "openclaw",
+    "thinking": "low",
+    "async_mode": True
 })
 ```
 
@@ -352,6 +363,19 @@ See [examples/06_langgraph_single_agent.py](https://github.com/hybroai/a2a-adapt
 }
 ```
 
+### OpenClaw Adapter
+
+```python
+{
+    "adapter": "openclaw",
+    "session_id": "my-session",      # Optional, auto-generated if not provided
+    "agent_id": None,                # Optional, use default agent
+    "thinking": "low",               # Optional: off|minimal|low|medium|high|xhigh
+    "timeout": 600,                  # Optional, command timeout in seconds
+    "async_mode": True               # Optional, return Task immediately (default: True)
+}
+```
+
 ## Examples
 
 The `examples/` directory contains complete working examples:
@@ -363,6 +387,7 @@ The `examples/` directory contains complete working examples:
 - **05_custom_adapter.py** - Custom adapter implementations
 - **06_langgraph_single_agent.py** - Calling A2A agents from LangGraph
 - **07_langgraph_server.py** - LangGraph workflow as A2A server
+- **08_openclaw_agent.py** - OpenClaw personal AI agent
 
 Run any example:
 
@@ -466,15 +491,16 @@ Convert framework output to A2A Message or Task.
 
 Check if this adapter supports streaming responses.
 
-## Framework Support
+## Adapter Support
 
-| Framework     | Adapter                  | Non-Streaming | Streaming | Async Tasks | Status    |
-| ------------- | ------------------------ | ------------- | --------- | ----------- | --------- |
-| **n8n**       | `N8nAgentAdapter`        | ✅            | ❌        | ✅          | ✅ Stable |
-| **LangGraph** | `LangGraphAgentAdapter`  | ✅            | ✅        | ✅          | ✅ Stable |
-| **CrewAI**    | `CrewAIAgentAdapter`     | ✅            | ❌        | ✅          | ✅ Stable |
-| **LangChain** | `LangChainAgentAdapter`  | ✅            | ✅        | ❌          | ✅ Stable |
-| **Callable**  | `CallableAgentAdapter`   | ✅            | ✅        | ❌          | ✅ Stable |
+| Agent/Framework | Adapter                  | Non-Streaming | Streaming | Async Tasks | Status    |
+| --------------- | ------------------------ | ------------- | --------- | ----------- | --------- |
+| **n8n**         | `N8nAgentAdapter`        | ✅            | ❌        | ✅          | ✅ Stable |
+| **LangGraph**   | `LangGraphAgentAdapter`  | ✅            | ✅        | ✅          | ✅ Stable |
+| **CrewAI**      | `CrewAIAgentAdapter`     | ✅            | ❌        | ✅          | ✅ Stable |
+| **LangChain**   | `LangChainAgentAdapter`  | ✅            | ✅        | ❌          | ✅ Stable |
+| **OpenClaw**    | `OpenClawAgentAdapter`   | ✅            | ❌        | ✅          | ✅ Stable |
+| **Callable**    | `CallableAgentAdapter`   | ✅            | ✅        | ❌          | ✅ Stable |
 
 ## 🤝 Contributing
 
@@ -506,6 +532,7 @@ We welcome contributions from the community! Whether you're fixing bugs, adding 
 - [x] CrewAI adapter (with async task support)
 - [x] LangChain adapter (with streaming)
 - [x] Callable adapter (with streaming)
+- [x] OpenClaw adapter (with async tasks)
 - [x] Comprehensive examples
 - [x] Task support (async execution pattern)
 - [ ] Artifact support (file uploads/downloads)

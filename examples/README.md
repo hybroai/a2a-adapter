@@ -40,6 +40,7 @@ export N8N_WEBHOOK_URL="https://your-n8n-instance.com/webhook/agent"
 | `05_custom_adapter.py` | Custom adapter examples | 8003 | Custom | ❌ |
 | `06_langgraph_single_agent.py` | Call A2A agents from LangGraph | - | LangGraph | - |
 | `07_langgraph_server.py` | LangGraph workflow as A2A server | 9002 | LangGraph | ✅ |
+| `08_openclaw_agent.py` | OpenClaw personal AI agent | 9008 | OpenClaw | ❌ |
 
 ## Running Examples
 
@@ -161,6 +162,26 @@ This demonstrates how to:
 - Support streaming responses
 - Handle both simple and chat-style inputs
 - Extract output from workflow state
+
+### Example 8: OpenClaw Agent
+
+Expose an OpenClaw personal AI agent as an A2A server:
+
+```bash
+# Ensure OpenClaw is installed and configured
+npm install -g openclaw
+openclaw config set anthropic.apiKey "your-key"
+
+# Start the agent server
+python examples/08_openclaw_agent.py
+```
+
+The OpenClaw agent will be available at `http://localhost:9008`.
+
+This example runs in async mode by default:
+- Returns a Task immediately with `task_id`
+- Poll `GET /task/{task_id}` for completion
+- Supports push notifications (webhook callbacks)
 
 ## Testing Your Agents
 

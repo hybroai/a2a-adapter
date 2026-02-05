@@ -7,6 +7,7 @@ This package contains concrete adapter implementations for various agent framewo
 - LangChain: LLM application framework with LCEL support
 - LangGraph: Stateful workflow orchestration framework
 - Callable: Generic Python async function adapter
+- OpenClaw: Personal AI super agent CLI wrapper
 """
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "LangChainAgentAdapter",
     "LangGraphAgentAdapter",
     "CallableAgentAdapter",
+    "OpenClawAgentAdapter",
 ]
 
 # Lazy imports to avoid requiring all optional dependencies
@@ -34,4 +36,7 @@ def __getattr__(name: str):
     elif name == "CallableAgentAdapter":
         from .callable import CallableAgentAdapter
         return CallableAgentAdapter
+    elif name == "OpenClawAgentAdapter":
+        from .openclaw import OpenClawAgentAdapter
+        return OpenClawAgentAdapter
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

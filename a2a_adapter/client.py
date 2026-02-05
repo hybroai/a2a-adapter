@@ -27,6 +27,7 @@ from a2a.types import (
     ListTaskPushNotificationConfigResponse,
     Message,
     MessageSendParams,
+    PushNotificationConfig,
     SetTaskPushNotificationConfigRequest,
     SetTaskPushNotificationConfigResponse,
     Task,
@@ -43,6 +44,11 @@ class AdapterRequestHandler(RequestHandler):
     
     This class bridges the gap between our adapter abstraction and the
     official A2A SDK's RequestHandler protocol.
+    
+    Supports:
+    - Basic message send (sync and async)
+    - Task get/cancel for async adapters
+    - Push notification configuration for adapters that support it
     """
 
     def __init__(self, adapter: BaseAgentAdapter):
@@ -89,23 +95,37 @@ class AdapterRequestHandler(RequestHandler):
         async for event in self.adapter.handle_stream(params):
             yield event
 
-    # Task-related methods (not supported by default)
+    # Task-related methods
     
     async def on_get_task(
         self,
         params: GetTaskRequest,
         context: ServerCallContext
     ) -> GetTaskResponse:
-        """Get task status - not supported."""
-        raise ServerError(error=UnsupportedOperationError())
+        """Get task status."""
+        if not self.adapter.supports_async_tasks():
+            raise ServerError(error=UnsupportedOperationError())
+        
+        task = await self.adapter.get_task(params.id)
+        if task is None:
+            raise ServerError(error=UnsupportedOperationError(message=f"Task {params.id} not found"))
+        
+        return GetTaskResponse(result=task)
 
     async def on_cancel_task(
         self,
         params: CancelTaskRequest,
         context: ServerCallContext
     ) -> CancelTaskResponse:
-        """Cancel task - not supported."""
-        raise ServerError(error=UnsupportedOperationError())
+        """Cancel task."""
+        if not self.adapter.supports_async_tasks():
+            raise ServerError(error=UnsupportedOperationError())
+        
+        task = await self.adapter.cancel_task(params.id)
+        if task is None:
+            raise ServerError(error=UnsupportedOperationError(message=f"Task {params.id} not found"))
+        
+        return CancelTaskResponse(result=task)
 
     async def on_resubscribe_to_task(
         self,
@@ -116,30 +136,47 @@ class AdapterRequestHandler(RequestHandler):
         raise ServerError(error=UnsupportedOperationError())
         yield  # Make this an async generator
 
-    # Push notification methods (not supported by default)
+    # Push notification methods
     
     async def on_set_task_push_notification_config(
         self,
         params: SetTaskPushNotificationConfigRequest,
         context: ServerCallContext
     ) -> SetTaskPushNotificationConfigResponse:
-        """Set push notification config - not supported."""
-        raise ServerError(error=UnsupportedOperationError())
+        """Set push notification config."""
+        if not hasattr(self.adapter, 'supports_push_notifications') or not self.adapter.supports_push_notifications():
+            raise ServerError(error=UnsupportedOperationError())
+        
+        success = await self.adapter.set_push_notification_config(
+            params.taskId,
+            params.pushNotificationConfig
+        )
+        if not success:
+            raise ServerError(error=UnsupportedOperationError(message=f"Task {params.taskId} not found"))
+        
+        return SetTaskPushNotificationConfigResponse(result=params.pushNotificationConfig)
 
     async def on_get_task_push_notification_config(
         self,
         params: GetTaskPushNotificationConfigParams,
         context: ServerCallContext
     ) -> GetTaskPushNotificationConfigResponse:
-        """Get push notification config - not supported."""
-        raise ServerError(error=UnsupportedOperationError())
+        """Get push notification config."""
+        if not hasattr(self.adapter, 'supports_push_notifications') or not self.adapter.supports_push_notifications():
+            raise ServerError(error=UnsupportedOperationError())
+        
+        config = await self.adapter.get_push_notification_config(params.taskId)
+        if config is None:
+            raise ServerError(error=UnsupportedOperationError(message=f"No push config for task {params.taskId}"))
+        
+        return GetTaskPushNotificationConfigResponse(result=config)
 
     async def on_list_task_push_notification_config(
         self,
         params: ListTaskPushNotificationConfigParams,
         context: ServerCallContext
     ) -> ListTaskPushNotificationConfigResponse:
-        """List push notification configs - not supported."""
+        """List push notification configs - not supported (would need to track all configs)."""
         raise ServerError(error=UnsupportedOperationError())
 
     async def on_delete_task_push_notification_config(
@@ -147,8 +184,15 @@ class AdapterRequestHandler(RequestHandler):
         params: DeleteTaskPushNotificationConfigParams,
         context: ServerCallContext
     ) -> DeleteTaskPushNotificationConfigResponse:
-        """Delete push notification config - not supported."""
-        raise ServerError(error=UnsupportedOperationError())
+        """Delete push notification config."""
+        if not hasattr(self.adapter, 'supports_push_notifications') or not self.adapter.supports_push_notifications():
+            raise ServerError(error=UnsupportedOperationError())
+        
+        success = await self.adapter.delete_push_notification_config(params.taskId)
+        if not success:
+            raise ServerError(error=UnsupportedOperationError(message=f"No push config for task {params.taskId}"))
+        
+        return DeleteTaskPushNotificationConfigResponse(result={})
 
 
 def build_agent_app(
