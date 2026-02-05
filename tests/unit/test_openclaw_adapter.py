@@ -51,7 +51,7 @@ class TestOpenClawAdapterInit:
         assert adapter.session_id.startswith("a2a-")
         assert adapter.agent_id is None
         assert adapter.thinking == "low"
-        assert adapter.timeout == 300
+        assert adapter.timeout == 600
         assert adapter.openclaw_path == "openclaw"
         assert adapter.working_directory is None
         assert adapter.env_vars == {}
