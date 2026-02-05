@@ -299,6 +299,16 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
                 timeout=self.timeout,
             )
         except asyncio.TimeoutError:
+            # Kill the subprocess if still running to prevent zombie processes
+            proc = self._background_processes.get(task_id)
+            if proc and proc.returncode is None:
+                logger.debug("Killing subprocess for task %s due to timeout", task_id)
+                proc.kill()
+                try:
+                    await proc.wait()  # Reap the zombie process
+                except Exception:
+                    pass  # Best effort cleanup
+
             # Check if task was cancelled (don't overwrite canceled state)
             if task_id in self._cancelled_tasks:
                 logger.debug("Task %s was cancelled, not marking as failed", task_id)

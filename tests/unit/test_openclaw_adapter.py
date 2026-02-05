@@ -537,8 +537,10 @@ class TestOpenClawAdapterAsyncExecution:
             
             assert completed_task is not None
             assert completed_task.status.state == TaskState.completed
-            assert completed_task.status.message is not None
-            assert "command result" in completed_task.status.message.parts[0].root.text
+            # Response is in artifacts (A2A spec: task outputs go in artifacts)
+            assert completed_task.artifacts is not None
+            assert len(completed_task.artifacts) == 1
+            assert "command result" in completed_task.artifacts[0].parts[0].root.text
             
             await adapter.close()
 
