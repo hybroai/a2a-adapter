@@ -7,7 +7,7 @@
 
 **🚀 Open Source A2A Protocol Adapter SDK - Make Any Agent Framework A2A-Compatible in 3 Lines**
 
-A Python SDK that enables seamless integration of various agent frameworks (n8n, LangGraph, CrewAI, LangChain, etc.) and personal AI agents (OpenClaw) with the [A2A (Agent-to-Agent) Protocol](https://github.com/a2aproject/A2A). Build interoperable AI agent systems that can communicate across different platforms and frameworks.
+A Python SDK that enables seamless integration of various agent frameworks (n8n, LangGraph, CrewAI, LangChain, etc.) and personal AI agents ([OpenClaw](https://openclaw.ai/)) with the [A2A (Agent-to-Agent) Protocol](https://github.com/a2aproject/A2A). Build interoperable AI agent systems that can communicate across different platforms and frameworks.
 
 **✨ Key Benefits:**
 
@@ -22,12 +22,12 @@ A Python SDK that enables seamless integration of various agent frameworks (n8n,
 
 ## Features
 
-✨ **Framework Agnostic**: Integrate n8n workflows, LangGraph workflows, CrewAI crews, LangChain chains, OpenClaw personal agents, and more
-🔌 **Simple API**: 3-line setup to expose any agent as A2A-compliant
-🌊 **Streaming Support**: Built-in streaming for LangGraph, LangChain, and custom adapters
-🎯 **Type Safe**: Leverages official A2A SDK types
-🔧 **Extensible**: Easy to add custom adapters for new frameworks
-📦 **Minimal Dependencies**: Optional dependencies per framework
+- ✨ **Framework Agnostic**: Integrate n8n workflows, LangGraph workflows, CrewAI crews, LangChain chains, OpenClaw personal agents, and more
+- 🔌 **Simple API**: 3-line setup to expose any agent as A2A-compliant
+- 🌊 **Streaming Support**: Built-in streaming for LangGraph, LangChain, and custom adapters
+- 🎯 **Type Safe**: Leverages official A2A SDK types
+- 🔧 **Extensible**: Easy to add custom adapters for new frameworks
+- 📦 **Minimal Dependencies**: Optional dependencies per framework
 
 ## Architecture
 
