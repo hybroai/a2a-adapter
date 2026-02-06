@@ -12,3 +12,7 @@
 - Added: OpenClaw adapter
 - Added: Push notification support
 - Added: More unit tests
+
+## [0.1.6] - 2026-2-5
+- Added: Add timeout & input mapper for adapters
+- Fixed: README fix

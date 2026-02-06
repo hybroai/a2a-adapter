@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "a2a-adapter"
-version = "0.1.5"
+version = "0.1.6"
 description = "A2A Protocol Adapter SDK for integrating various agent frameworks"
 readme = "README.md"
 license = {text = "Apache-2.0"}
