@@ -47,12 +47,12 @@ def __getattr__(name: str):
     elif name == "LangGraphAdapter":
         from .langgraph import LangGraphAdapter
         return LangGraphAdapter
-    # v0.2 adapters not yet migrated — will be added in PR 4
-    elif name in ("CrewAIAdapter", "OpenClawAdapter"):
-        raise AttributeError(
-            f"{name} is not yet available. It will be added in a future PR. "
-            f"Use the v0.1 class name for now (e.g., {name.replace('Adapter', 'AgentAdapter')})."
-        )
+    elif name == "CrewAIAdapter":
+        from .crewai import CrewAIAdapter
+        return CrewAIAdapter
+    elif name == "OpenClawAdapter":
+        from .openclaw import OpenClawAdapter
+        return OpenClawAdapter
     # v0.1 adapters (deprecated)
     elif name == "N8nAgentAdapter":
         from .n8n import N8nAgentAdapter
