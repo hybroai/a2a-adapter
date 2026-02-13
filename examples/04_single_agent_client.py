@@ -1,129 +1,81 @@
 """
-Example: Simple A2A Agent Client
+Example: A2A Client — Test Any Running Agent
 
-This example demonstrates how to call an A2A agent using the official A2A.
-It can be used to test any of the agent servers created with this adapter SDK.
+This is a client example (not a server). Use it to test any A2A agent
+started by the other examples.
 
 Prerequisites:
-- a2a package installed
-- An A2A agent server running (e.g., from examples 01-03)
+- An A2A agent server running (e.g., python examples/01_single_n8n_agent.py)
 
 Usage:
-    # Start an agent server first (e.g., example 01)
-    python examples/01_single_n8n_agent.py
-    
-    # In another terminal, run this client
     python examples/04_single_agent_client.py
 """
 
 import asyncio
+import json
 
-from a2a.client import A2AClient
-from a2a.types import Message, MessageSendParams, TextPart
+import httpx
+
+
+async def send_message(url: str, text: str):
+    """Send a message/send request to an A2A agent."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "test-1",
+        "method": "message/send",
+        "params": {
+            "message": {
+                "role": "user",
+                "messageId": "msg-1",
+                "parts": [{"kind": "text", "text": text}],
+            }
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(url, json=payload)
+        return resp.json()
+
+
+async def send_stream(url: str, text: str):
+    """Send a message/stream request (SSE) to an A2A agent."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "test-1",
+        "method": "message/stream",
+        "params": {
+            "message": {
+                "role": "user",
+                "messageId": "msg-1",
+                "parts": [{"kind": "text", "text": text}],
+            }
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(url, json=payload)
+        for line in resp.text.split("\n"):
+            line = line.strip()
+            if line.startswith("data:"):
+                event = json.loads(line[5:].strip())
+                yield event
 
 
 async def main():
-    """Call an A2A agent and print the response."""
-    
-    # Create A2A client pointing to the agent server
-    client = A2AClient(base_url="http://localhost:9000")
-    
-    # Prepare a message
-    message = Message(
-        role="user",
-        content=[
-            TextPart(
-                type="text",
-                text="What is 25 * 37 + 18?"
-            )
-        ]
-    )
-    
-    params = MessageSendParams(
-        messages=[message],
-        session_id="example-session-123",
-    )
-    
-    print("Sending message to A2A agent...")
-    print(f"Message: {message.content[0].text}")
-    print()
-    
-    try:
-        # Send message and get response
-        response = await client.send_message(params)
-        
-        print("Response received:")
-        print("-" * 50)
-        
-        if isinstance(response, Message):
-            # Extract text from response content
-            if isinstance(response.content, list):
-                for item in response.content:
-                    if hasattr(item, "text"):
-                        print(item.text)
-            else:
-                print(response.content)
-        else:
-            # Task response
-            print(f"Task created: {response}")
-            
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        await client.close()
+    agent_url = "http://localhost:9000"
 
-
-async def streaming_example():
-    """Example of streaming responses from an A2A agent."""
-    
-    client = A2AClient(base_url="http://localhost:8002")  # LangChain streaming agent
-    
-    message = Message(
-        role="user",
-        content=[
-            TextPart(
-                type="text",
-                text="Tell me a short story about AI agents working together."
-            )
-        ]
-    )
-    
-    params = MessageSendParams(
-        messages=[message],
-        session_id="streaming-session-456",
-    )
-    
-    print("Sending streaming message to A2A agent...")
-    print(f"Message: {message.content[0].text}")
+    # 1. Fetch agent card
+    print("Fetching agent card...")
+    async with httpx.AsyncClient() as client:
+        card = (await client.get(f"{agent_url}/.well-known/agent.json")).json()
+    print(f"Agent: {card['name']} — {card.get('description', '')}")
     print()
-    print("Streaming response:")
-    print("-" * 50)
-    
-    try:
-        async for chunk in client.send_message_stream(params):
-            # Print chunks as they arrive
-            print(chunk, end="", flush=True)
-        print()
-        print("-" * 50)
-        
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        await client.close()
+
+    # 2. Send a message
+    print("Sending message: 'What is 25 * 37 + 18?'")
+    result = await send_message(agent_url, "What is 25 * 37 + 18?")
+    print(f"Response: {json.dumps(result, indent=2)}")
 
 
 if __name__ == "__main__":
-    print("A2A Agent Client Example")
-    print("=" * 50)
-    print()
-    
-    # Run non-streaming example
     asyncio.run(main())
-    
-    print()
-    print("=" * 50)
-    print()
-    
-    # Uncomment to test streaming (requires streaming-enabled agent on port 8002)
-    # asyncio.run(streaming_example())
-
