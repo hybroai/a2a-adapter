@@ -139,11 +139,14 @@ class BaseA2AAdapter(ABC):
         """
         return type(self).stream is not BaseA2AAdapter.stream
 
-    async def cancel(self, **kwargs) -> None:
+    async def cancel(self, context_id: str | None = None, **kwargs) -> None:
         """Cancel the current execution. Optional.
 
         Override for frameworks where execution can be interrupted
         (e.g., OpenClaw can kill a subprocess).
+
+        Args:
+            context_id: The context ID of the task to cancel.
 
         Keyword Args:
             context: The A2A SDK ``RequestContext`` for the task being
