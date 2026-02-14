@@ -1,8 +1,8 @@
 # Quick Start Guide
 
-**Get your first A2A agent running in 5 minutes!** ⚡
+Get your first A2A agent running in under 5 minutes.
 
-This guide will help you expose your existing agent (n8n workflow, CrewAI crew, or LangChain chain) as an A2A-compatible agent.
+This guide will help you expose your existing agent (n8n workflow, CrewAI crew, LangChain chain, LangGraph workflow, or any function) as an A2A-compatible agent.
 
 ## Prerequisites
 
@@ -18,130 +18,118 @@ pip install a2a-adapter
 For specific frameworks:
 
 ```bash
-pip install a2a-adapter[n8n]
-pip install a2a-adapter[crewai]    # For CrewAI
-pip install a2a-adapter[langchain] # For LangChain
-pip install a2a-adapter[all]        # Install all
+pip install a2a-adapter[crewai]        # CrewAI
+pip install a2a-adapter[langchain]     # LangChain
+pip install a2a-adapter[langgraph]     # LangGraph
+pip install a2a-adapter[all]           # Everything
 ```
 
 ## Step 2: Create Your Agent
 
-Choose your framework:
+Choose your framework — every example follows the same 3-line pattern: **import**, **adapter**, **serve**.
 
 ### Option A: n8n Workflow
 
 ```python
 # my_agent.py
-import asyncio
-from a2a_adapter import load_a2a_agent, serve_agent
-from a2a.types import AgentCard
+from a2a_adapter import N8nAdapter, serve_agent
 
-async def main():
-    adapter = await load_a2a_agent({
-        "adapter": "n8n",
-        "webhook_url": "https://your-n8n.com/webhook/workflow-id"
-    })
-
-    serve_agent(
-        agent_card=AgentCard(
-            name="My N8n Agent",
-            description="My n8n workflow as A2A agent"
-        ),
-        adapter=adapter,
-        port=9000
-    )
-
-if __name__ == "__main__":
-    asyncio.run(main())
+adapter = N8nAdapter(
+    webhook_url="https://your-n8n.com/webhook/workflow-id",
+    name="My N8n Agent",
+    description="My n8n workflow as an A2A agent",
+)
+serve_agent(adapter, port=9000)
 ```
 
-### Option B: CrewAI Crew
+### Option B: LangChain Chain (with streaming)
 
 ```python
 # my_agent.py
-import asyncio
-from crewai import Crew, Agent, Task
-from a2a_adapter import load_a2a_agent, serve_agent
-from a2a.types import AgentCard
-
-# Create your crew
-crew = Crew(agents=[...], tasks=[...])
-
-async def main():
-    adapter = await load_a2a_agent({
-        "adapter": "crewai",
-        "crew": crew
-    })
-
-    serve_agent(
-        agent_card=AgentCard(name="Research Crew", description="..."),
-        adapter=adapter,
-        port=9000
-    )
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-### Option C: LangChain Chain
-
-```python
-# my_agent.py
-import asyncio
-from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from a2a_adapter import load_a2a_agent, serve_agent
-from a2a.types import AgentCard
+from langchain_openai import ChatOpenAI
+from a2a_adapter import LangChainAdapter, serve_agent
 
-# Create chain
-prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are helpful."),
-    ("user", "{input}")
-])
-chain = prompt | ChatOpenAI(model="gpt-4o-mini", streaming=True)
+chain = (
+    ChatPromptTemplate.from_messages([
+        ("system", "You are a helpful assistant."),
+        ("user", "{input}"),
+    ])
+    | ChatOpenAI(model="gpt-4o-mini", streaming=True)
+)
 
-async def main():
-    adapter = await load_a2a_agent({
-        "adapter": "langchain",
-        "runnable": chain,
-        "input_key": "input"
-    })
-
-    serve_agent(
-        agent_card=AgentCard(name="Chat Agent", description="..."),
-        adapter=adapter,
-        port=9000
-    )
-
-if __name__ == "__main__":
-    asyncio.run(main())
+adapter = LangChainAdapter(runnable=chain, input_key="input", name="Chat Agent")
+serve_agent(adapter, port=9000)  # Streaming auto-detected!
 ```
 
-### Option D: Custom Function
+### Option C: LangGraph Workflow (with streaming)
 
 ```python
 # my_agent.py
-import asyncio
-from a2a_adapter import load_a2a_agent, serve_agent
-from a2a.types import AgentCard
+from a2a_adapter import LangGraphAdapter, serve_agent
+
+graph = build_my_graph().compile()  # Your LangGraph CompiledGraph
+
+adapter = LangGraphAdapter(
+    graph=graph,
+    name="Research Agent",
+    description="LangGraph research workflow as an A2A agent",
+)
+serve_agent(adapter, port=9000)
+```
+
+### Option D: CrewAI Crew
+
+```python
+# my_agent.py
+from crewai import Agent, Crew, Process
+from a2a_adapter import CrewAIAdapter, serve_agent
+
+crew = Crew(agents=[...], tasks=[...], process=Process.sequential)
+
+adapter = CrewAIAdapter(crew=crew, name="Research Crew", timeout=600)
+serve_agent(adapter, port=9000)
+```
+
+### Option E: OpenClaw Agent
+
+```python
+# my_agent.py
+from a2a_adapter import OpenClawAdapter, serve_agent
+
+adapter = OpenClawAdapter(thinking="low", name="OpenClaw Agent")
+serve_agent(adapter, port=9000)
+```
+
+### Option F: Custom Function
+
+```python
+# my_agent.py
+from a2a_adapter import CallableAdapter, serve_agent
 
 async def my_agent(inputs: dict) -> str:
     return f"Echo: {inputs['message']}"
 
-async def main():
-    adapter = await load_a2a_agent({
-        "adapter": "callable",
-        "callable": my_agent
-    })
+adapter = CallableAdapter(func=my_agent, name="Echo Agent")
+serve_agent(adapter, port=9000)
+```
 
-    serve_agent(
-        agent_card=AgentCard(name="Echo Agent", description="..."),
-        adapter=adapter,
-        port=9000
-    )
+### Option G: Custom Adapter Class
 
-if __name__ == "__main__":
-    asyncio.run(main())
+For full control, subclass `BaseA2AAdapter`:
+
+```python
+# my_agent.py
+from a2a_adapter import BaseA2AAdapter, AdapterMetadata, serve_agent
+
+class MyAdapter(BaseA2AAdapter):
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
+        return f"You said: {user_input}"
+
+    def get_metadata(self) -> AdapterMetadata:
+        return AdapterMetadata(name="My Agent", description="Custom A2A agent")
+
+serve_agent(MyAdapter(), port=9000)
 ```
 
 ## Step 3: Run Your Agent
@@ -150,159 +138,148 @@ if __name__ == "__main__":
 python my_agent.py
 ```
 
-Your agent is now running at `http://localhost:9000`! 🎉
+Your agent is now running at `http://localhost:9000`.
+
+The A2A SDK automatically:
+- Generates an **AgentCard** from your adapter metadata
+- Serves it at `/.well-known/agent.json`
+- Handles **task management**, **JSON-RPC 2.0**, and **SSE streaming**
 
 ## Step 4: Test Your Agent
-
-### Using Python Client
-
-```python
-# test_agent.py
-import asyncio
-from a2a.client import A2AClient
-from a2a.types import Message, MessageSendParams, TextPart
-
-async def main():
-    client = A2AClient(base_url="http://localhost:9000")
-
-    response = await client.send_message(MessageSendParams(
-        messages=[Message(
-            role="user",
-            content=[TextPart(type="text", text="Hello!")]
-        )]
-    ))
-
-    print(f"Agent says: {response.content[0].text}")
-    await client.close()
-
-asyncio.run(main())
-```
 
 ### Using curl
 
 ```bash
-curl -X POST http://localhost:9000/messages \
+# Fetch the auto-generated agent card
+curl http://localhost:9000/.well-known/agent.json
+
+# Send a message via JSON-RPC 2.0
+curl -X POST http://localhost:9000 \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
-    "method": "messages.send",
+    "id": "1",
+    "method": "message/send",
     "params": {
-      "messages": [{
+      "message": {
         "role": "user",
-        "content": [{"type": "text", "text": "Hello!"}]
-      }]
-    },
-    "id": 1
+        "messageId": "msg-1",
+        "parts": [{"kind": "text", "text": "Hello!"}]
+      }
+    }
   }'
 ```
 
-## 🎯 What's Next?
+### Using the example client
 
-### ✅ Supported Frameworks
+```bash
+python examples/single_agent_client.py
+```
 
-- **n8n** - Expose workflows as A2A agents
-- **CrewAI** - Multi-agent crews as A2A agents
-- **LangChain** - Chains and agents with streaming support
-- **Custom** - Any async function as an A2A agent
-
-### 📚 Next Steps
-
-1. **Explore Examples** - Check out [examples/](examples/) for complete working code
-2. **Read Documentation** - See [README.md](README.md) for full API reference
-3. **Build Multi-Agent Systems** - Connect multiple A2A agents together
-4. **Create Custom Adapters** - Integrate your own frameworks
-
-### 🔧 Advanced Usage
-
-#### Multi-Agent Communication
+### Using httpx (Python)
 
 ```python
-from a2a.client import A2AClient
+import asyncio, httpx
 
-# Connect to multiple agents
-math_agent = A2AClient(base_url="http://localhost:9000")
-research_agent = A2AClient(base_url="http://localhost:8001")
+async def main():
+    async with httpx.AsyncClient(timeout=60) as client:
+        # Fetch agent card
+        card = (await client.get("http://localhost:9000/.well-known/agent.json")).json()
+        print(f"Agent: {card['name']}")
 
-# Call agents
-result1 = await math_agent.send_message(...)
-result2 = await research_agent.send_message(...)
+        # Send a message
+        resp = await client.post("http://localhost:9000", json={
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "messageId": "msg-1",
+                    "parts": [{"kind": "text", "text": "Hello!"}],
+                }
+            },
+        })
+        print(resp.json())
+
+asyncio.run(main())
 ```
 
-#### Streaming (LangChain)
+## What's Next?
+
+### Supported Frameworks
+
+| Framework | Adapter | Streaming |
+|---|---|---|
+| n8n | `N8nAdapter` | - |
+| LangChain | `LangChainAdapter` | Auto-detected |
+| LangGraph | `LangGraphAdapter` | Auto-detected |
+| CrewAI | `CrewAIAdapter` | - |
+| OpenClaw | `OpenClawAdapter` | - |
+| Any function | `CallableAdapter` | Optional |
+| Custom class | `BaseA2AAdapter` | Optional |
+
+### Advanced Usage
+
+#### ASGI Deployment (Gunicorn / Hypercorn)
 
 ```python
-async for chunk in client.send_message_stream(params):
-    print(chunk, end="", flush=True)
+from a2a_adapter import N8nAdapter, to_a2a
+
+adapter = N8nAdapter(webhook_url="http://localhost:5678/webhook/agent")
+app = to_a2a(adapter)  # Returns Starlette ASGI app
+
+# Deploy: gunicorn app:app -k uvicorn.workers.UvicornWorker
 ```
 
-#### Custom Adapter Class
-
-For full control, subclass `BaseAgentAdapter`:
+#### Register a Third-party Adapter
 
 ```python
-from a2a_adapter import BaseAgentAdapter
-from a2a.types import Message, MessageSendParams, TextPart
+from a2a_adapter import register_adapter, BaseA2AAdapter
 
-class MyAdapter(BaseAgentAdapter):
-    async def to_framework(self, params):
-        return {"input": params.messages[-1].content[0].text}
-
-    async def call_framework(self, input, params):
-        return {"output": process(input["input"])}
-
-    async def from_framework(self, output, params):
-        return Message(
-            role="assistant",
-            content=[TextPart(type="text", text=output["output"])]
-        )
+@register_adapter("my_framework")
+class MyFrameworkAdapter(BaseA2AAdapter):
+    async def invoke(self, user_input, context_id=None, **kwargs):
+        return "Hello from my framework!"
 ```
 
-## 🐛 Troubleshooting
+### Next Steps
 
-### Common Issues
+1. **Explore examples** — See [examples/](examples/) for complete working code
+2. **Read the API** — See [README.md](README.md) for full API reference
+3. **Understand the design** — See [ARCHITECTURE.md](ARCHITECTURE.md) for the layered architecture
+4. **Build multi-agent systems** — Connect multiple A2A agents together
+5. **Create custom adapters** — Integrate your own frameworks
 
-**1. "Webhook URL not accessible" (n8n)**
+## Troubleshooting
 
-- Ensure n8n workflow is active and published
-- Verify webhook URL is correct
-- Check n8n instance is reachable
-
-**2. Import errors**
+**Import errors:**
 
 ```bash
-pip install a2a-adapter[framework-name]  # e.g., [crewai], [langchain]
+pip install a2a-adapter[langchain]  # Or [crewai], [langgraph], [all]
 ```
 
-**3. Port already in use**
+**Port already in use:**
 
 ```bash
-serve_agent(..., port=8001)  # Use different port
+lsof -i :9000           # Find the process
+kill <PID>              # Kill it
+# Or use a different port:
+serve_agent(adapter, port=8001)
 ```
 
-**4. Connection refused**
+**Missing API keys (LangChain / CrewAI):**
 
 ```bash
-curl http://localhost:9000/health  # Check if server is running
+export OPENAI_API_KEY="sk-..."
 ```
 
-**5. Missing API keys**
+**Need more help?** See [GETTING_STARTED_DEBUG.md](GETTING_STARTED_DEBUG.md) for detailed debugging.
 
-```bash
-export OPENAI_API_KEY="your-key"  # For CrewAI/LangChain
-```
+## Additional Resources
 
-📖 **Need more help?** Check [GETTING_STARTED_DEBUG.md](GETTING_STARTED_DEBUG.md) for detailed debugging guide.
-
-## 📚 Additional Resources
-
-- 📖 [Full Documentation](README.md) - Complete API reference
-- 🏗️ [Architecture Guide](ARCHITECTURE.md) - Design and implementation details
-- 💻 [Examples](examples/) - Complete working examples
-- 🐛 [Debug Guide](GETTING_STARTED_DEBUG.md) - Troubleshooting and debugging
-- 🤝 [Contributing](CONTRIBUTING.md) - How to contribute to the project
-
----
-
-**🎉 Congratulations!** You've successfully created your first A2A agent!
-
-**Next:** Explore the [examples/](examples/) directory to see more advanced use cases.
+- [Full Documentation](README.md) — Complete API reference
+- [Architecture Guide](ARCHITECTURE.md) — Design and implementation details
+- [Examples](examples/) — Complete working examples
+- [Debug Guide](GETTING_STARTED_DEBUG.md) — Troubleshooting and debugging
+- [Contributing](CONTRIBUTING.md) — How to contribute

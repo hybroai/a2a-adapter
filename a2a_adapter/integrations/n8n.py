@@ -4,9 +4,9 @@ n8n adapter for A2A Protocol.
 This adapter enables n8n workflows to be exposed as A2A-compliant agents
 by forwarding A2A messages to n8n webhooks.
 
-Supports two modes:
-- Synchronous (default): Blocks until n8n workflow completes, returns Message
-- Async Task Mode: Returns Task immediately, processes in background, supports polling
+Contains:
+    - N8nAdapter (v0.2): New simplified interface based on BaseA2AAdapter
+    - N8nAgentAdapter (v0.1): Legacy interface, deprecated
 
 Supports flexible input handling:
 - input_mapper: Custom function for full control over input transformation
@@ -14,8 +14,8 @@ Supports flexible input handling:
 - message_field: Simple text mapping to a single key (default fallback)
 """
 
-import json
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -23,24 +23,27 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict
 
 import httpx
-from httpx import HTTPStatusError, ConnectError, ReadTimeout
+from httpx import ConnectError, HTTPStatusError, ReadTimeout
 
 from a2a.types import (
     Artifact,
     Message,
     MessageSendParams,
+    Part,
+    Role,
     Task,
     TaskState,
     TaskStatus,
     TextPart,
-    Role,
-    Part,
 )
+
 from ..adapter import BaseAgentAdapter
+from ..base_adapter import AdapterMetadata, BaseA2AAdapter
 
 # Lazy import for TaskStore to avoid hard dependency
 try:
-    from a2a.server.tasks import TaskStore, InMemoryTaskStore
+    from a2a.server.tasks import InMemoryTaskStore, TaskStore
+
     _HAS_TASK_STORE = True
 except ImportError:
     _HAS_TASK_STORE = False
@@ -48,6 +51,233 @@ except ImportError:
     InMemoryTaskStore = None  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════
+# v0.2 Adapter (new, recommended)
+# ═══════════════════════════════════════════════════════════════
+
+
+class N8nAdapter(BaseA2AAdapter):
+    """Adapter for n8n webhook-triggered workflows.
+
+    Forwards user messages to an n8n webhook URL and extracts the response.
+    Supports flexible payload construction and retry with exponential backoff.
+
+    Example::
+
+        from a2a_adapter import N8nAdapter, serve_agent
+
+        adapter = N8nAdapter(webhook_url="http://localhost:5678/webhook/my-agent")
+        serve_agent(adapter, port=9000)
+
+    Example with custom payload::
+
+        adapter = N8nAdapter(
+            webhook_url="http://localhost:5678/webhook/workflow",
+            payload_template={"name": "A2A Agent"},
+            message_field="event",
+            timeout=60,
+        )
+    """
+
+    def __init__(
+        self,
+        webhook_url: str,
+        timeout: int = 30,
+        headers: Dict[str, str] | None = None,
+        max_retries: int = 2,
+        backoff: float = 0.25,
+        payload_template: Dict[str, Any] | None = None,
+        message_field: str = "message",
+        parse_json_input: bool = True,
+        input_mapper: Callable[[str, str | None], Dict[str, Any]] | None = None,
+        default_inputs: Dict[str, Any] | None = None,
+        name: str = "",
+        description: str = "",
+    ) -> None:
+        """Initialize the n8n adapter.
+
+        Args:
+            webhook_url: The n8n webhook URL to send requests to.
+            timeout: HTTP request timeout in seconds (default: 30).
+            headers: Optional additional HTTP headers.
+            max_retries: Retry attempts for transient failures (default: 2).
+            backoff: Base backoff seconds between retries (default: 0.25).
+            payload_template: Optional base payload dict to merge with message.
+            message_field: Field name for user message in payload (default: "message").
+            parse_json_input: Auto-parse JSON input (default: True).
+            input_mapper: Custom function for input transformation.
+                Signature: (raw_input: str, context_id: str | None) -> dict.
+            default_inputs: Default values to merge into payload.
+            name: Optional agent name for AgentCard generation.
+            description: Optional agent description for AgentCard generation.
+        """
+        self.webhook_url = webhook_url
+        self.timeout = timeout
+        self.headers = dict(headers) if headers else {}
+        self.max_retries = max(0, int(max_retries))
+        self.backoff = float(backoff)
+        self.payload_template = dict(payload_template) if payload_template else {}
+        self.message_field = message_field
+        self.parse_json_input = parse_json_input
+        self.input_mapper = input_mapper
+        self.default_inputs = default_inputs or {}
+        self._name = name
+        self._description = description
+        self._client: httpx.AsyncClient | None = None
+
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
+        """Send message to n8n webhook and return the response text."""
+        payload = self._build_payload(user_input, context_id)
+        response = await self._post_with_retry(payload)
+        return self._extract_response_text(response)
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    def get_metadata(self) -> AdapterMetadata:
+        """Return adapter metadata for AgentCard generation."""
+        return AdapterMetadata(
+            name=self._name or "N8nAdapter",
+            description=self._description,
+        )
+
+    # ──── Internal: Payload Building ────
+
+    def _build_payload(self, user_input: str, context_id: str | None) -> Dict[str, Any]:
+        """Build the webhook payload from user input.
+
+        Priority:
+            1. input_mapper (custom function) — highest priority
+            2. parse_json_input (auto JSON parsing)
+            3. message_field (fallback for plain text)
+        """
+        # Priority 1: Custom input_mapper
+        if self.input_mapper is not None:
+            try:
+                mapped = self.input_mapper(user_input, context_id)
+                return {**self.payload_template, **self.default_inputs, **mapped}
+            except Exception as e:
+                logger.warning("input_mapper failed: %s, falling back", e)
+
+        # Priority 2: Auto JSON parsing
+        if self.parse_json_input and user_input.strip().startswith("{"):
+            try:
+                parsed = json.loads(user_input)
+                if isinstance(parsed, dict):
+                    return {**self.payload_template, **self.default_inputs, **parsed}
+            except json.JSONDecodeError:
+                pass
+
+        # Priority 3: Fallback to message_field
+        payload: Dict[str, Any] = {
+            **self.payload_template,
+            **self.default_inputs,
+            self.message_field: user_input,
+        }
+        if not self.payload_template:
+            payload["metadata"] = {"context_id": context_id}
+        elif "context_id" not in payload:
+            payload["context_id"] = context_id
+        return payload
+
+    # ──── Internal: HTTP POST with Retry ────
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create the HTTP client (lazy init)."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self._client
+
+    async def _post_with_retry(self, payload: Dict[str, Any]) -> Any:
+        """POST to webhook with retry and exponential backoff.
+
+        Error policy:
+            - 4xx: no retry, raise ValueError
+            - 5xx / network errors: retry, then raise RuntimeError
+        """
+        client = await self._get_client()
+        req_id = str(uuid.uuid4())
+        headers = {
+            "Content-Type": "application/json",
+            "X-Request-Id": req_id,
+            **self.headers,
+        }
+
+        for attempt in range(self.max_retries + 1):
+            start = time.monotonic()
+            try:
+                resp = await client.post(
+                    self.webhook_url, json=payload, headers=headers,
+                )
+                dur_ms = int((time.monotonic() - start) * 1000)
+
+                if 400 <= resp.status_code < 500:
+                    text = (await resp.aread()).decode(errors="ignore")
+                    raise ValueError(
+                        f"n8n webhook returned {resp.status_code} "
+                        f"(req_id={req_id}, {dur_ms}ms): {text[:512]}"
+                    )
+
+                resp.raise_for_status()
+                return resp.json()
+
+            except HTTPStatusError as e:
+                if attempt < self.max_retries:
+                    await asyncio.sleep(self.backoff * (2 ** attempt))
+                    continue
+                raise RuntimeError(
+                    f"n8n upstream 5xx after retries (req_id={req_id}): {e}"
+                ) from e
+
+            except (ConnectError, ReadTimeout) as e:
+                if attempt < self.max_retries:
+                    await asyncio.sleep(self.backoff * (2 ** attempt))
+                    continue
+                raise RuntimeError(
+                    f"n8n upstream unavailable/timeout after retries (req_id={req_id}): {e}"
+                ) from e
+
+        raise RuntimeError("Unexpected error in retry loop.")
+
+    # ──── Internal: Response Extraction ────
+
+    def _extract_response_text(self, output: Any) -> str:
+        """Extract text from n8n webhook response."""
+        if isinstance(output, list):
+            if len(output) == 0:
+                return ""
+            elif len(output) == 1:
+                return self._extract_text_from_item(output[0])
+            else:
+                texts = [
+                    self._extract_text_from_item(item)
+                    for item in output
+                    if isinstance(item, dict)
+                ]
+                return "\n".join(t for t in texts if t) or json.dumps(output, indent=2)
+        elif isinstance(output, dict):
+            return self._extract_text_from_item(output)
+        return str(output)
+
+    @staticmethod
+    def _extract_text_from_item(item: Any) -> str:
+        """Extract text from a single n8n output item."""
+        if not isinstance(item, dict):
+            return str(item)
+        for key in ("output", "result", "message", "text", "response", "content"):
+            if key in item:
+                return str(item[key])
+        return json.dumps(item, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════
+# v0.1 Adapter (legacy, deprecated — will be removed in v0.3)
+# ═══════════════════════════════════════════════════════════════
 
 
 class N8nAgentAdapter(BaseAgentAdapter):

@@ -4,9 +4,9 @@ CrewAI adapter for A2A Protocol.
 This adapter enables CrewAI crews to be exposed as A2A-compliant agents
 by translating A2A messages to crew inputs and crew outputs back to A2A.
 
-Supports two modes:
-- Synchronous (default): Blocks until crew completes, returns Message
-- Async Task Mode: Returns Task immediately, processes in background, supports polling
+Contains:
+    - CrewAIAdapter (v0.2): New simplified interface based on BaseA2AAdapter
+    - CrewAIAgentAdapter (v0.1): Legacy interface, deprecated
 
 Input handling modes (in priority order):
 1. input_mapper: Custom function for full control over input transformation
@@ -24,18 +24,21 @@ from typing import Any, Callable, Dict
 from a2a.types import (
     Message,
     MessageSendParams,
+    Part,
+    Role,
     Task,
     TaskState,
     TaskStatus,
     TextPart,
-    Role,
-    Part,
 )
+
 from ..adapter import BaseAgentAdapter
+from ..base_adapter import AdapterMetadata, BaseA2AAdapter
 
 # Lazy import for TaskStore to avoid hard dependency
 try:
-    from a2a.server.tasks import TaskStore, InMemoryTaskStore
+    from a2a.server.tasks import InMemoryTaskStore, TaskStore
+
     _HAS_TASK_STORE = True
 except ImportError:
     _HAS_TASK_STORE = False
@@ -43,6 +46,141 @@ except ImportError:
     InMemoryTaskStore = None  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════
+# v0.2 Adapter (new, recommended)
+# ═══════════════════════════════════════════════════════════════
+
+
+class CrewAIAdapter(BaseA2AAdapter):
+    """Adapter for CrewAI crews.
+
+    Executes a CrewAI Crew via ``kickoff_async()`` (with sync fallback)
+    and returns the crew result as text. CrewAI does not support streaming,
+    so only ``invoke()`` is implemented.
+
+    Example::
+
+        from crewai import Crew, Agent, Task as CrewTask
+        from a2a_adapter import CrewAIAdapter, serve_agent
+
+        researcher = Agent(role="Researcher", ...)
+        task = CrewTask(description="Research {inputs}", agent=researcher)
+        crew = Crew(agents=[researcher], tasks=[task])
+
+        adapter = CrewAIAdapter(crew=crew)
+        serve_agent(adapter, port=9004)
+    """
+
+    def __init__(
+        self,
+        crew: Any,
+        inputs_key: str = "inputs",
+        timeout: int = 300,
+        parse_json_input: bool = True,
+        input_mapper: Callable[[str, str | None], Dict[str, Any]] | None = None,
+        default_inputs: Dict[str, Any] | None = None,
+        name: str = "",
+        description: str = "",
+    ) -> None:
+        """Initialize the CrewAI adapter.
+
+        Args:
+            crew: A CrewAI Crew instance to execute.
+            inputs_key: Key for passing text inputs to the crew (default: "inputs").
+            timeout: Execution timeout in seconds (default: 300).
+            parse_json_input: Auto-parse JSON input (default: True).
+            input_mapper: Custom function for input transformation.
+            default_inputs: Default values to merge with parsed inputs.
+            name: Optional agent name for AgentCard generation.
+            description: Optional agent description for AgentCard generation.
+        """
+        self.crew = crew
+        self.inputs_key = inputs_key
+        self.timeout = timeout
+        self.parse_json_input = parse_json_input
+        self.input_mapper = input_mapper
+        self.default_inputs = default_inputs or {}
+        self._name = name
+        self._description = description
+
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
+        """Execute the crew and return the result as text."""
+        inputs = self._build_inputs(user_input, context_id)
+        try:
+            result = await asyncio.wait_for(
+                self.crew.kickoff_async(inputs=inputs),
+                timeout=self.timeout,
+            )
+        except AttributeError:
+            # Fallback for older CrewAI versions without async support
+            logger.warning("CrewAI kickoff_async not available, using sync fallback")
+            loop = asyncio.get_event_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: self.crew.kickoff(inputs=inputs)),
+                timeout=self.timeout,
+            )
+        return self._extract_output(result)
+
+    def get_metadata(self) -> AdapterMetadata:
+        """Return adapter metadata for AgentCard generation."""
+        return AdapterMetadata(
+            name=self._name or "CrewAIAdapter",
+            description=self._description,
+            streaming=False,
+        )
+
+    # ──── Internal: Input Building ────
+
+    def _build_inputs(self, user_input: str, context_id: str | None) -> Dict[str, Any]:
+        """Build crew inputs with 3-priority pipeline."""
+        # Priority 1: Custom input_mapper
+        if self.input_mapper is not None:
+            try:
+                mapped = self.input_mapper(user_input, context_id)
+                return {**self.default_inputs, **mapped}
+            except Exception as e:
+                logger.warning("input_mapper failed: %s, falling back", e)
+
+        # Priority 2: Auto JSON parsing
+        if self.parse_json_input and user_input.strip().startswith("{"):
+            try:
+                parsed = json.loads(user_input)
+                if isinstance(parsed, dict):
+                    return {**self.default_inputs, **parsed}
+            except json.JSONDecodeError:
+                pass
+
+        # Priority 3: Fallback to inputs_key
+        return {**self.default_inputs, self.inputs_key: user_input}
+
+    # ──── Internal: Output Extraction ────
+
+    @staticmethod
+    def _extract_output(output: Any) -> str:
+        """Extract text from CrewAI output (CrewOutput, dict, str)."""
+        # CrewOutput with .raw attribute
+        if hasattr(output, "raw"):
+            return str(output.raw)
+
+        # CrewOutput with .result attribute
+        if hasattr(output, "result"):
+            return str(output.result)
+
+        # Dictionary output
+        if isinstance(output, dict):
+            for key in ("output", "result", "response", "answer", "text"):
+                if key in output:
+                    return str(output[key])
+            return json.dumps(output, indent=2)
+
+        return str(output)
+
+
+# ═══════════════════════════════════════════════════════════════
+# v0.1 Adapter (legacy, deprecated — will be removed in v0.3)
+# ═══════════════════════════════════════════════════════════════
 
 
 class CrewAIAgentAdapter(BaseAgentAdapter):

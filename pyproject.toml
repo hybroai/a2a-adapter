@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "a2a-adapter"
-version = "0.1.6"
-description = "A2A Protocol Adapter SDK for integrating various agent frameworks"
+version = "0.2.0"
+description = "Convert any AI agent into an A2A Protocol server in 3 lines"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 authors = [

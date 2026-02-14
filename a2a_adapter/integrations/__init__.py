@@ -8,9 +8,21 @@ This package contains concrete adapter implementations for various agent framewo
 - LangGraph: Stateful workflow orchestration framework
 - Callable: Generic Python async function adapter
 - OpenClaw: Personal AI super agent CLI wrapper
+
+Each module exports both:
+- v0.2 adapter class (e.g., N8nAdapter) — new simplified interface
+- v0.1 adapter class (e.g., N8nAgentAdapter) — deprecated, for backwards compat
 """
 
 __all__ = [
+    # v0.2 (new)
+    "N8nAdapter",
+    "CrewAIAdapter",
+    "LangChainAdapter",
+    "LangGraphAdapter",
+    "CallableAdapter",
+    "OpenClawAdapter",
+    # v0.1 (deprecated)
     "N8nAgentAdapter",
     "CrewAIAgentAdapter",
     "LangChainAgentAdapter",
@@ -19,9 +31,30 @@ __all__ = [
     "OpenClawAgentAdapter",
 ]
 
+
 # Lazy imports to avoid requiring all optional dependencies
 def __getattr__(name: str):
-    if name == "N8nAgentAdapter":
+    # v0.2 adapters
+    if name == "N8nAdapter":
+        from .n8n import N8nAdapter
+        return N8nAdapter
+    elif name == "CallableAdapter":
+        from .callable import CallableAdapter
+        return CallableAdapter
+    elif name == "LangChainAdapter":
+        from .langchain import LangChainAdapter
+        return LangChainAdapter
+    elif name == "LangGraphAdapter":
+        from .langgraph import LangGraphAdapter
+        return LangGraphAdapter
+    elif name == "CrewAIAdapter":
+        from .crewai import CrewAIAdapter
+        return CrewAIAdapter
+    elif name == "OpenClawAdapter":
+        from .openclaw import OpenClawAdapter
+        return OpenClawAdapter
+    # v0.1 adapters (deprecated)
+    elif name == "N8nAgentAdapter":
         from .n8n import N8nAgentAdapter
         return N8nAgentAdapter
     elif name == "CrewAIAgentAdapter":

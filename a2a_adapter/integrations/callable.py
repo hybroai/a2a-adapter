@@ -3,6 +3,10 @@ Generic callable adapter for A2A Protocol.
 
 This adapter allows any async Python function to be exposed as an A2A-compliant
 agent, providing maximum flexibility for custom implementations.
+
+Contains:
+    - CallableAdapter (v0.2): New simplified interface based on BaseA2AAdapter
+    - CallableAgentAdapter (v0.1): Legacy interface, deprecated
 """
 
 import json
@@ -19,8 +23,110 @@ from a2a.types import (
     Part,
 )
 from ..adapter import BaseAgentAdapter
+from ..base_adapter import BaseA2AAdapter, AdapterMetadata
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════
+# v0.2 Adapter (new, recommended)
+# ═══════════════════════════════════════════════════════════════
+
+
+class CallableAdapter(BaseA2AAdapter):
+    """Adapter for any async Python function.
+
+    The simplest adapter — wraps any async callable as an A2A agent.
+
+    For non-streaming functions:
+        The function should accept a dict and return a string (or anything
+        that can be converted to a string).
+
+    For streaming functions:
+        The function should be an async generator that yields string chunks.
+
+    Example (non-streaming)::
+
+        from a2a_adapter import CallableAdapter, serve_agent
+
+        async def my_agent(inputs: dict) -> str:
+            return f"You said: {inputs['message']}"
+
+        adapter = CallableAdapter(func=my_agent)
+        serve_agent(adapter, port=9000)
+
+    Example (streaming)::
+
+        async def my_streaming_agent(inputs: dict):
+            for word in inputs['message'].split():
+                yield word + " "
+
+        adapter = CallableAdapter(func=my_streaming_agent, streaming=True)
+        serve_agent(adapter, port=9000)
+    """
+
+    def __init__(
+        self,
+        func: Callable,
+        streaming: bool = False,
+        name: str = "",
+        description: str = "",
+    ) -> None:
+        """Initialize the callable adapter.
+
+        Args:
+            func: An async callable that processes agent logic.
+                For non-streaming: accepts dict, returns str.
+                For streaming: async generator yielding str chunks.
+            streaming: Whether the function supports streaming.
+            name: Optional agent name for AgentCard generation.
+            description: Optional agent description for AgentCard generation.
+        """
+        self.func = func
+        self._streaming = streaming
+        self._name = name
+        self._description = description
+
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
+        """Call the function and return a text response."""
+        inputs = {"message": user_input, "context_id": context_id}
+        result = await self.func(inputs)
+        return self._extract_text(result)
+
+    async def stream(self, user_input: str, context_id: str | None = None, **kwargs) -> AsyncIterator[str]:
+        """Stream chunks from an async generator function."""
+        inputs = {"message": user_input, "context_id": context_id}
+        async for chunk in self.func(inputs):
+            yield str(chunk) if not isinstance(chunk, str) else chunk
+
+    def supports_streaming(self) -> bool:
+        """Whether streaming is enabled for this adapter."""
+        return self._streaming
+
+    def get_metadata(self) -> AdapterMetadata:
+        """Return adapter metadata for AgentCard generation."""
+        return AdapterMetadata(
+            name=self._name or (self.func.__name__ if hasattr(self.func, "__name__") else "CallableAdapter"),
+            description=self._description,
+            streaming=self._streaming,
+        )
+
+    @staticmethod
+    def _extract_text(output: Any) -> str:
+        """Extract text from function output."""
+        if isinstance(output, str):
+            return output
+        if isinstance(output, dict):
+            for key in ("response", "output", "result", "answer", "text", "message"):
+                if key in output:
+                    return str(output[key])
+            return json.dumps(output, indent=2)
+        return str(output)
+
+
+# ═══════════════════════════════════════════════════════════════
+# v0.1 Adapter (legacy, deprecated — will be removed in v0.3)
+# ═══════════════════════════════════════════════════════════════
 
 
 class CallableAgentAdapter(BaseAgentAdapter):

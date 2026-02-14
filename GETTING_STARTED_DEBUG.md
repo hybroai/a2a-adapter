@@ -102,7 +102,7 @@ If you see this output, congratulations! Environment setup successful 🎉
 
 ```bash
 # Test with client
-python examples/04_single_agent_client.py
+python examples/single_agent_client.py
 ```
 
 ## 🔍 Step 4: Debug with VS Code

@@ -1,125 +1,202 @@
 """
-Adapter factory for loading framework-specific adapters.
+Adapter factory and registry for loading adapters from configuration.
 
-This module provides the load_a2a_agent function which acts as a factory
-for creating appropriate adapter instances based on configuration.
+This module provides two mechanisms for creating adapters:
+
+1. **load_adapter(config)** — Factory function for config-driven deployments.
+   Looks up adapters by name from the built-in map and the user registry.
+
+2. **register_adapter(name)** — Decorator for third-party adapters to register
+   themselves, enabling discovery via load_adapter().
+
+Design rationale:
+    For config-driven deployments (YAML/JSON configs, orchestration systems),
+    the loader creates adapters from dictionaries. The registry pattern allows
+    third-party adapters to register themselves without modifying core code.
+
+Backwards compatibility:
+    load_a2a_agent() is preserved as a deprecated async wrapper around
+    load_adapter() for v0.1 users.
 """
 
-from typing import Any, Dict
+import importlib
+import logging
+import warnings
+from typing import Any, Dict, Type
 
-from .adapter import BaseAgentAdapter
+from .base_adapter import BaseA2AAdapter
+
+logger = logging.getLogger(__name__)
+
+# ──── Registry ────
+
+_REGISTRY: Dict[str, Type[BaseA2AAdapter]] = {}
+
+_BUILTIN_MAP: Dict[str, tuple[str, str]] = {
+    "n8n": ("a2a_adapter.integrations.n8n", "N8nAdapter"),
+    "crewai": ("a2a_adapter.integrations.crewai", "CrewAIAdapter"),
+    "langchain": ("a2a_adapter.integrations.langchain", "LangChainAdapter"),
+    "langgraph": ("a2a_adapter.integrations.langgraph", "LangGraphAdapter"),
+    "callable": ("a2a_adapter.integrations.callable", "CallableAdapter"),
+    "openclaw": ("a2a_adapter.integrations.openclaw", "OpenClawAdapter"),
+}
 
 
-async def load_a2a_agent(config: Dict[str, Any]) -> BaseAgentAdapter:
+def register_adapter(name: str):
+    """Decorator for third-party adapters to register themselves.
+
+    Registered adapters become available via load_adapter() by name.
+
+    Args:
+        name: Unique adapter name for config-driven lookup.
+
+    Returns:
+        A class decorator that registers the adapter.
+
+    Example:
+        >>> from a2a_adapter import register_adapter, BaseA2AAdapter
+        >>>
+        >>> @register_adapter("my_framework")
+        ... class MyFrameworkAdapter(BaseA2AAdapter):
+        ...     async def invoke(self, user_input, context_id=None):
+        ...         return "Hello from my framework!"
+        >>>
+        >>> # Now loadable via config:
+        >>> adapter = load_adapter({"adapter": "my_framework"})
     """
-    Factory function to load an agent adapter based on configuration.
 
-    This function inspects the 'adapter' key in the config dictionary and
-    instantiates the appropriate adapter class with the provided configuration.
+    def decorator(cls: Type[BaseA2AAdapter]):
+        if name in _REGISTRY:
+            logger.warning(
+                "Overwriting registered adapter %r (was %s, now %s)",
+                name,
+                _REGISTRY[name].__name__,
+                cls.__name__,
+            )
+        _REGISTRY[name] = cls
+        return cls
+
+    return decorator
+
+
+def load_adapter(config: dict) -> BaseA2AAdapter:
+    """Factory: create an adapter from a configuration dictionary.
+
+    Looks up the adapter class by the "adapter" key in config, first
+    checking the user registry, then the built-in map. Remaining config
+    keys are passed as constructor kwargs.
+
+    Args:
+        config: Configuration dictionary. Must include an "adapter" key.
+            All other keys are passed to the adapter constructor.
+
+    Returns:
+        Configured BaseA2AAdapter instance.
+
+    Raises:
+        ValueError: If "adapter" key is missing or adapter type is unknown.
+        ImportError: If required framework package is not installed.
+
+    Example:
+        >>> adapter = load_adapter({
+        ...     "adapter": "n8n",
+        ...     "webhook_url": "http://localhost:5678/webhook/my-agent",
+        ...     "timeout": 60,
+        ... })
+    """
+    config = dict(config)  # Shallow copy to avoid mutating caller's dict
+    adapter_type = config.pop("adapter", None)
+
+    if not adapter_type:
+        raise ValueError(
+            "Config must include 'adapter' key specifying the adapter type"
+        )
+
+    # Priority 1: User-registered adapters
+    cls = _REGISTRY.get(adapter_type)
+
+    # Priority 2: Built-in adapters (lazy import)
+    if cls is None and adapter_type in _BUILTIN_MAP:
+        module_path, class_name = _BUILTIN_MAP[adapter_type]
+        try:
+            module = importlib.import_module(module_path)
+            cls = getattr(module, class_name)
+        except ImportError as e:
+            raise ImportError(
+                f"Adapter {adapter_type!r} requires additional dependencies. "
+                f"Install with: pip install a2a-adapter[{adapter_type}]"
+            ) from e
+
+    if cls is None:
+        registered = sorted(set(_REGISTRY) | set(_BUILTIN_MAP))
+        raise ValueError(
+            f"Unknown adapter type: {adapter_type!r}. "
+            f"Available: {', '.join(registered)}"
+        )
+
+    return cls(**config)
+
+
+# ──── v0.1 Backwards Compatibility ────
+
+# Map v0.1 adapter class names to v0.2 adapter class names
+# These are used by load_a2a_agent() for transparent migration
+_V1_BUILTIN_MAP: Dict[str, tuple[str, str]] = {
+    "n8n": ("a2a_adapter.integrations.n8n", "N8nAgentAdapter"),
+    "crewai": ("a2a_adapter.integrations.crewai", "CrewAIAgentAdapter"),
+    "langchain": ("a2a_adapter.integrations.langchain", "LangChainAgentAdapter"),
+    "langgraph": ("a2a_adapter.integrations.langgraph", "LangGraphAgentAdapter"),
+    "callable": ("a2a_adapter.integrations.callable", "CallableAgentAdapter"),
+    "openclaw": ("a2a_adapter.integrations.openclaw", "OpenClawAgentAdapter"),
+}
+
+
+async def load_a2a_agent(config: Dict[str, Any]) -> Any:
+    """Factory function to load an agent adapter based on configuration.
+
+    .. deprecated:: 0.2.0
+        Use :func:`load_adapter` instead. This async wrapper exists only
+        for backwards compatibility with v0.1 code.
 
     Args:
         config: Configuration dictionary with at least an 'adapter' key.
-                Additional keys depend on the adapter type:
-
-                Common optional parameters (all adapters):
-                - parse_json_input: Auto-parse JSON input (default: True)
-                - input_mapper: Custom function for input transformation
-                - default_inputs: Default values to merge with parsed inputs
-
-                Adapter-specific parameters:
-                - n8n: requires 'webhook_url', optional 'timeout', 'headers',
-                       'payload_template', 'message_field', 'async_mode', 'async_timeout'
-                - crewai: requires 'crew' (CrewAI Crew instance),
-                          optional 'inputs_key', 'timeout', 'async_mode', 'async_timeout'
-                - langchain: requires 'runnable', optional 'input_key', 'output_key', 'timeout'
-                - langgraph: requires 'graph' (CompiledGraph instance),
-                             optional 'input_key', 'output_key', 'timeout', 'async_mode', 'async_timeout'
-                - callable: requires 'callable' (async function),
-                            optional 'supports_streaming'
-                - openclaw: optional 'session_id', 'agent_id', 'thinking',
-                            'timeout', 'openclaw_path', 'working_directory',
-                            'env_vars', 'async_mode', 'task_store',
-                            'task_ttl_seconds', 'cleanup_interval_seconds'
 
     Returns:
-        Configured BaseAgentAdapter instance
-
-    Raises:
-        ValueError: If adapter type is unknown or required config is missing
-        ImportError: If required framework package is not installed
-
-    Examples:
-        >>> # Load n8n adapter (basic)
-        >>> adapter = await load_a2a_agent({
-        ...     "adapter": "n8n",
-        ...     "webhook_url": "https://n8n.example.com/webhook/agent",
-        ...     "timeout": 30
-        ... })
-
-        >>> # Load n8n adapter with custom payload mapping
-        >>> adapter = await load_a2a_agent({
-        ...     "adapter": "n8n",
-        ...     "webhook_url": "http://localhost:5678/webhook/my-workflow",
-        ...     "payload_template": {"name": "A2A Agent"},  # Static fields
-        ...     "message_field": "event"  # Use "event" instead of "message"
-        ... })
-
-        >>> # Load CrewAI adapter
-        >>> from crewai import Crew, Agent, Task
-        >>> crew = Crew(agents=[...], tasks=[...])
-        >>> adapter = await load_a2a_agent({
-        ...     "adapter": "crewai",
-        ...     "crew": crew
-        ... })
-
-        >>> # Load LangChain adapter
-        >>> from langchain_core.runnables import RunnablePassthrough
-        >>> adapter = await load_a2a_agent({
-        ...     "adapter": "langchain",
-        ...     "runnable": chain,
-        ...     "input_key": "input"
-        ... })
-
-        >>> # Load LangGraph adapter
-        >>> from langgraph.graph import StateGraph
-        >>> graph = builder.compile()
-        >>> adapter = await load_a2a_agent({
-        ...     "adapter": "langgraph",
-        ...     "graph": graph,
-        ...     "input_key": "messages"
-        ... })
-
-        >>> # Load callable adapter
-        >>> async def my_agent(inputs: dict) -> str:
-        ...     return f"Processed: {inputs['message']}"
-        >>> adapter = await load_a2a_agent({
-        ...     "adapter": "callable",
-        ...     "callable": my_agent
-        ... })
-
-        >>> # Load OpenClaw adapter
-        >>> adapter = await load_a2a_agent({
-        ...     "adapter": "openclaw",
-        ...     "session_id": "my-session",
-        ...     "agent_id": "main",
-        ...     "thinking": "low",
-        ...     "timeout": 300,
-        ... })
+        Configured adapter instance (v0.1 BaseAgentAdapter).
     """
+    warnings.warn(
+        "load_a2a_agent() is deprecated, use load_adapter() instead. "
+        "See migration guide: https://github.com/hybro-ai/a2a-adapter/blob/main/docs/migration-v0.2.md",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+    config = dict(config)
     adapter_type = config.get("adapter")
 
     if not adapter_type:
         raise ValueError("Config must include 'adapter' key specifying adapter type")
 
+    if adapter_type not in _V1_BUILTIN_MAP:
+        raise ValueError(
+            f"Unknown adapter type: {adapter_type}. "
+            f"Supported types: {', '.join(sorted(_V1_BUILTIN_MAP))}"
+        )
+
+    module_path, class_name = _V1_BUILTIN_MAP[adapter_type]
+    module = importlib.import_module(module_path)
+    cls = getattr(module, class_name)
+
+    # Remove 'adapter' key before passing to constructor
+    config.pop("adapter")
+
+    # v0.1 adapters have different constructor signatures and
+    # validation, so we need to handle them individually
     if adapter_type == "n8n":
-        from .integrations.n8n import N8nAgentAdapter
-
-        webhook_url = config.get("webhook_url")
-        if not webhook_url:
+        if not config.get("webhook_url"):
             raise ValueError("n8n adapter requires 'webhook_url' in config")
-
-        return N8nAgentAdapter(
-            webhook_url=webhook_url,
+        return cls(
+            webhook_url=config.get("webhook_url"),
             timeout=config.get("timeout", 30),
             headers=config.get("headers"),
             payload_template=config.get("payload_template"),
@@ -127,59 +204,41 @@ async def load_a2a_agent(config: Dict[str, Any]) -> BaseAgentAdapter:
             async_mode=config.get("async_mode", False),
             task_store=config.get("task_store"),
             async_timeout=config.get("async_timeout", 300),
-            # Flexible input handling parameters
             parse_json_input=config.get("parse_json_input", True),
             input_mapper=config.get("input_mapper"),
             default_inputs=config.get("default_inputs"),
         )
-
     elif adapter_type == "crewai":
-        from .integrations.crewai import CrewAIAgentAdapter
-
-        crew = config.get("crew")
-        if crew is None:
+        if config.get("crew") is None:
             raise ValueError("crewai adapter requires 'crew' instance in config")
-
-        return CrewAIAgentAdapter(
-            crew=crew,
+        return cls(
+            crew=config.get("crew"),
             inputs_key=config.get("inputs_key", "inputs"),
             async_mode=config.get("async_mode", False),
             task_store=config.get("task_store"),
             async_timeout=config.get("async_timeout", 600),
             timeout=config.get("timeout", 300),
-            # New flexible input handling parameters
             parse_json_input=config.get("parse_json_input", True),
             input_mapper=config.get("input_mapper"),
             default_inputs=config.get("default_inputs"),
         )
-
     elif adapter_type == "langchain":
-        from .integrations.langchain import LangChainAgentAdapter
-
-        runnable = config.get("runnable")
-        if runnable is None:
+        if config.get("runnable") is None:
             raise ValueError("langchain adapter requires 'runnable' in config")
-
-        return LangChainAgentAdapter(
-            runnable=runnable,
+        return cls(
+            runnable=config.get("runnable"),
             input_key=config.get("input_key", "input"),
             output_key=config.get("output_key"),
             timeout=config.get("timeout", 60),
-            # Flexible input handling parameters
             parse_json_input=config.get("parse_json_input", True),
             input_mapper=config.get("input_mapper"),
             default_inputs=config.get("default_inputs"),
         )
-
     elif adapter_type == "langgraph":
-        from .integrations.langgraph import LangGraphAgentAdapter
-
-        graph = config.get("graph")
-        if graph is None:
+        if config.get("graph") is None:
             raise ValueError("langgraph adapter requires 'graph' (CompiledGraph) in config")
-
-        return LangGraphAgentAdapter(
-            graph=graph,
+        return cls(
+            graph=config.get("graph"),
             input_key=config.get("input_key", "messages"),
             output_key=config.get("output_key"),
             state_key=config.get("state_key"),
@@ -187,28 +246,19 @@ async def load_a2a_agent(config: Dict[str, Any]) -> BaseAgentAdapter:
             task_store=config.get("task_store"),
             async_timeout=config.get("async_timeout", 300),
             timeout=config.get("timeout", 60),
-            # Flexible input handling parameters
             parse_json_input=config.get("parse_json_input", True),
             input_mapper=config.get("input_mapper"),
             default_inputs=config.get("default_inputs"),
         )
-
     elif adapter_type == "callable":
-        from .integrations.callable import CallableAgentAdapter
-
-        func = config.get("callable")
-        if func is None:
+        if config.get("callable") is None:
             raise ValueError("callable adapter requires 'callable' function in config")
-
-        return CallableAgentAdapter(
-            func=func,
+        return cls(
+            func=config.get("callable"),
             supports_streaming=config.get("supports_streaming", False),
         )
-
     elif adapter_type == "openclaw":
-        from .integrations.openclaw import OpenClawAgentAdapter
-
-        return OpenClawAgentAdapter(
+        return cls(
             session_id=config.get("session_id"),
             agent_id=config.get("agent_id"),
             thinking=config.get("thinking", "low"),
@@ -221,9 +271,5 @@ async def load_a2a_agent(config: Dict[str, Any]) -> BaseAgentAdapter:
             task_ttl_seconds=config.get("task_ttl_seconds", 3600),
             cleanup_interval_seconds=config.get("cleanup_interval_seconds", 300),
         )
-
     else:
-        raise ValueError(
-            f"Unknown adapter type: {adapter_type}. "
-            f"Supported types: n8n, crewai, langchain, langgraph, callable, openclaw"
-        )
+        raise ValueError(f"Unknown adapter type: {adapter_type}")

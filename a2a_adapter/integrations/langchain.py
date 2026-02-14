@@ -4,6 +4,10 @@ LangChain adapter for A2A Protocol.
 This adapter enables LangChain runnables (chains, agents, RAG pipelines) to be
 exposed as A2A-compliant agents with support for both streaming and non-streaming modes.
 
+Contains:
+    - LangChainAdapter (v0.2): New simplified interface based on BaseA2AAdapter
+    - LangChainAgentAdapter (v0.1): Legacy interface, deprecated
+
 Supports flexible input handling:
 - input_mapper: Custom function for full control over input transformation
 - parse_json_input: Automatic JSON parsing for structured inputs
@@ -19,14 +23,197 @@ from typing import Any, AsyncIterator, Callable, Dict
 from a2a.types import (
     Message,
     MessageSendParams,
+    Part,
+    Role,
     Task,
     TextPart,
-    Role,
-    Part,
 )
+
 from ..adapter import BaseAgentAdapter
+from ..base_adapter import AdapterMetadata, BaseA2AAdapter
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════
+# v0.2 Adapter (new, recommended)
+# ═══════════════════════════════════════════════════════════════
+
+
+class LangChainAdapter(BaseA2AAdapter):
+    """Adapter for LangChain runnables (chains, agents, RAG pipelines).
+
+    Supports both streaming (via ``astream()``) and non-streaming
+    (via ``ainvoke()``) execution. Streaming is auto-detected based
+    on whether the runnable has an ``astream`` method.
+
+    Example::
+
+        from langchain_openai import ChatOpenAI
+        from langchain_core.prompts import ChatPromptTemplate
+        from a2a_adapter import LangChainAdapter, serve_agent
+
+        llm = ChatOpenAI(model="gpt-4o-mini")
+        prompt = ChatPromptTemplate.from_template("Answer: {input}")
+        chain = prompt | llm
+
+        adapter = LangChainAdapter(runnable=chain, input_key="input")
+        serve_agent(adapter, port=9002)
+        # Automatically supports both message/send AND message/stream!
+    """
+
+    def __init__(
+        self,
+        runnable: Any,
+        input_key: str = "input",
+        output_key: str | None = None,
+        timeout: int = 60,
+        parse_json_input: bool = True,
+        input_mapper: Callable[[str, str | None], Dict[str, Any]] | None = None,
+        default_inputs: Dict[str, Any] | None = None,
+        name: str = "",
+        description: str = "",
+    ) -> None:
+        """Initialize the LangChain adapter.
+
+        Args:
+            runnable: A LangChain Runnable instance (chain, agent, etc.).
+            input_key: Key name for passing input to the runnable (default: "input").
+            output_key: Optional key to extract from runnable output.
+            timeout: Execution timeout in seconds (default: 60).
+            parse_json_input: Auto-parse JSON input (default: True).
+            input_mapper: Custom function for input transformation.
+            default_inputs: Default values to merge with parsed inputs.
+            name: Optional agent name for AgentCard generation.
+            description: Optional agent description for AgentCard generation.
+        """
+        self.runnable = runnable
+        self.input_key = input_key
+        self.output_key = output_key
+        self.timeout = timeout
+        self.parse_json_input = parse_json_input
+        self.input_mapper = input_mapper
+        self.default_inputs = default_inputs or {}
+        self._name = name
+        self._description = description
+
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
+        """Invoke the runnable and return a text response."""
+        inputs = self._build_inputs(user_input, context_id)
+        result = await asyncio.wait_for(
+            self.runnable.ainvoke(inputs), timeout=self.timeout,
+        )
+        return self._extract_output(result)
+
+    async def stream(self, user_input: str, context_id: str | None = None, **kwargs) -> AsyncIterator[str]:
+        """Stream tokens from the runnable via astream()."""
+        inputs = self._build_inputs(user_input, context_id)
+        async for chunk in self.runnable.astream(inputs):
+            text = self._extract_chunk_text(chunk)
+            if text:
+                yield text
+
+    def supports_streaming(self) -> bool:
+        """Auto-detect streaming support from the runnable."""
+        return hasattr(self.runnable, "astream")
+
+    def get_metadata(self) -> AdapterMetadata:
+        """Return adapter metadata for AgentCard generation."""
+        return AdapterMetadata(
+            name=self._name or "LangChainAdapter",
+            description=self._description,
+            streaming=self.supports_streaming(),
+        )
+
+    # ──── Internal: Input Building ────
+
+    def _build_inputs(self, user_input: str, context_id: str | None) -> Dict[str, Any]:
+        """Build runnable inputs with 3-priority pipeline."""
+        # Priority 1: Custom input_mapper
+        if self.input_mapper is not None:
+            try:
+                return {**self.default_inputs, **self.input_mapper(user_input, context_id)}
+            except Exception as e:
+                logger.warning("input_mapper failed: %s, falling back", e)
+
+        # Priority 2: Auto JSON parsing
+        if self.parse_json_input and user_input.strip().startswith("{"):
+            try:
+                parsed = json.loads(user_input)
+                if isinstance(parsed, dict):
+                    clean = {k: v for k, v in parsed.items() if k != "context_id"}
+                    return {**self.default_inputs, **clean}
+            except json.JSONDecodeError:
+                pass
+
+        # Priority 3: Fallback to input_key
+        return {**self.default_inputs, self.input_key: user_input}
+
+    # ──── Internal: Output Extraction ────
+
+    def _extract_output(self, output: Any) -> str:
+        """Extract text from runnable output (AIMessage, dict, str)."""
+        # AIMessage or similar with content attribute
+        if hasattr(output, "content"):
+            content = output.content
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, str):
+                        parts.append(item)
+                    elif hasattr(item, "text"):
+                        parts.append(item.text)
+                    elif isinstance(item, dict) and "text" in item:
+                        parts.append(item["text"])
+                return " ".join(parts)
+            return str(content)
+
+        # Dictionary output
+        if isinstance(output, dict):
+            if self.output_key and self.output_key in output:
+                return str(output[self.output_key])
+            for key in ("output", "result", "answer", "response", "text"):
+                if key in output:
+                    return str(output[key])
+            return json.dumps(output, indent=2)
+
+        return str(output)
+
+    def _extract_chunk_text(self, chunk: Any) -> str:
+        """Extract text from a streaming chunk."""
+        # AIMessageChunk or similar
+        if hasattr(chunk, "content"):
+            content = chunk.content
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "".join(
+                    item if isinstance(item, str)
+                    else getattr(item, "text", "")
+                    for item in content
+                )
+            return str(content) if content else ""
+
+        # Dictionary chunk
+        if isinstance(chunk, dict):
+            if self.output_key and self.output_key in chunk:
+                return str(chunk[self.output_key])
+            for key in ("output", "result", "content", "text"):
+                if key in chunk:
+                    return str(chunk[key])
+            return ""
+
+        if isinstance(chunk, str):
+            return chunk
+
+        return ""
+
+
+# ═══════════════════════════════════════════════════════════════
+# v0.1 Adapter (legacy, deprecated — will be removed in v0.3)
+# ═══════════════════════════════════════════════════════════════
 
 
 class LangChainAgentAdapter(BaseAgentAdapter):

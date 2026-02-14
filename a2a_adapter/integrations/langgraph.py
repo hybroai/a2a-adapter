@@ -4,9 +4,9 @@ LangGraph adapter for A2A Protocol.
 This adapter enables LangGraph compiled workflows to be exposed as A2A-compliant
 agents with support for both streaming and non-streaming modes.
 
-Supports two modes:
-- Synchronous (default): Blocks until workflow completes, returns Message
-- Async Task Mode: Returns Task immediately, processes in background, supports polling
+Contains:
+    - LangGraphAdapter (v0.2): New simplified interface based on BaseA2AAdapter
+    - LangGraphAgentAdapter (v0.1): Legacy interface, deprecated
 
 Supports flexible input handling:
 - input_mapper: Custom function for full control over input transformation
@@ -24,18 +24,21 @@ from typing import Any, AsyncIterator, Callable, Dict
 from a2a.types import (
     Message,
     MessageSendParams,
+    Part,
+    Role,
     Task,
     TaskState,
     TaskStatus,
     TextPart,
-    Role,
-    Part,
 )
+
 from ..adapter import BaseAgentAdapter
+from ..base_adapter import AdapterMetadata, BaseA2AAdapter
 
 # Lazy import for TaskStore to avoid hard dependency
 try:
-    from a2a.server.tasks import TaskStore, InMemoryTaskStore
+    from a2a.server.tasks import InMemoryTaskStore, TaskStore
+
     _HAS_TASK_STORE = True
 except ImportError:
     _HAS_TASK_STORE = False
@@ -43,6 +46,227 @@ except ImportError:
     InMemoryTaskStore = None  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════
+# v0.2 Adapter (new, recommended)
+# ═══════════════════════════════════════════════════════════════
+
+
+class LangGraphAdapter(BaseA2AAdapter):
+    """Adapter for LangGraph compiled state graphs.
+
+    Supports both streaming (via ``astream()``) and non-streaming
+    (via ``ainvoke()``) execution. Streaming yields state deltas
+    as they're produced by the graph.
+
+    Example::
+
+        from langgraph.graph import StateGraph
+        from a2a_adapter import LangGraphAdapter, serve_agent
+
+        graph = builder.compile()
+
+        adapter = LangGraphAdapter(graph=graph)
+        serve_agent(adapter, port=9003)
+    """
+
+    def __init__(
+        self,
+        graph: Any,
+        input_key: str = "messages",
+        output_key: str | None = None,
+        state_key: str | None = None,
+        timeout: int = 60,
+        parse_json_input: bool = True,
+        input_mapper: Callable[[str, str | None], Dict[str, Any]] | None = None,
+        default_inputs: Dict[str, Any] | None = None,
+        name: str = "",
+        description: str = "",
+    ) -> None:
+        """Initialize the LangGraph adapter.
+
+        Args:
+            graph: A LangGraph CompiledGraph instance.
+            input_key: Key in the state dict for input (default: "messages").
+            output_key: Optional key to extract from final state.
+            state_key: Optional key for extracting streaming state text.
+            timeout: Execution timeout in seconds (default: 60).
+            parse_json_input: Auto-parse JSON input (default: True).
+            input_mapper: Custom function for input transformation.
+            default_inputs: Default values to merge with parsed inputs.
+            name: Optional agent name for AgentCard generation.
+            description: Optional agent description for AgentCard generation.
+        """
+        self.graph = graph
+        self.input_key = input_key
+        self.output_key = output_key
+        self.state_key = state_key or output_key
+        self.timeout = timeout
+        self.parse_json_input = parse_json_input
+        self.input_mapper = input_mapper
+        self.default_inputs = default_inputs or {}
+        self._name = name
+        self._description = description
+
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
+        """Invoke the graph and return a text response."""
+        inputs = self._build_inputs(user_input, context_id)
+        result = await asyncio.wait_for(
+            self.graph.ainvoke(inputs), timeout=self.timeout,
+        )
+        return self._extract_output(result)
+
+    async def stream(self, user_input: str, context_id: str | None = None, **kwargs) -> AsyncIterator[str]:
+        """Stream state deltas from the graph via astream()."""
+        inputs = self._build_inputs(user_input, context_id)
+        last_text = ""
+        async for state in self.graph.astream(inputs):
+            text = self._extract_streaming_text(state)
+            if text and text != last_text:
+                delta = text[len(last_text):] if text.startswith(last_text) else text
+                last_text = text
+                if delta:
+                    yield delta
+
+    def supports_streaming(self) -> bool:
+        """Auto-detect streaming support from the graph."""
+        return hasattr(self.graph, "astream")
+
+    def get_metadata(self) -> AdapterMetadata:
+        """Return adapter metadata for AgentCard generation."""
+        return AdapterMetadata(
+            name=self._name or "LangGraphAdapter",
+            description=self._description,
+            streaming=self.supports_streaming(),
+        )
+
+    # ──── Internal: Input Building ────
+
+    def _build_inputs(self, user_input: str, context_id: str | None) -> Dict[str, Any]:
+        """Build graph inputs with 3-priority pipeline."""
+        # Priority 1: Custom input_mapper
+        if self.input_mapper is not None:
+            try:
+                return {**self.default_inputs, **self.input_mapper(user_input, context_id)}
+            except Exception as e:
+                logger.warning("input_mapper failed: %s, falling back", e)
+
+        # Priority 2: Auto JSON parsing
+        if self.parse_json_input and user_input.strip().startswith("{"):
+            try:
+                parsed = json.loads(user_input)
+                if isinstance(parsed, dict):
+                    clean = {k: v for k, v in parsed.items() if k != "context_id"}
+                    return {**self.default_inputs, **clean}
+            except json.JSONDecodeError:
+                pass
+
+        # Priority 3: Fallback to input_key
+        return self._build_default_input(user_input)
+
+    def _build_default_input(self, user_message: str) -> Dict[str, Any]:
+        """Build default input based on input_key."""
+        base = dict(self.default_inputs)
+        if self.input_key == "messages":
+            try:
+                from langchain_core.messages import HumanMessage
+                base["messages"] = [HumanMessage(content=user_message)]
+            except ImportError:
+                base["messages"] = [{"role": "user", "content": user_message}]
+        else:
+            base[self.input_key] = user_message
+        return base
+
+    # ──── Internal: Output Extraction ────
+
+    def _extract_output(self, state: Any) -> str:
+        """Extract text from final graph state."""
+        if not isinstance(state, dict):
+            return str(state)
+
+        # Use output_key if specified
+        if self.output_key and self.output_key in state:
+            return self._extract_value_text(state[self.output_key])
+
+        # Try "messages" key (common in chat workflows)
+        if "messages" in state:
+            messages = state["messages"]
+            if messages:
+                return self._extract_message_content(messages[-1])
+
+        # Try common output keys
+        for key in ("output", "response", "result", "answer", "text", "content"):
+            if key in state:
+                return self._extract_value_text(state[key])
+
+        # Fallback: serialize state (excluding internal keys)
+        clean = {k: v for k, v in state.items() if not k.startswith("_")}
+        return json.dumps(clean, indent=2, default=str)
+
+    def _extract_streaming_text(self, state: Any) -> str:
+        """Extract text from intermediate streaming state."""
+        if not isinstance(state, dict):
+            return str(state)
+
+        if self.state_key and self.state_key in state:
+            return self._extract_value_text(state[self.state_key])
+
+        if "messages" in state:
+            messages = state["messages"]
+            if messages:
+                return self._extract_message_content(messages[-1])
+
+        for key in ("output", "response", "text", "content"):
+            if key in state:
+                return self._extract_value_text(state[key])
+
+        return ""
+
+    @staticmethod
+    def _extract_value_text(value: Any) -> str:
+        """Extract text from a value (str, dict, list)."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            for key in ("text", "content", "output"):
+                if key in value:
+                    return str(value[key])
+            return json.dumps(value, indent=2, default=str)
+        if isinstance(value, list):
+            return "\n".join(
+                LangGraphAdapter._extract_value_text(item) for item in value
+            )
+        return str(value)
+
+    @staticmethod
+    def _extract_message_content(message: Any) -> str:
+        """Extract content from a message object (LangChain or dict)."""
+        if hasattr(message, "content"):
+            content = message.content
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, str):
+                        parts.append(item)
+                    elif hasattr(item, "text"):
+                        parts.append(item.text)
+                return " ".join(parts)
+            return str(content)
+
+        if isinstance(message, dict):
+            for key in ("content", "text"):
+                if key in message:
+                    return str(message[key])
+
+        return str(message)
+
+
+# ═══════════════════════════════════════════════════════════════
+# v0.1 Adapter (legacy, deprecated — will be removed in v0.3)
+# ═══════════════════════════════════════════════════════════════
 
 
 class LangGraphAgentAdapter(BaseAgentAdapter):

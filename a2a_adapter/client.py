@@ -1,10 +1,17 @@
 """
 Single-agent A2A server helpers.
 
-This module provides utilities for creating and serving A2A-compliant
-agent servers using the official A2A.
+.. deprecated:: 0.2.0
+    This module is deprecated. Use :mod:`a2a_adapter.server` instead:
+
+    - ``build_agent_app()`` → ``to_a2a()``
+    - ``serve_agent(card, adapter)`` → ``serve_agent(adapter)``
+    - ``AdapterRequestHandler`` → removed (SDK's DefaultRequestHandler)
+
+    This module will be removed in v0.3.0.
 """
 
+import warnings
 from typing import AsyncGenerator
 
 import uvicorn
@@ -199,37 +206,34 @@ def build_agent_app(
     agent_card: AgentCard,
     adapter: BaseAgentAdapter,
 ):
-    """
-    Build an ASGI application for a single A2A agent.
-    
-    This function creates a complete A2A-compliant server application using
-    the official A2A SDK, configured with the provided agent card and adapter.
-    
+    """Build an ASGI application for a single A2A agent.
+
+    .. deprecated:: 0.2.0
+        Use :func:`a2a_adapter.server.to_a2a` instead::
+
+            from a2a_adapter import to_a2a
+            app = to_a2a(adapter)
+
     Args:
         agent_card: A2A AgentCard describing the agent's capabilities
         adapter: BaseAgentAdapter implementation for the agent framework
-        
+
     Returns:
         ASGI application ready to be served
-        
-    Example:
-        >>> from a2a.types import AgentCard
-        >>> from a2a_adapter.integrations.n8n import N8nAgentAdapter
-        >>> 
-        >>> card = AgentCard(
-        ...     name="Math Agent",
-        ...     description="Performs mathematical operations"
-        ... )
-        >>> adapter = N8nAgentAdapter(webhook_url="https://n8n.example.com/webhook")
-        >>> app = build_agent_app(card, adapter)
     """
+    warnings.warn(
+        "build_agent_app() is deprecated, use to_a2a(adapter) instead. "
+        "See migration guide: https://github.com/hybro-ai/a2a-adapter/blob/main/docs/migration-v0.2.md",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     handler = AdapterRequestHandler(adapter)
-    
+
     app_builder = A2AStarletteApplication(
         agent_card=agent_card,
         http_handler=handler,
     )
-    
+
     # Build and return the actual ASGI application
     return app_builder.build()
 

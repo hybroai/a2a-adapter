@@ -4,15 +4,9 @@ OpenClaw adapter for A2A Protocol.
 This adapter enables OpenClaw agents to be exposed as A2A-compliant agents
 by wrapping the OpenClaw CLI as a subprocess.
 
-Supports two modes:
-- Synchronous (async_mode=False): Blocks until command completes, returns Message
-- Async Task Mode (default): Returns Task immediately, processes in background, supports polling
-
-Push Notifications (A2A-compliant):
-- When push_notification_config is provided in MessageSendParams, the adapter will
-  POST task updates to the configured webhook URL using StreamResponse format
-- Payload contains full Task object (including artifacts) per A2A spec section 4.3.3
-- Supports Bearer token authentication for webhook calls
+Contains:
+    - OpenClawAdapter (v0.2): New simplified interface based on BaseA2AAdapter
+    - OpenClawAgentAdapter (v0.1): Legacy interface, deprecated
 """
 
 import asyncio
@@ -43,6 +37,7 @@ from a2a.types import (
 )
 
 from ..adapter import BaseAgentAdapter
+from ..base_adapter import AdapterMetadata, BaseA2AAdapter
 
 # Lazy import for TaskStore to avoid hard dependency
 try:
@@ -64,6 +59,226 @@ VALID_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh"}
 _INVALID_SESSION_CHARS_RE = re.compile(r"[^a-z0-9_-]+")
 _LEADING_TRAILING_DASH_RE = re.compile(r"^-+|-+$")
 _SESSION_ID_MAX_LEN = 64
+
+
+# ═══════════════════════════════════════════════════════════════
+# v0.2 Adapter (new, recommended)
+# ═══════════════════════════════════════════════════════════════
+
+
+class OpenClawAdapter(BaseA2AAdapter):
+    """Adapter for OpenClaw agents via the CLI.
+
+    Wraps the ``openclaw agent --local --json`` command as a subprocess,
+    parses the JSON output, and returns the response text. Supports
+    ``cancel()`` to kill a running subprocess.
+
+    Example::
+
+        from a2a_adapter import OpenClawAdapter, serve_agent
+
+        adapter = OpenClawAdapter(
+            session_id="my-session",
+            agent_id="main",
+            thinking="low",
+        )
+        serve_agent(adapter, port=9005)
+    """
+
+    def __init__(
+        self,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        thinking: str = "low",
+        timeout: int = 600,
+        openclaw_path: str = "openclaw",
+        working_directory: str | None = None,
+        env_vars: Dict[str, str] | None = None,
+        name: str = "",
+        description: str = "",
+    ) -> None:
+        """Initialize the OpenClaw adapter.
+
+        Args:
+            session_id: Session ID for conversation continuity.
+                Auto-generates a unique ID if not provided.
+            agent_id: OpenClaw agent ID. Uses default agent if not provided.
+            thinking: Thinking level (off/minimal/low/medium/high/xhigh).
+            timeout: Command timeout in seconds (default: 600).
+            openclaw_path: Path to the openclaw binary (default: "openclaw").
+            working_directory: Working directory for the subprocess.
+            env_vars: Additional environment variables for the subprocess.
+            name: Optional agent name for AgentCard generation.
+            description: Optional agent description for AgentCard generation.
+        """
+        if thinking not in VALID_THINKING_LEVELS:
+            raise ValueError(
+                f"Invalid thinking level: {thinking}. "
+                f"Valid values: {', '.join(sorted(VALID_THINKING_LEVELS))}"
+            )
+
+        self.session_id = session_id or f"a2a-{uuid.uuid4().hex[:12]}"
+        self.agent_id = agent_id
+        self.thinking = thinking
+        self.timeout = timeout
+        self.openclaw_path = openclaw_path
+        self.working_directory = working_directory
+        self.env_vars = dict(env_vars) if env_vars else {}
+        self._name = name
+        self._description = description
+
+        # Track current subprocess for cancel support
+        self._current_process: AsyncProcess | None = None
+
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
+        """Execute the OpenClaw CLI and return the response text."""
+        import os
+
+        session_id = self._context_id_to_session_id(context_id)
+        cmd = self._build_command(user_input, session_id)
+        logger.debug("Executing OpenClaw command: %s", " ".join(cmd))
+
+        env = os.environ.copy()
+        env.update(self.env_vars)
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=self.working_directory,
+                env=env,
+            )
+            self._current_process = proc
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=self.timeout,
+                )
+            finally:
+                self._current_process = None
+
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"OpenClaw binary not found at '{self.openclaw_path}'. "
+                "Ensure OpenClaw is installed and in PATH."
+            )
+        except asyncio.TimeoutError:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            raise RuntimeError(
+                f"OpenClaw command timed out after {self.timeout} seconds"
+            )
+
+        if proc.returncode != 0:
+            stderr_text = stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"OpenClaw command failed with exit code {proc.returncode}: {stderr_text}"
+            )
+
+        stdout_text = stdout.decode("utf-8", errors="replace").strip()
+        if not stdout_text:
+            raise RuntimeError("OpenClaw command returned empty output")
+
+        try:
+            parsed = json.loads(stdout_text)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Failed to parse OpenClaw JSON output: {e}") from e
+
+        return self._extract_response_text(parsed)
+
+    async def cancel(self, **kwargs) -> None:
+        """Kill the running OpenClaw subprocess."""
+        proc = self._current_process
+        if proc and proc.returncode is None:
+            logger.debug("Killing OpenClaw subprocess")
+            proc.kill()
+
+    async def close(self) -> None:
+        """Ensure subprocess is cleaned up."""
+        await self.cancel()
+
+    def get_metadata(self) -> AdapterMetadata:
+        """Return adapter metadata for AgentCard generation."""
+        return AdapterMetadata(
+            name=self._name or "OpenClawAdapter",
+            description=self._description or "OpenClaw AI agent",
+            streaming=False,
+        )
+
+    # ──── Internal: Command Building ────
+
+    def _build_command(self, message: str, session_id: str) -> list[str]:
+        """Build the OpenClaw CLI command."""
+        cmd = [
+            self.openclaw_path,
+            "agent",
+            "--local",
+            "--message", message,
+            "--json",
+            "--session-id", session_id,
+            "--thinking", self.thinking,
+        ]
+        if self.agent_id:
+            cmd.extend(["--agent", self.agent_id])
+        return cmd
+
+    def _context_id_to_session_id(self, context_id: str | None) -> str:
+        """Convert A2A context_id to a valid OpenClaw session_id.
+
+        OpenClaw session IDs must match: ``^[a-z0-9][a-z0-9_-]{0,63}$``
+        """
+        if not context_id:
+            return self.session_id
+
+        sanitized = _INVALID_SESSION_CHARS_RE.sub("-", context_id.lower())
+        sanitized = _LEADING_TRAILING_DASH_RE.sub("", sanitized)
+        if not sanitized:
+            return self.session_id
+
+        max_suffix_len = _SESSION_ID_MAX_LEN - 4
+        sanitized = sanitized[:max_suffix_len]
+        return f"a2a-{sanitized}"
+
+    # ──── Internal: Output Extraction ────
+
+    @staticmethod
+    def _extract_response_text(output: Dict[str, Any]) -> str:
+        """Extract text from OpenClaw JSON output (payloads array)."""
+        parts: list[str] = []
+        for payload in output.get("payloads", []):
+            text = payload.get("text", "")
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts) if parts else ""
+
+    @staticmethod
+    def _detect_mime_type(url: str) -> str:
+        """Detect MIME type from URL extension."""
+        url_lower = url.lower()
+        mime_map = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+            ".svg": "image/svg+xml",
+            ".pdf": "application/pdf",
+            ".mp4": "video/mp4",
+            ".webm": "video/webm",
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+        }
+        for ext, mime in mime_map.items():
+            if url_lower.endswith(ext):
+                return mime
+        return "application/octet-stream"
+
+
+# ═══════════════════════════════════════════════════════════════
+# v0.1 Adapter (legacy, deprecated — will be removed in v0.3)
+# ═══════════════════════════════════════════════════════════════
 
 
 class OpenClawAgentAdapter(BaseAgentAdapter):
