@@ -54,6 +54,46 @@ logger = logging.getLogger(__name__)
 # Valid thinking levels for OpenClaw
 VALID_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh"}
 
+
+def _extract_json_from_output(stdout_text: str) -> dict:
+    """Extract JSON object from stdout that may contain prefix text.
+
+    OpenClaw CLI may output warning/info messages to stdout before the JSON
+    (e.g., "web_search: no provider configured..."). This function finds the
+    first '{' and parses from there.
+
+    Args:
+        stdout_text: Raw stdout text from OpenClaw CLI
+
+    Returns:
+        Parsed JSON dict
+
+    Raises:
+        RuntimeError: If no valid JSON object is found
+    """
+    if not stdout_text:
+        raise RuntimeError("OpenClaw command returned empty output")
+
+    # Try parsing as-is first (fast path)
+    try:
+        return json.loads(stdout_text)
+    except json.JSONDecodeError:
+        pass
+
+    # Find the first '{' and use raw_decode to extract exactly one JSON object
+    json_start = stdout_text.find("{")
+    if json_start == -1:
+        raise RuntimeError(
+            f"OpenClaw output does not contain JSON object: {stdout_text[:200]}"
+        )
+
+    decoder = json.JSONDecoder()
+    try:
+        obj, _ = decoder.raw_decode(stdout_text, json_start)
+        return obj
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Failed to parse OpenClaw JSON output: {e}") from e
+
 # Regex for sanitizing session IDs (matches OpenClaw's VALID_ID_RE pattern)
 # OpenClaw session IDs must be alphanumeric with underscores/hyphens, max 64 chars
 _INVALID_SESSION_CHARS_RE = re.compile(r"[^a-z0-9_-]+")
@@ -181,10 +221,7 @@ class OpenClawAdapter(BaseA2AAdapter):
         if not stdout_text:
             raise RuntimeError("OpenClaw command returned empty output")
 
-        try:
-            parsed = json.loads(stdout_text)
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"Failed to parse OpenClaw JSON output: {e}") from e
+        parsed = _extract_json_from_output(stdout_text)
 
         return self._extract_response_text(parsed)
 
@@ -805,18 +842,14 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
         if not stdout_text:
             raise RuntimeError("OpenClaw command returned empty output")
 
-        try:
-            parsed = json.loads(stdout_text)
-            logger.debug("OpenClaw parsed JSON keys: %s", list(parsed.keys()) if isinstance(parsed, dict) else type(parsed))
-            if isinstance(parsed, dict) and "payloads" in parsed:
-                logger.debug("OpenClaw payloads count: %d", len(parsed.get("payloads", [])))
-                for i, p in enumerate(parsed.get("payloads", [])):
-                    text_preview = (p.get("text", "") or "")[:100]
-                    logger.debug("OpenClaw payload[%d] text preview: %s", i, text_preview)
-            return parsed
-        except json.JSONDecodeError as e:
-            logger.error("OpenClaw JSON parse error. Raw output: %s", stdout_text[:1000])
-            raise RuntimeError(f"Failed to parse OpenClaw JSON output: {e}") from e
+        parsed = _extract_json_from_output(stdout_text)
+        logger.debug("OpenClaw parsed JSON keys: %s", list(parsed.keys()) if isinstance(parsed, dict) else type(parsed))
+        if isinstance(parsed, dict) and "payloads" in parsed:
+            logger.debug("OpenClaw payloads count: %d", len(parsed.get("payloads", [])))
+            for i, p in enumerate(parsed.get("payloads", [])):
+                text_preview = (p.get("text", "") or "")[:100]
+                logger.debug("OpenClaw payload[%d] text preview: %s", i, text_preview)
+        return parsed
 
     def _extract_context_id(self, params: MessageSendParams) -> str | None:
         """Extract context_id from MessageSendParams."""
@@ -1014,18 +1047,14 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
         if not stdout_text:
             raise RuntimeError("OpenClaw command returned empty output")
 
-        try:
-            parsed = json.loads(stdout_text)
-            logger.debug("OpenClaw sync parsed JSON keys: %s", list(parsed.keys()) if isinstance(parsed, dict) else type(parsed))
-            if isinstance(parsed, dict) and "payloads" in parsed:
-                logger.debug("OpenClaw sync payloads count: %d", len(parsed.get("payloads", [])))
-                for i, p in enumerate(parsed.get("payloads", [])):
-                    text_preview = (p.get("text", "") or "")[:100]
-                    logger.debug("OpenClaw sync payload[%d] text preview: %s", i, text_preview)
-            return parsed
-        except json.JSONDecodeError as e:
-            logger.error("OpenClaw sync JSON parse error. Raw output: %s", stdout_text[:1000])
-            raise RuntimeError(f"Failed to parse OpenClaw JSON output: {e}") from e
+        parsed = _extract_json_from_output(stdout_text)
+        logger.debug("OpenClaw sync parsed JSON keys: %s", list(parsed.keys()) if isinstance(parsed, dict) else type(parsed))
+        if isinstance(parsed, dict) and "payloads" in parsed:
+            logger.debug("OpenClaw sync payloads count: %d", len(parsed.get("payloads", [])))
+            for i, p in enumerate(parsed.get("payloads", [])):
+                text_preview = (p.get("text", "") or "")[:100]
+                logger.debug("OpenClaw sync payload[%d] text preview: %s", i, text_preview)
+        return parsed
 
     # ---------- Output mapping ----------
 

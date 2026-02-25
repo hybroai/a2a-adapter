@@ -265,7 +265,7 @@ async def test_invoke_invalid_json():
     mock_proc.returncode = 0
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(RuntimeError, match="Failed to parse"):
+        with pytest.raises(RuntimeError, match="does not contain JSON object"):
             await adapter.invoke("test")
 
 
