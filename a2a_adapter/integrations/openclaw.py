@@ -80,16 +80,17 @@ def _extract_json_from_output(stdout_text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # Find the first '{' which should start the JSON object
+    # Find the first '{' and use raw_decode to extract exactly one JSON object
     json_start = stdout_text.find("{")
     if json_start == -1:
         raise RuntimeError(
             f"OpenClaw output does not contain JSON object: {stdout_text[:200]}"
         )
 
-    json_text = stdout_text[json_start:]
+    decoder = json.JSONDecoder()
     try:
-        return json.loads(json_text)
+        obj, _ = decoder.raw_decode(stdout_text, json_start)
+        return obj
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Failed to parse OpenClaw JSON output: {e}") from e
 
