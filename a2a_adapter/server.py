@@ -26,7 +26,7 @@ from a2a.server.tasks import (
     InMemoryTaskStore,
 )
 from a2a.server.tasks.task_store import TaskStore
-from a2a.types import AgentCapabilities, AgentCard, AgentSkill
+from a2a.types import AgentCapabilities, AgentCard, AgentProvider, AgentSkill
 
 from .base_adapter import BaseA2AAdapter
 from .executor import AdapterAgentExecutor
@@ -142,7 +142,8 @@ def build_agent_card(
     Args:
         adapter: The adapter to generate a card for.
         **overrides: Override any auto-generated field.
-            Supported keys: name, description, url, version, streaming.
+            Supported keys: name, description, url, version, streaming,
+            provider, documentation_url, icon_url.
 
     Returns:
         A fully populated AgentCard.
@@ -159,6 +160,15 @@ def build_agent_card(
     if not streaming:
         streaming = adapter.supports_streaming()
 
+    # Build provider from metadata or override
+    provider_data = overrides.get("provider", meta.provider)
+    provider = None
+    if provider_data:
+        if isinstance(provider_data, dict):
+            provider = AgentProvider(**provider_data)
+        else:
+            provider = provider_data
+
     return AgentCard(
         name=overrides.get("name", meta.name or type(adapter).__name__),
         description=overrides.get("description", meta.description or ""),
@@ -167,6 +177,7 @@ def build_agent_card(
         capabilities=AgentCapabilities(
             streaming=streaming,
             push_notifications=True,
+            state_transition_history=True,
         ),
         skills=[
             AgentSkill(
@@ -182,4 +193,7 @@ def build_agent_card(
         ] if meta.skills else [],
         default_input_modes=meta.input_modes,
         default_output_modes=meta.output_modes,
+        provider=provider,
+        documentation_url=overrides.get("documentation_url", meta.documentation_url),
+        icon_url=overrides.get("icon_url", meta.icon_url),
     )

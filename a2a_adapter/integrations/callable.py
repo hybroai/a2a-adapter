@@ -71,6 +71,10 @@ class CallableAdapter(BaseA2AAdapter):
         streaming: bool = False,
         name: str = "",
         description: str = "",
+        skills: list[dict] | None = None,
+        provider: dict | None = None,
+        documentation_url: str | None = None,
+        icon_url: str | None = None,
     ) -> None:
         """Initialize the callable adapter.
 
@@ -81,11 +85,19 @@ class CallableAdapter(BaseA2AAdapter):
             streaming: Whether the function supports streaming.
             name: Optional agent name for AgentCard generation.
             description: Optional agent description for AgentCard generation.
+            skills: Optional list of skill dicts for AgentCard generation.
+            provider: Optional dict with 'organization' and 'url' keys.
+            documentation_url: Optional URL to the agent's documentation.
+            icon_url: Optional URL to an icon for the agent.
         """
         self.func = func
         self._streaming = streaming
         self._name = name
         self._description = description
+        self._skills = skills or []
+        self._provider = provider
+        self._documentation_url = documentation_url
+        self._icon_url = icon_url
 
     async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         """Call the function and return a text response."""
@@ -109,6 +121,10 @@ class CallableAdapter(BaseA2AAdapter):
             name=self._name or (self.func.__name__ if hasattr(self.func, "__name__") else "CallableAdapter"),
             description=self._description,
             streaming=self._streaming,
+            skills=self._skills,
+            provider=self._provider,
+            documentation_url=self._documentation_url,
+            icon_url=self._icon_url,
         )
 
     @staticmethod

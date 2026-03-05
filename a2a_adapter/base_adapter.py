@@ -36,6 +36,9 @@ class AdapterMetadata:
         input_modes: Supported input MIME types (default: ["text"]).
         output_modes: Supported output MIME types (default: ["text"]).
         streaming: Whether the adapter supports streaming responses.
+        provider: Optional dict with 'organization' and 'url' keys.
+        documentation_url: Optional URL to the agent's documentation.
+        icon_url: Optional URL to an icon for the agent.
     """
 
     name: str = ""
@@ -45,6 +48,9 @@ class AdapterMetadata:
     input_modes: list[str] = field(default_factory=lambda: ["text"])
     output_modes: list[str] = field(default_factory=lambda: ["text"])
     streaming: bool = False
+    provider: dict | None = None
+    documentation_url: str | None = None
+    icon_url: str | None = None
 
 
 class BaseA2AAdapter(ABC):
