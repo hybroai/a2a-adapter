@@ -133,6 +133,19 @@ async def test_agent_card_endpoint(echo_app):
         assert data["skills"][0]["id"] == "echo"
 
 
+@pytest.mark.asyncio
+async def test_agent_card_push_notifications(echo_app):
+    """Agent card should advertise push notification support."""
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=echo_app),
+        base_url="http://testserver",
+    ) as client:
+        resp = await client.get("/.well-known/agent.json")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["capabilities"]["pushNotifications"] is True
+
+
 # ═══════════════════════════════════════════════════
 # message/send Tests
 # ═══════════════════════════════════════════════════

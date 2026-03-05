@@ -95,6 +95,10 @@ class N8nAdapter(BaseA2AAdapter):
         default_inputs: Dict[str, Any] | None = None,
         name: str = "",
         description: str = "",
+        skills: list[dict] | None = None,
+        provider: dict | None = None,
+        documentation_url: str | None = None,
+        icon_url: str | None = None,
     ) -> None:
         """Initialize the n8n adapter.
 
@@ -112,6 +116,10 @@ class N8nAdapter(BaseA2AAdapter):
             default_inputs: Default values to merge into payload.
             name: Optional agent name for AgentCard generation.
             description: Optional agent description for AgentCard generation.
+            skills: Optional list of skill dicts for AgentCard generation.
+            provider: Optional dict with 'organization' and 'url' keys.
+            documentation_url: Optional URL to the agent's documentation.
+            icon_url: Optional URL to an icon for the agent.
         """
         self.webhook_url = webhook_url
         self.timeout = timeout
@@ -125,6 +133,10 @@ class N8nAdapter(BaseA2AAdapter):
         self.default_inputs = default_inputs or {}
         self._name = name
         self._description = description
+        self._skills = skills or []
+        self._provider = provider
+        self._documentation_url = documentation_url
+        self._icon_url = icon_url
         self._client: httpx.AsyncClient | None = None
 
     async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
@@ -144,6 +156,10 @@ class N8nAdapter(BaseA2AAdapter):
         return AdapterMetadata(
             name=self._name or "N8nAdapter",
             description=self._description,
+            skills=self._skills,
+            provider=self._provider,
+            documentation_url=self._documentation_url,
+            icon_url=self._icon_url,
         )
 
     # ──── Internal: Payload Building ────

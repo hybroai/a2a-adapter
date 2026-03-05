@@ -83,6 +83,10 @@ class CrewAIAdapter(BaseA2AAdapter):
         default_inputs: Dict[str, Any] | None = None,
         name: str = "",
         description: str = "",
+        skills: list[dict] | None = None,
+        provider: dict | None = None,
+        documentation_url: str | None = None,
+        icon_url: str | None = None,
     ) -> None:
         """Initialize the CrewAI adapter.
 
@@ -95,6 +99,10 @@ class CrewAIAdapter(BaseA2AAdapter):
             default_inputs: Default values to merge with parsed inputs.
             name: Optional agent name for AgentCard generation.
             description: Optional agent description for AgentCard generation.
+            skills: Optional list of skill dicts for AgentCard generation.
+            provider: Optional dict with 'organization' and 'url' keys.
+            documentation_url: Optional URL to the agent's documentation.
+            icon_url: Optional URL to an icon for the agent.
         """
         self.crew = crew
         self.inputs_key = inputs_key
@@ -104,6 +112,10 @@ class CrewAIAdapter(BaseA2AAdapter):
         self.default_inputs = default_inputs or {}
         self._name = name
         self._description = description
+        self._skills = skills or []
+        self._provider = provider
+        self._documentation_url = documentation_url
+        self._icon_url = icon_url
 
     async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         """Execute the crew and return the result as text."""
@@ -129,6 +141,10 @@ class CrewAIAdapter(BaseA2AAdapter):
             name=self._name or "CrewAIAdapter",
             description=self._description,
             streaming=False,
+            skills=self._skills,
+            provider=self._provider,
+            documentation_url=self._documentation_url,
+            icon_url=self._icon_url,
         )
 
     # ──── Internal: Input Building ────

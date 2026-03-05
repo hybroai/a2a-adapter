@@ -136,6 +136,10 @@ class OpenClawAdapter(BaseA2AAdapter):
         env_vars: Dict[str, str] | None = None,
         name: str = "",
         description: str = "",
+        skills: list[dict] | None = None,
+        provider: dict | None = None,
+        documentation_url: str | None = None,
+        icon_url: str | None = None,
     ) -> None:
         """Initialize the OpenClaw adapter.
 
@@ -150,6 +154,11 @@ class OpenClawAdapter(BaseA2AAdapter):
             env_vars: Additional environment variables for the subprocess.
             name: Optional agent name for AgentCard generation.
             description: Optional agent description for AgentCard generation.
+            skills: Optional list of skill dicts for AgentCard generation.
+                Each dict may contain: id, name, description, tags, examples.
+            provider: Optional dict with 'organization' and 'url' keys.
+            documentation_url: Optional URL to the agent's documentation.
+            icon_url: Optional URL to an icon for the agent.
         """
         if thinking not in VALID_THINKING_LEVELS:
             raise ValueError(
@@ -166,6 +175,10 @@ class OpenClawAdapter(BaseA2AAdapter):
         self.env_vars = dict(env_vars) if env_vars else {}
         self._name = name
         self._description = description
+        self._skills = skills or []
+        self._provider = provider
+        self._documentation_url = documentation_url
+        self._icon_url = icon_url
 
         # Track current subprocess for cancel support
         self._current_process: AsyncProcess | None = None
@@ -242,6 +255,10 @@ class OpenClawAdapter(BaseA2AAdapter):
             name=self._name or "OpenClawAdapter",
             description=self._description or "OpenClaw AI agent",
             streaming=False,
+            skills=self._skills,
+            provider=self._provider,
+            documentation_url=self._documentation_url,
+            icon_url=self._icon_url,
         )
 
     # ──── Internal: Command Building ────

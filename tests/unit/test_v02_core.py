@@ -6,10 +6,10 @@ adapter implementations (which have their own test_v02_*.py files).
 """
 
 import pytest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from a2a_adapter.base_adapter import BaseA2AAdapter, AdapterMetadata
-from a2a_adapter.server import build_agent_card, to_a2a
+from a2a_adapter.server import build_agent_card, to_a2a, serve_agent
 from a2a_adapter.loader import load_adapter, register_adapter, _REGISTRY
 
 
@@ -160,6 +160,7 @@ def test_build_card_defaults():
     assert card.description == ""
     assert card.url == "http://localhost:9000"
     assert card.capabilities.streaming is False
+    assert card.capabilities.push_notifications is True
     assert card.skills == []
 
 
@@ -218,6 +219,79 @@ def test_build_card_skills_with_tags():
     assert len(card.skills) == 2
     assert card.skills[0].tags == ["math"]
     assert card.skills[1].tags == ["coding"]
+
+
+def test_build_card_push_notifications_enabled():
+    """All auto-generated cards should advertise push notification support."""
+    card = build_agent_card(MinimalAdapter())
+    assert card.capabilities.push_notifications is True
+
+
+# ═══════════════════════════════════════════════════
+# serve_agent URL Tests
+# ═══════════════════════════════════════════════════
+
+
+def test_serve_agent_url_from_port():
+    """serve_agent should derive the AgentCard URL from host/port."""
+    with patch("a2a_adapter.server.uvicorn") as mock_uvicorn:
+        with patch("a2a_adapter.server.to_a2a") as mock_to_a2a:
+            mock_to_a2a.return_value = MagicMock()
+            serve_agent(MinimalAdapter(), port=9008)
+
+            card = mock_to_a2a.call_args[1].get("agent_card") or mock_to_a2a.call_args[0][1]
+            assert card.url == "http://localhost:9008"
+
+
+def test_serve_agent_wildcard_host_normalized():
+    """Wildcard bind addresses should be normalized to localhost in the card URL."""
+    with patch("a2a_adapter.server.uvicorn") as mock_uvicorn:
+        with patch("a2a_adapter.server.to_a2a") as mock_to_a2a:
+            mock_to_a2a.return_value = MagicMock()
+            serve_agent(MinimalAdapter(), host="0.0.0.0", port=9005)
+
+            card = mock_to_a2a.call_args[1].get("agent_card") or mock_to_a2a.call_args[0][1]
+            assert card.url == "http://localhost:9005"
+
+
+def test_serve_agent_ipv6_wildcard_normalized():
+    """IPv6 wildcard :: should be normalized to localhost."""
+    with patch("a2a_adapter.server.uvicorn") as mock_uvicorn:
+        with patch("a2a_adapter.server.to_a2a") as mock_to_a2a:
+            mock_to_a2a.return_value = MagicMock()
+            serve_agent(MinimalAdapter(), host="::", port=9005)
+
+            card = mock_to_a2a.call_args[1].get("agent_card") or mock_to_a2a.call_args[0][1]
+            assert card.url == "http://localhost:9005"
+
+
+def test_serve_agent_custom_host_preserved():
+    """Non-wildcard hosts should be preserved in the card URL."""
+    with patch("a2a_adapter.server.uvicorn") as mock_uvicorn:
+        with patch("a2a_adapter.server.to_a2a") as mock_to_a2a:
+            mock_to_a2a.return_value = MagicMock()
+            serve_agent(MinimalAdapter(), host="192.168.1.100", port=9010)
+
+            card = mock_to_a2a.call_args[1].get("agent_card") or mock_to_a2a.call_args[0][1]
+            assert card.url == "http://192.168.1.100:9010"
+
+
+def test_serve_agent_prebuilt_card_not_overridden():
+    """When a pre-built agent_card is provided, serve_agent should not override it."""
+    from a2a.types import AgentCard, AgentCapabilities
+
+    custom_card = AgentCard(
+        name="Custom", description="", url="https://prod.example.com",
+        version="1.0", capabilities=AgentCapabilities(streaming=False),
+        skills=[], default_input_modes=["text"], default_output_modes=["text"],
+    )
+    with patch("a2a_adapter.server.uvicorn") as mock_uvicorn:
+        with patch("a2a_adapter.server.to_a2a") as mock_to_a2a:
+            mock_to_a2a.return_value = MagicMock()
+            serve_agent(MinimalAdapter(), agent_card=custom_card, port=9999)
+
+            card = mock_to_a2a.call_args[1].get("agent_card") or mock_to_a2a.call_args[0][1]
+            assert card.url == "https://prod.example.com"
 
 
 # ═══════════════════════════════════════════════════

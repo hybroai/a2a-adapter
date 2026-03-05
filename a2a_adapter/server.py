@@ -16,12 +16,17 @@ Replaces: client.py (deprecated in v0.2, removed in v0.3)
 import logging
 from typing import Any
 
+import httpx
 import uvicorn
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.server.tasks import InMemoryTaskStore
+from a2a.server.tasks import (
+    BasePushNotificationSender,
+    InMemoryPushNotificationConfigStore,
+    InMemoryTaskStore,
+)
 from a2a.server.tasks.task_store import TaskStore
-from a2a.types import AgentCapabilities, AgentCard, AgentSkill
+from a2a.types import AgentCapabilities, AgentCard, AgentProvider, AgentSkill
 
 from .base_adapter import BaseA2AAdapter
 from .executor import AdapterAgentExecutor
@@ -63,10 +68,19 @@ def to_a2a(
     if agent_card is None:
         agent_card = build_agent_card(adapter, **card_overrides)
 
+    task_store = task_store or InMemoryTaskStore()
+    push_config_store = InMemoryPushNotificationConfigStore()
+    push_sender = BasePushNotificationSender(
+        httpx_client=httpx.AsyncClient(),
+        config_store=push_config_store,
+    )
+
     executor = AdapterAgentExecutor(adapter)
     handler = DefaultRequestHandler(
         agent_executor=executor,
-        task_store=task_store or InMemoryTaskStore(),
+        task_store=task_store,
+        push_config_store=push_config_store,
+        push_sender=push_sender,
     )
 
     app_builder = A2AStarletteApplication(
@@ -104,6 +118,10 @@ def serve_agent(
         >>> adapter = N8nAdapter(webhook_url="http://localhost:5678/webhook/agent")
         >>> serve_agent(adapter, port=9000)
     """
+    if agent_card is None:
+        display_host = "localhost" if host in ("0.0.0.0", "::") else host
+        agent_card = build_agent_card(adapter, url=f"http://{display_host}:{port}")
+
     app = to_a2a(adapter, agent_card)
     uvicorn.run(app, host=host, port=port, log_level=log_level, **kwargs)
 
@@ -124,7 +142,8 @@ def build_agent_card(
     Args:
         adapter: The adapter to generate a card for.
         **overrides: Override any auto-generated field.
-            Supported keys: name, description, url, version, streaming.
+            Supported keys: name, description, url, version, streaming,
+            provider, documentation_url, icon_url.
 
     Returns:
         A fully populated AgentCard.
@@ -141,6 +160,15 @@ def build_agent_card(
     if not streaming:
         streaming = adapter.supports_streaming()
 
+    # Build provider from metadata or override
+    provider_data = overrides.get("provider", meta.provider)
+    provider = None
+    if provider_data:
+        if isinstance(provider_data, dict):
+            provider = AgentProvider(**provider_data)
+        else:
+            provider = provider_data
+
     return AgentCard(
         name=overrides.get("name", meta.name or type(adapter).__name__),
         description=overrides.get("description", meta.description or ""),
@@ -148,6 +176,8 @@ def build_agent_card(
         version=overrides.get("version", meta.version),
         capabilities=AgentCapabilities(
             streaming=streaming,
+            push_notifications=True,
+            state_transition_history=True,
         ),
         skills=[
             AgentSkill(
@@ -163,4 +193,7 @@ def build_agent_card(
         ] if meta.skills else [],
         default_input_modes=meta.input_modes,
         default_output_modes=meta.output_modes,
+        provider=provider,
+        documentation_url=overrides.get("documentation_url", meta.documentation_url),
+        icon_url=overrides.get("icon_url", meta.icon_url),
     )
