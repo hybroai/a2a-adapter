@@ -13,6 +13,7 @@ Design rationale:
 Replaces: client.py (deprecated in v0.2, removed in v0.3)
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -24,14 +25,81 @@ from a2a.server.tasks import (
     BasePushNotificationSender,
     InMemoryPushNotificationConfigStore,
     InMemoryTaskStore,
+    ResultAggregator,
 )
 from a2a.server.tasks.task_store import TaskStore
-from a2a.types import AgentCapabilities, AgentCard, AgentProvider, AgentSkill
+from a2a.types import (
+    AgentCapabilities,
+    AgentCard,
+    AgentProvider,
+    AgentSkill,
+    Message,
+    TaskState,
+    TaskStatusUpdateEvent,
+)
+from a2a.types import Task as A2ATask
 
 from .base_adapter import BaseA2AAdapter
 from .executor import AdapterAgentExecutor
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Workaround for a2a-sdk bug: ResultAggregator.consume_and_break_on_interrupt
+# creates a background task via asyncio.create_task() without saving the
+# reference.  On Python 3.12+ the event loop only keeps *weak* references to
+# tasks, so the GC can collect the task before it finishes — silently dropping
+# all remaining events (completed/failed status, push-notification callbacks).
+#
+# We monkey-patch the method to store a strong reference in a module-level set
+# so the task stays alive until it completes.
+#
+# Upstream: https://github.com/a2aproject/a2a-python — remove this patch once
+# the SDK saves the task reference itself.
+# Tracking issue: https://github.com/a2aproject/a2a-python/issues/774
+# ---------------------------------------------------------------------------
+
+_tracked_bg_tasks: set[asyncio.Task] = set()  # prevents GC of background tasks
+
+
+async def _consume_and_break_on_interrupt_fixed(
+    self,  # type: ignore[override]
+    consumer,
+    blocking=True,
+    event_callback=None,
+):
+    event_stream = consumer.consume_all()
+    interrupted = False
+    async for event in event_stream:
+        if isinstance(event, Message):
+            self._message = event
+            return event, False
+        await self.task_manager.process(event)
+
+        should_interrupt = False
+        if (
+            isinstance(event, (A2ATask, TaskStatusUpdateEvent))
+            and event.status.state == TaskState.auth_required
+        ):
+            should_interrupt = True
+        elif not blocking:
+            should_interrupt = True
+
+        if should_interrupt:
+            task = asyncio.create_task(
+                self._continue_consuming(event_stream, event_callback)
+            )
+            # --- FIX: keep a strong reference so GC cannot collect the task ---
+            _tracked_bg_tasks.add(task)
+            task.add_done_callback(_tracked_bg_tasks.discard)
+            interrupted = True
+            break
+    return await self.task_manager.get_task(), interrupted
+
+
+ResultAggregator.consume_and_break_on_interrupt = (  # type: ignore[assignment]
+    _consume_and_break_on_interrupt_fixed
+)
 
 
 def to_a2a(
