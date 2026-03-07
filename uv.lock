@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -18,7 +18,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/fa/4c/502dc34d0ee1f4b5f
 
 [[package]]
 name = "a2a-adapter"
-version = "0.1.4"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "a2a" },
@@ -74,7 +74,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "uvicorn", specifier = ">=0.27.0" },
 ]
-provides-extras = ["n8n", "crewai", "langchain", "langgraph", "all", "dev"]
+provides-extras = ["n8n", "crewai", "langchain", "langgraph", "ollama", "all", "dev"]
 
 [[package]]
 name = "a2a-sdk"

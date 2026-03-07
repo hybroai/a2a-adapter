@@ -40,6 +40,7 @@ _ADAPTER_LAZY_MAP = {
     "LangGraphAdapter": (".integrations.langgraph", "LangGraphAdapter"),
     "CallableAdapter": (".integrations.callable", "CallableAdapter"),
     "OpenClawAdapter": (".integrations.openclaw", "OpenClawAdapter"),
+    "OllamaAdapter": (".integrations.ollama", "OllamaAdapter"),
 }
 
 
@@ -84,4 +85,5 @@ __all__ = [
     "LangGraphAdapter",
     "CallableAdapter",
     "OpenClawAdapter",
+    "OllamaAdapter",
 ]

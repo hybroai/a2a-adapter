@@ -22,6 +22,7 @@ __all__ = [
     "LangGraphAdapter",
     "CallableAdapter",
     "OpenClawAdapter",
+    "OllamaAdapter",
     # v0.1 (deprecated)
     "N8nAgentAdapter",
     "CrewAIAgentAdapter",
@@ -53,6 +54,9 @@ def __getattr__(name: str):
     elif name == "OpenClawAdapter":
         from .openclaw import OpenClawAdapter
         return OpenClawAdapter
+    elif name == "OllamaAdapter":
+        from .ollama import OllamaAdapter
+        return OllamaAdapter
     # v0.1 adapters (deprecated)
     elif name == "N8nAgentAdapter":
         from .n8n import N8nAgentAdapter

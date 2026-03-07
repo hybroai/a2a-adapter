@@ -34,6 +34,7 @@ n8n = []
 crewai = ["crewai>=0.1.0"]
 langchain = ["langchain>=0.1.0", "langchain-core>=0.1.0"]
 langgraph = ["langgraph>=0.0.1"]
+ollama = []
 all = [
     "crewai>=0.1.0",
     "langchain>=0.1.0",

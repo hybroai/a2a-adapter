@@ -39,6 +39,7 @@ _BUILTIN_MAP: Dict[str, tuple[str, str]] = {
     "langgraph": ("a2a_adapter.integrations.langgraph", "LangGraphAdapter"),
     "callable": ("a2a_adapter.integrations.callable", "CallableAdapter"),
     "openclaw": ("a2a_adapter.integrations.openclaw", "OpenClawAdapter"),
+    "ollama": ("a2a_adapter.integrations.ollama", "OllamaAdapter"),
 }
 
 
