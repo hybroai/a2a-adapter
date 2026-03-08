@@ -132,6 +132,7 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 | `LangGraphAdapter` | `ainvoke()` / `astream()` with state delta streaming | Yes (auto-detected) |
 | `CrewAIAdapter` | `kickoff_async()` with sync fallback | No |
 | `OpenClawAdapter` | Subprocess exec + JSON parse + cancel (kill) | No |
+| `OllamaAdapter` | Wraps `OllamaClient` HTTP client (`/api/chat`) | Yes (NDJSON streaming) |
 | `CallableAdapter` | Direct function call | Optional |
 
 **Input pipeline (all adapters):** `input_mapper` > JSON parse > `input_key` fallback.
@@ -167,6 +168,7 @@ a2a_adapter/
     ├── langchain.py     # LangChainAdapter + LangChainAgentAdapter
     ├── langgraph.py     # LangGraphAdapter + LangGraphAgentAdapter
     ├── crewai.py        # CrewAIAdapter + CrewAIAgentAdapter
+    ├── ollama.py        # OllamaClient + OllamaAdapter
     └── openclaw.py      # OpenClawAdapter + OpenClawAgentAdapter
 ```
 

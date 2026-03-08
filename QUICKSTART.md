@@ -101,7 +101,19 @@ adapter = OpenClawAdapter(thinking="low", name="OpenClaw Agent")
 serve_agent(adapter, port=9000)
 ```
 
-### Option F: Custom Function
+### Option F: Ollama (Local LLM)
+
+```python
+# my_agent.py
+from a2a_adapter import OllamaAdapter, serve_agent
+from a2a_adapter.integrations.ollama import OllamaClient
+
+client = OllamaClient(model="llama3.2:8b")
+adapter = OllamaAdapter(client=client, name="Local LLM Agent")
+serve_agent(adapter, port=9000)
+```
+
+### Option G: Custom Function
 
 ```python
 # my_agent.py
@@ -114,7 +126,7 @@ adapter = CallableAdapter(func=my_agent, name="Echo Agent")
 serve_agent(adapter, port=9000)
 ```
 
-### Option G: Custom Adapter Class
+### Option H: Custom Adapter Class
 
 For full control, subclass `BaseA2AAdapter`:
 
@@ -216,6 +228,7 @@ asyncio.run(main())
 | LangGraph | `LangGraphAdapter` | Auto-detected |
 | CrewAI | `CrewAIAdapter` | - |
 | OpenClaw | `OpenClawAdapter` | - |
+| Ollama | `OllamaAdapter` | Yes |
 | Any function | `CallableAdapter` | Optional |
 | Custom class | `BaseA2AAdapter` | Optional |
 

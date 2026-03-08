@@ -20,6 +20,23 @@
 - Added: Add timeout & input mapper for adapters
 - Fixed: README fix
 
+## [0.2.1] - 2026-3-8
+
+### Added
+
+- `OllamaClient` — standalone HTTP client for the Ollama API (`/api/chat`), with streaming support
+- `OllamaAdapter` now accepts an `OllamaClient` instance, consistent with how `LangChainAdapter` accepts a runnable and `LangGraphAdapter` accepts a graph
+- `OllamaClient` exported from `a2a_adapter` and `a2a_adapter.integrations`
+- Convenience constructor preserved: `OllamaAdapter(model="...")` still works for simple cases
+
+### Changed
+
+- `OllamaAdapter.get_metadata()` no longer leaks the model name into AgentCard `name`/`description` defaults
+
+### Refactored
+
+- Separated Ollama HTTP client concerns from the A2A adapter layer for cleaner architecture
+
 ## [0.2.0] - 2026-2-9
 
 ### Breaking Changes (v0.1 API still works but is deprecated)

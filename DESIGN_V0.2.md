@@ -612,6 +612,7 @@ _BUILTIN_MAP = {
     "langgraph": ("a2a_adapter.integrations.langgraph", "LangGraphAdapter"),
     "callable":  ("a2a_adapter.integrations.callable",  "CallableAdapter"),
     "openclaw":  ("a2a_adapter.integrations.openclaw",  "OpenClawAdapter"),
+    "ollama":    ("a2a_adapter.integrations.ollama",    "OllamaAdapter"),
 }
 
 
@@ -702,6 +703,8 @@ _ADAPTER_LAZY_MAP = {
     "LangGraphAdapter": (".integrations.langgraph", "LangGraphAdapter"),
     "CallableAdapter":  (".integrations.callable",  "CallableAdapter"),
     "OpenClawAdapter":  (".integrations.openclaw",  "OpenClawAdapter"),
+    "OllamaAdapter":    (".integrations.ollama",    "OllamaAdapter"),
+    "OllamaClient":     (".integrations.ollama",    "OllamaClient"),
 }
 
 
@@ -735,6 +738,8 @@ __all__ = [
     "LangGraphAdapter",
     "CallableAdapter",
     "OpenClawAdapter",
+    "OllamaAdapter",
+    "OllamaClient",
 ]
 ```
 
@@ -1032,6 +1037,54 @@ adapter = OpenClawAdapter(
 serve_agent(adapter, port=9005)
 ```
 
+### 6.8 OllamaAdapter
+
+**Framework:** Local Ollama models via HTTP API
+**Unique aspects:** Separate `OllamaClient` for HTTP concerns, `/api/chat` endpoint, NDJSON streaming
+**Streaming:** Yes
+
+```python
+class OllamaClient:
+    """Standalone HTTP client for Ollama API — owns model, base_url, system_prompt, etc."""
+
+    def __init__(self, model, base_url="http://localhost:11434",
+                 system_prompt=None, temperature=None, timeout=120, keep_alive=None):
+        ...
+
+    async def chat(self, user_input) -> str:
+        payload = self._build_payload(user_input, stream=False)
+        return response["message"]["content"]
+
+    async def chat_stream(self, user_input) -> AsyncIterator[str]:
+        # NDJSON streaming: each line is {"message": {"content": "token"}, "done": false}
+        ...
+
+
+class OllamaAdapter(BaseA2AAdapter):
+    """Wraps OllamaClient, following the same pattern as LangChainAdapter(runnable=...) """
+
+    def __init__(self, client=None, *, model="llama3.2:8b", ...):
+        self.client = client or OllamaClient(model=model, ...)
+
+    async def invoke(self, user_input, context_id=None) -> str:
+        return await self.client.chat(user_input)
+
+    async def stream(self, user_input, context_id=None):
+        async for token in self.client.chat_stream(user_input):
+            yield token
+```
+
+**Usage:**
+
+```python
+from a2a_adapter import OllamaAdapter, serve_agent
+from a2a_adapter.integrations.ollama import OllamaClient
+
+client = OllamaClient(model="llama3.2:8b")
+adapter = OllamaAdapter(client=client, name="Local LLM")
+serve_agent(adapter, port=10010)
+```
+
 ---
 
 ## 7. SDK Delegation Table
@@ -1089,6 +1142,7 @@ a2a_adapter/
     ├── langchain.py         # LangChainAdapter (~60 lines)
     ├── langgraph.py         # LangGraphAdapter (~70 lines)
     ├── callable.py          # CallableAdapter (~30 lines)
+    ├── ollama.py            # OllamaClient + OllamaAdapter (~120 lines)
     └── openclaw.py          # OpenClawAdapter (~150 lines)
 ```
 

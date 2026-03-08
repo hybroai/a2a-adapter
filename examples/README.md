@@ -27,6 +27,7 @@ export OPENAI_API_KEY="your-key"
 | `langchain_agent.py` | LangChain | Yes | 8002 | LangChain chain -> A2A server (streaming auto-detected) |
 | `langgraph_server.py` | LangGraph | Yes | 9002 | LangGraph workflow -> A2A server |
 | `openclaw_agent.py` | OpenClaw | - | 9008 | OpenClaw agent -> A2A server |
+| `ollama_agent.py` | Ollama | Yes | 10010 | Local Ollama LLM -> A2A server (streaming) |
 | `custom_adapter.py` | Custom | - | 8003 | Custom BaseA2AAdapter (sentiment analyzer) |
 | `single_agent_client.py` | httpx | - | - | **Client**: test any A2A agent |
 | `v02_quickstart.py` | Mixed | - | 9000 | Quick start: callable, n8n, custom |
@@ -50,6 +51,7 @@ python examples/langchain_agent.py      # LangChain (streaming)
 python examples/langgraph_server.py     # LangGraph (streaming)
 python examples/crewai_agent.py         # CrewAI
 python examples/openclaw_agent.py       # OpenClaw
+python examples/ollama_agent.py        # Ollama (local LLM, streaming)
 python examples/custom_adapter.py       # Custom adapter (sentiment analyzer)
 ```
 

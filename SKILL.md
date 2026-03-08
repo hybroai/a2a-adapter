@@ -48,6 +48,8 @@ from a2a_adapter import (
     CrewAIAdapter,
     OpenClawAdapter,
     CallableAdapter,
+    OllamaAdapter,
+    OllamaClient,
 )
 ```
 
@@ -140,6 +142,35 @@ adapter = OpenClawAdapter(
     env_vars=None,            # Extra environment variables
 )
 serve_agent(adapter, port=9004)  # Supports cancel() via process kill
+```
+
+### OllamaAdapter — Local Ollama LLM (streaming)
+
+```python
+from a2a_adapter import OllamaAdapter, serve_agent
+from a2a_adapter.integrations.ollama import OllamaClient
+
+client = OllamaClient(
+    model="llama3.2:8b",          # Required: Ollama model name
+    base_url="http://localhost:11434",  # Ollama server URL
+    system_prompt=None,           # Optional system prompt
+    temperature=None,             # Sampling temperature
+    timeout=120,                  # HTTP timeout (seconds)
+    keep_alive=None,              # Model keep-alive duration (e.g. "5m")
+)
+adapter = OllamaAdapter(
+    client=client,                # Required: OllamaClient instance
+    name="Local LLM",
+    description="Ollama-powered agent",
+)
+serve_agent(adapter, port=10010)  # Streaming always supported
+```
+
+Convenience shorthand (creates `OllamaClient` internally):
+
+```python
+adapter = OllamaAdapter(model="llama3.2:8b", name="Local LLM")
+serve_agent(adapter, port=10010)
 ```
 
 ### CallableAdapter — Any async/sync function
@@ -259,7 +290,7 @@ adapter = load_adapter({
 serve_agent(adapter)
 ```
 
-Valid adapter values: `"n8n"`, `"langchain"`, `"langgraph"`, `"crewai"`, `"openclaw"`, `"callable"`, or any registered name.
+Valid adapter values: `"n8n"`, `"langchain"`, `"langgraph"`, `"crewai"`, `"openclaw"`, `"ollama"`, `"callable"`, or any registered name.
 
 ## Third-Party Adapter Registration
 
@@ -336,6 +367,7 @@ AdapterMetadata(
 | LangGraph workflow | `LangGraphAdapter(graph=graph)` |
 | CrewAI crew | `CrewAIAdapter(crew=crew)` |
 | OpenClaw agent | `OpenClawAdapter(...)` |
+| Local Ollama model | `OllamaAdapter(client=OllamaClient(model=...))` |
 | Any other framework | Subclass `BaseA2AAdapter`, implement `invoke()` |
 | Need streaming | Implement `stream()` or use LangChain/LangGraph (auto) |
 | Production deploy | `to_a2a(adapter)` → ASGI server |

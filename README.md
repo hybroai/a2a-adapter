@@ -6,7 +6,7 @@
 
 **Convert any AI agent into an A2A Protocol server in 3 lines.**
 
-A Python SDK that makes any agent framework (n8n, LangGraph, CrewAI, LangChain, [OpenClaw](https://openclaw.ai/), or a plain function) compatible with the [A2A (Agent-to-Agent) Protocol](https://github.com/a2aproject/A2A).
+A Python SDK that makes any agent framework (n8n, LangGraph, CrewAI, LangChain, [OpenClaw](https://openclaw.ai/), Ollama, or a plain function) compatible with the [A2A (Agent-to-Agent) Protocol](https://github.com/a2aproject/A2A).
 
 ```python
 from a2a_adapter import N8nAdapter, serve_agent
@@ -20,7 +20,7 @@ That's it. Your agent is now A2A-compatible with auto-generated AgentCard, task 
 ## Features
 
 - **3-line setup** — `import`, `create`, `serve`
-- **6 built-in adapters** — n8n, LangChain, LangGraph, CrewAI, OpenClaw, Callable
+- **7 built-in adapters** — n8n, LangChain, LangGraph, CrewAI, OpenClaw, Ollama, Callable
 - **Streaming** — auto-detected for LangChain and LangGraph
 - **Auto AgentCard** — generated from adapter metadata, served at `/.well-known/agent.json`
 - **SDK-First** — delegates task management, SSE, push notifications to the A2A SDK
@@ -86,6 +86,17 @@ from a2a_adapter import OpenClawAdapter, serve_agent
 
 adapter = OpenClawAdapter(thinking="low", agent_id="main")
 serve_agent(adapter, port=9008)
+```
+
+### Ollama (local LLM)
+
+```python
+from a2a_adapter import OllamaAdapter, serve_agent
+from a2a_adapter.integrations.ollama import OllamaClient
+
+client = OllamaClient(model="llama3.2:8b")
+adapter = OllamaAdapter(client=client, name="My Local LLM")
+serve_agent(adapter, port=10010)
 ```
 
 ### Custom Function
@@ -166,6 +177,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design documentation, and [D
 | **LangGraph** | `LangGraphAdapter` | Yes | `hasattr(graph, "astream")` |
 | **CrewAI** | `CrewAIAdapter` | - | - |
 | **OpenClaw** | `OpenClawAdapter` | - | - |
+| **Ollama** | `OllamaAdapter` | Yes | Always |
 | **Callable** | `CallableAdapter` | Optional | `streaming=True` param |
 
 ### Input Handling
@@ -238,6 +250,7 @@ python examples/langchain_agent.py    # LangChain (streaming)
 python examples/langgraph_server.py   # LangGraph (streaming)
 python examples/crewai_agent.py       # CrewAI
 python examples/openclaw_agent.py     # OpenClaw
+python examples/ollama_agent.py       # Ollama (local LLM)
 python examples/custom_adapter.py     # Custom BaseA2AAdapter
 python examples/single_agent_client.py  # Test any running agent
 ```

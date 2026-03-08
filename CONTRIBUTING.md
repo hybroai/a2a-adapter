@@ -128,73 +128,68 @@ Create `a2a_adapter/integrations/{framework}.py`:
 {Framework} adapter for A2A Protocol.
 """
 
-from typing import Any, Dict
-from a2a.types import Message, MessageSendParams, TextPart
-from ..adapter import BaseAgentAdapter
+from ..base_adapter import AdapterMetadata, BaseA2AAdapter
 
 
-class {Framework}AgentAdapter(BaseAgentAdapter):
+class {Framework}Adapter(BaseA2AAdapter):
     """
     Adapter for integrating {Framework} with A2A Protocol.
     """
 
-    def __init__(self, ...):
+    def __init__(self, ..., name="", description=""):
         # Initialize with framework-specific config
-        pass
+        self._name = name
+        self._description = description
 
-    async def to_framework(self, params: MessageSendParams) -> Any:
-        # Convert A2A params to framework input
-        pass
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
+        # Call the framework and return a text response
+        result = await call_my_framework(user_input)
+        return str(result)
 
-    async def call_framework(
-        self, framework_input: Any, params: MessageSendParams
-    ) -> Any:
-        # Call the framework
-        pass
+    # Optional: streaming support
+    async def stream(self, user_input: str, context_id: str | None = None, **kwargs):
+        async for chunk in my_framework_stream(user_input):
+            yield str(chunk)
 
-    async def from_framework(
-        self, framework_output: Any, params: MessageSendParams
-    ) -> Message:
-        # Convert framework output to A2A Message
-        pass
+    # Optional: metadata for AgentCard
+    def get_metadata(self) -> AdapterMetadata:
+        return AdapterMetadata(
+            name=self._name or "{Framework}Adapter",
+            description=self._description,
+            streaming=self.supports_streaming(),
+        )
 
-    # Optional: Add handle_stream() if framework supports streaming
+    # Optional: resource cleanup
+    async def close(self) -> None:
+        await self._client.aclose()
 ````
 
 #### 2. Update the Loader
 
-Add your adapter to `a2a_adapter/loader.py`:
+Add your adapter to the `_BUILTIN_MAP` in `a2a_adapter/loader.py`:
 
 ```python
-elif adapter_type == "{framework}":
-    from .integrations.{framework} import {Framework}AgentAdapter
-
-    # Validate required config
-    required_param = config.get("required_param")
-    if not required_param:
-        raise ValueError("{framework} adapter requires 'required_param' in config")
-
-    return {Framework}AgentAdapter(
-        required_param=required_param,
-        optional_param=config.get("optional_param", default_value),
-    )
+_BUILTIN_MAP = {
+    ...
+    "{framework}": ("a2a_adapter.integrations.{framework}", "{Framework}Adapter"),
+}
 ```
 
-#### 3. Update Integrations **init**
+#### 3. Update Integrations __init__
 
 Add to `a2a_adapter/integrations/__init__.py`:
 
 ```python
 __all__ = [
     ...,
-    "{Framework}AgentAdapter",
+    "{Framework}Adapter",
 ]
 
 def __getattr__(name: str):
     ...
-    elif name == "{Framework}AgentAdapter":
-        from .{framework} import {Framework}AgentAdapter
-        return {Framework}AgentAdapter
+    elif name == "{Framework}Adapter":
+        from .{framework} import {Framework}Adapter
+        return {Framework}Adapter
     ...
 ```
 
@@ -209,32 +204,21 @@ Add optional dependency:
 
 #### 5. Create an Example
 
-Create `examples/0X_{framework}_agent.py`:
+Create `examples/{framework}_agent.py`:
 
 ```python
 """
-Example: Single {Framework} Agent Server
+Example: {Framework} Agent Server
 """
 
-import asyncio
-from a2a_adapter import load_a2a_agent, serve_agent
-from a2a.types import AgentCard
+from a2a_adapter import {Framework}Adapter, serve_agent
 
-async def main():
-    adapter = await load_a2a_agent({
-        "adapter": "{framework}",
-        # ... config ...
-    })
-
-    card = AgentCard(
-        name="{Framework} Agent",
-        description="...",
-    )
-
-    serve_agent(agent_card=card, adapter=adapter, port=800X)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+adapter = {Framework}Adapter(
+    # ... config ...
+    name="{Framework} Agent",
+    description="...",
+)
+serve_agent(adapter, port=800X)
 ```
 
 #### 6. Add Tests
@@ -243,18 +227,26 @@ Create `tests/unit/test_{framework}_adapter.py`:
 
 ```python
 """
-Unit tests for {Framework}AgentAdapter.
+Unit tests for {Framework}Adapter.
 """
 
 import pytest
-from a2a_adapter.integrations.{framework} import {Framework}AgentAdapter
-from a2a.types import Message, MessageSendParams, TextPart
+from a2a_adapter.integrations.{framework} import {Framework}Adapter
 
 
-@pytest.mark.asyncio
-async def test_{framework}_adapter_basic():
-    # Test basic functionality
-    pass
+class TestInvoke:
+    @pytest.mark.asyncio
+    async def test_basic(self):
+        adapter = {Framework}Adapter(...)
+        result = await adapter.invoke("Hello")
+        assert isinstance(result, str)
+
+
+class TestMetadata:
+    def test_default_metadata(self):
+        adapter = {Framework}Adapter(...)
+        meta = adapter.get_metadata()
+        assert meta.name
 ```
 
 #### 7. Update Documentation
@@ -388,14 +380,20 @@ mypy a2a_adapter/
 ```
 a2a-adapter/
 ├── a2a_adapter/           # Main package
-│   ├── __init__.py         # Package exports
-│   ├── adapter.py          # BaseAgentAdapter
-│   ├── loader.py           # Adapter factory
-│   ├── client.py           # Server helpers
+│   ├── __init__.py         # Package exports + lazy imports
+│   ├── base_adapter.py     # BaseA2AAdapter + AdapterMetadata
+│   ├── executor.py         # AdapterAgentExecutor (bridge)
+│   ├── server.py           # to_a2a() / serve_agent() / build_agent_card()
+│   ├── loader.py           # load_adapter() / register_adapter()
+│   ├── adapter.py          # [deprecated] v0.1 BaseAgentAdapter
+│   ├── client.py           # [deprecated] v0.1 server helpers
 │   └── integrations/       # Framework adapters
 │       ├── n8n.py
 │       ├── crewai.py
 │       ├── langchain.py
+│       ├── langgraph.py
+│       ├── ollama.py        # OllamaClient + OllamaAdapter
+│       ├── openclaw.py
 │       └── callable.py
 ├── examples/               # Usage examples
 ├── tests/                  # Test suite
