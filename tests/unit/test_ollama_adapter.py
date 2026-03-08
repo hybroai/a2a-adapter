@@ -1,89 +1,63 @@
-"""Tests for OllamaAdapter (v0.2)."""
+"""Tests for OllamaClient and OllamaAdapter (v0.2)."""
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 
-from a2a_adapter.integrations.ollama import OllamaAdapter
+from a2a_adapter.integrations.ollama import OllamaAdapter, OllamaClient
 
 
-# ──── Fixtures ────
+# ══════════════════════════════════════════════════════════════
+# OllamaClient tests
+# ══════════════════════════════════════════════════════════════
 
 
 @pytest.fixture
-def adapter():
-    return OllamaAdapter(
+def client():
+    return OllamaClient(
         model="llama3.2:8b",
-        name="Test Ollama",
-        description="Test adapter",
         system_prompt="You are helpful.",
         temperature=0.5,
     )
 
 
 @pytest.fixture
-def adapter_no_system():
-    return OllamaAdapter(model="mistral")
-
-
-# ──── Payload building ────
+def client_no_system():
+    return OllamaClient(model="mistral")
 
 
 class TestBuildPayload:
-    def test_basic_payload(self, adapter_no_system):
-        payload = adapter_no_system._build_payload("Hello", stream=False)
+    def test_basic_payload(self, client_no_system):
+        payload = client_no_system._build_payload("Hello", stream=False)
         assert payload["model"] == "mistral"
         assert payload["stream"] is False
         assert len(payload["messages"]) == 1
         assert payload["messages"][0] == {"role": "user", "content": "Hello"}
         assert "options" not in payload
 
-    def test_payload_with_system_prompt(self, adapter):
-        payload = adapter._build_payload("Hi", stream=True)
+    def test_payload_with_system_prompt(self, client):
+        payload = client._build_payload("Hi", stream=True)
         assert payload["stream"] is True
         assert len(payload["messages"]) == 2
         assert payload["messages"][0]["role"] == "system"
         assert payload["messages"][0]["content"] == "You are helpful."
         assert payload["messages"][1] == {"role": "user", "content": "Hi"}
 
-    def test_payload_with_temperature(self, adapter):
-        payload = adapter._build_payload("test", stream=False)
+    def test_payload_with_temperature(self, client):
+        payload = client._build_payload("test", stream=False)
         assert payload["options"]["temperature"] == 0.5
 
     def test_payload_with_keep_alive(self):
-        a = OllamaAdapter(model="x", keep_alive="10m")
-        payload = a._build_payload("test", stream=False)
+        c = OllamaClient(model="x", keep_alive="10m")
+        payload = c._build_payload("test", stream=False)
         assert payload["keep_alive"] == "10m"
 
 
-# ──── Metadata ────
-
-
-class TestMetadata:
-    def test_default_metadata(self):
-        a = OllamaAdapter(model="codellama")
-        meta = a.get_metadata()
-        assert "codellama" in meta.name
-        assert meta.streaming is True
-
-    def test_custom_metadata(self, adapter):
-        meta = adapter.get_metadata()
-        assert meta.name == "Test Ollama"
-        assert meta.description == "Test adapter"
-        assert meta.streaming is True
-
-    def test_supports_streaming(self, adapter):
-        assert adapter.supports_streaming() is True
-
-
-# ──── invoke() ────
-
-
-class TestInvoke:
+class TestClientChat:
     @pytest.mark.asyncio
-    async def test_invoke_success(self, adapter):
+    async def test_chat_success(self, client):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.raise_for_status = MagicMock()
@@ -92,27 +66,27 @@ class TestInvoke:
             "done": True,
         }
 
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        adapter._client = mock_client
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_response)
+        client._client = mock_http
 
-        result = await adapter.invoke("Hi")
+        result = await client.chat("Hi")
         assert result == "Hello there!"
-        mock_client.post.assert_called_once()
-        call_kwargs = mock_client.post.call_args
+        mock_http.post.assert_called_once()
+        call_kwargs = mock_http.post.call_args
         assert call_kwargs[1]["json"]["stream"] is False
 
     @pytest.mark.asyncio
-    async def test_invoke_connection_error(self, adapter):
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
-        adapter._client = mock_client
+    async def test_chat_connection_error(self, client):
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
+        client._client = mock_http
 
         with pytest.raises(RuntimeError, match="Cannot connect to Ollama"):
-            await adapter.invoke("Hi")
+            await client.chat("Hi")
 
     @pytest.mark.asyncio
-    async def test_invoke_http_error(self, adapter):
+    async def test_chat_http_error(self, client):
         mock_response = MagicMock()
         mock_response.status_code = 404
         mock_response.text = "model not found"
@@ -120,20 +94,17 @@ class TestInvoke:
             "Not Found", request=MagicMock(), response=mock_response
         )
 
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        adapter._client = mock_client
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_response)
+        client._client = mock_http
 
         with pytest.raises(RuntimeError, match="Ollama returned HTTP 404"):
-            await adapter.invoke("Hi")
+            await client.chat("Hi")
 
 
-# ──── stream() ────
-
-
-class TestStream:
+class TestClientStream:
     @pytest.mark.asyncio
-    async def test_stream_success(self, adapter):
+    async def test_chat_stream_success(self, client):
         lines = [
             json.dumps({"message": {"content": "Hello"}, "done": False}),
             json.dumps({"message": {"content": " world"}, "done": False}),
@@ -146,48 +117,142 @@ class TestStream:
         mock_response.__aenter__ = AsyncMock(return_value=mock_response)
         mock_response.__aexit__ = AsyncMock(return_value=False)
 
-        mock_client = AsyncMock()
-        mock_client.stream = MagicMock(return_value=mock_response)
-        adapter._client = mock_client
+        mock_http = AsyncMock()
+        mock_http.stream = MagicMock(return_value=mock_response)
+        client._client = mock_http
 
         chunks = []
-        async for chunk in adapter.stream("Hi"):
+        async for chunk in client.chat_stream("Hi"):
             chunks.append(chunk)
         assert chunks == ["Hello", " world"]
 
     @pytest.mark.asyncio
-    async def test_stream_connection_error(self, adapter):
+    async def test_chat_stream_connection_error(self, client):
         mock_response = AsyncMock()
         mock_response.__aenter__ = AsyncMock(side_effect=httpx.ConnectError("refused"))
         mock_response.__aexit__ = AsyncMock(return_value=False)
 
-        mock_client = AsyncMock()
-        mock_client.stream = MagicMock(return_value=mock_response)
-        adapter._client = mock_client
+        mock_http = AsyncMock()
+        mock_http.stream = MagicMock(return_value=mock_response)
+        client._client = mock_http
 
         with pytest.raises(RuntimeError, match="Cannot connect to Ollama"):
-            async for _ in adapter.stream("Hi"):
+            async for _ in client.chat_stream("Hi"):
                 pass
 
 
-# ──── close() ────
-
-
-class TestClose:
+class TestClientClose:
     @pytest.mark.asyncio
-    async def test_close(self, adapter):
-        mock_client = AsyncMock()
-        adapter._client = mock_client
+    async def test_close(self, client):
+        mock_http = AsyncMock()
+        client._client = mock_http
+        await client.close()
+        mock_http.aclose.assert_called_once()
+        assert client._client is None
+
+    @pytest.mark.asyncio
+    async def test_close_no_client(self, client):
+        await client.close()  # Should not raise
+
+
+# ══════════════════════════════════════════════════════════════
+# OllamaAdapter tests
+# ══════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def mock_client():
+    """OllamaClient with mocked methods."""
+    c = MagicMock(spec=OllamaClient)
+    c.chat = AsyncMock(return_value="Hello there!")
+    c.close = AsyncMock()
+    return c
+
+
+@pytest.fixture
+def adapter(mock_client):
+    return OllamaAdapter(
+        client=mock_client,
+        name="Test Ollama",
+        description="Test adapter",
+    )
+
+
+class TestAdapterWithClient:
+    """Test that OllamaAdapter correctly delegates to OllamaClient."""
+
+    @pytest.mark.asyncio
+    async def test_invoke_delegates_to_client(self, adapter, mock_client):
+        result = await adapter.invoke("Hi")
+        assert result == "Hello there!"
+        mock_client.chat.assert_called_once_with("Hi")
+
+    @pytest.mark.asyncio
+    async def test_stream_delegates_to_client(self, adapter, mock_client):
+        mock_client.chat_stream = MagicMock(
+            return_value=_async_iter(["Hello", " world"])
+        )
+        chunks = []
+        async for chunk in adapter.stream("Hi"):
+            chunks.append(chunk)
+        assert chunks == ["Hello", " world"]
+        mock_client.chat_stream.assert_called_once_with("Hi")
+
+    @pytest.mark.asyncio
+    async def test_close_delegates_to_client(self, adapter, mock_client):
         await adapter.close()
-        mock_client.aclose.assert_called_once()
-        assert adapter._client is None
-
-    @pytest.mark.asyncio
-    async def test_close_no_client(self, adapter):
-        await adapter.close()  # Should not raise
+        mock_client.close.assert_called_once()
 
 
-# ──── Config-driven loading ────
+class TestAdapterConvenienceConstructor:
+    """Test that OllamaAdapter can be created with convenience params."""
+
+    def test_creates_client_from_params(self):
+        adapter = OllamaAdapter(
+            model="codellama",
+            base_url="http://custom:11434",
+            system_prompt="Be concise.",
+            temperature=0.3,
+        )
+        assert isinstance(adapter.client, OllamaClient)
+        assert adapter.client.model == "codellama"
+        assert adapter.client.base_url == "http://custom:11434"
+        assert adapter.client.system_prompt == "Be concise."
+        assert adapter.client.temperature == 0.3
+
+    def test_explicit_client_takes_precedence(self):
+        explicit = OllamaClient(model="phi3")
+        adapter = OllamaAdapter(client=explicit, model="ignored")
+        assert adapter.client is explicit
+        assert adapter.client.model == "phi3"
+
+
+class TestAdapterMetadata:
+    def test_default_metadata(self):
+        a = OllamaAdapter(model="codellama")
+        meta = a.get_metadata()
+        assert meta.name == "OllamaAdapter"
+        assert meta.streaming is True
+
+    def test_custom_metadata(self):
+        a = OllamaAdapter(
+            model="x",
+            name="Test Ollama",
+            description="Test adapter",
+        )
+        meta = a.get_metadata()
+        assert meta.name == "Test Ollama"
+        assert meta.description == "Test adapter"
+        assert meta.streaming is True
+
+    def test_supports_streaming(self, adapter):
+        assert adapter.supports_streaming() is True
+
+    def test_model_not_leaked_in_metadata(self):
+        a = OllamaAdapter(model="llama3.2:8b")
+        meta = a.get_metadata()
+        assert "llama3.2" not in meta.name
+        assert "llama3.2" not in meta.description
 
 
 class TestLoading:
@@ -196,7 +261,7 @@ class TestLoading:
 
         adapter = load_adapter({"adapter": "ollama", "model": "phi3"})
         assert isinstance(adapter, OllamaAdapter)
-        assert adapter.model == "phi3"
+        assert adapter.client.model == "phi3"
 
 
 # ──── Helpers ────

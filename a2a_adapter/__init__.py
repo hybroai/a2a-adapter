@@ -41,6 +41,7 @@ _ADAPTER_LAZY_MAP = {
     "CallableAdapter": (".integrations.callable", "CallableAdapter"),
     "OpenClawAdapter": (".integrations.openclaw", "OpenClawAdapter"),
     "OllamaAdapter": (".integrations.ollama", "OllamaAdapter"),
+    "OllamaClient": (".integrations.ollama", "OllamaClient"),
 }
 
 
@@ -86,4 +87,5 @@ __all__ = [
     "CallableAdapter",
     "OpenClawAdapter",
     "OllamaAdapter",
+    "OllamaClient",
 ]

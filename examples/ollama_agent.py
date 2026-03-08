@@ -10,9 +10,11 @@ Usage:
 """
 
 from a2a_adapter import OllamaAdapter, serve_agent
+from a2a_adapter.integrations.ollama import OllamaClient
 
+client = OllamaClient(model="llama3.2:8b")
 adapter = OllamaAdapter(
-    model="llama3.2:8b",
+    client=client,
     name="My Ollama Agent",
     description="Local LLM via Ollama",
 )
