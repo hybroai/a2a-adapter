@@ -18,7 +18,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/fa/4c/502dc34d0ee1f4b5f
 
 [[package]]
 name = "a2a-adapter"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "a2a" },
