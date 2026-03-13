@@ -14,6 +14,7 @@ Design rationale:
 """
 
 import logging
+import uuid
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
@@ -159,6 +160,7 @@ class AdapterAgentExecutor(AgentExecutor):
         """
         chunks: list[str | Part] = []
         prev_chunk: str | Part | None = None
+        artifact_id = uuid.uuid4().hex
 
         async for chunk in self._adapter.stream(
             user_input, context.context_id, context=context
@@ -168,6 +170,7 @@ class AdapterAgentExecutor(AgentExecutor):
 
                 await updater.add_artifact(
                     self._to_parts(prev_chunk),
+                    artifact_id=artifact_id,
                     append=len(chunks) > 1,
                     last_chunk=False,
                 )
@@ -178,6 +181,7 @@ class AdapterAgentExecutor(AgentExecutor):
 
             await updater.add_artifact(
                 self._to_parts(prev_chunk),
+                artifact_id=artifact_id,
                 append=len(chunks) > 1,
                 last_chunk=True,
             )

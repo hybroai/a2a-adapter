@@ -79,9 +79,14 @@ class OllamaClient:
                 f"Is Ollama running? (ollama serve): {e}"
             ) from e
         except httpx.HTTPStatusError as e:
+            error_detail = e.response.text[:512]
+            try:
+                error_json = e.response.json()
+                error_detail = error_json.get("error", error_detail)
+            except Exception:
+                pass
             raise RuntimeError(
-                f"Ollama returned HTTP {e.response.status_code}: "
-                f"{e.response.text[:512]}"
+                f"Ollama error for model '{self.model}': {error_detail}"
             ) from e
 
     async def chat_stream(self, user_input: str) -> AsyncIterator[str]:
@@ -119,8 +124,14 @@ class OllamaClient:
                 f"Is Ollama running? (ollama serve): {e}"
             ) from e
         except httpx.HTTPStatusError as e:
+            error_detail = f"HTTP {e.response.status_code}"
+            try:
+                error_json = e.response.json()
+                error_detail = error_json.get("error", error_detail)
+            except Exception:
+                pass
             raise RuntimeError(
-                f"Ollama returned HTTP {e.response.status_code}"
+                f"Ollama error for model '{self.model}': {error_detail}"
             ) from e
 
     async def close(self) -> None:

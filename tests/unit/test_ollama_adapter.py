@@ -89,7 +89,8 @@ class TestClientChat:
     async def test_chat_http_error(self, client):
         mock_response = MagicMock()
         mock_response.status_code = 404
-        mock_response.text = "model not found"
+        mock_response.text = '{"error": "model not found"}'
+        mock_response.json.return_value = {"error": "model not found"}
         mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
             "Not Found", request=MagicMock(), response=mock_response
         )
@@ -98,7 +99,7 @@ class TestClientChat:
         mock_http.post = AsyncMock(return_value=mock_response)
         client._client = mock_http
 
-        with pytest.raises(RuntimeError, match="Ollama returned HTTP 404"):
+        with pytest.raises(RuntimeError, match="Ollama error for model.*model not found"):
             await client.chat("Hi")
 
 
