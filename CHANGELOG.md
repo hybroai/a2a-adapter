@@ -1,26 +1,34 @@
-## [0.1.3] - 2025-12-31
+# Changelog
 
-- Added: CHANGELOG
-- Fixed: broken Pypi links
+All notable changes to this project will be documented in this file.
 
-## [0.1.4] - 2026-1-22
+The format is based on [Keep a Changelog](https://keepachangelog.com/),
+and this project adheres to [Semantic Versioning](https://semver.org/).
 
-- Added: Init adapter for lang graph
-- Added: Task support for crew ai adapter
-- Added: More unit tests
+## [0.2.2] - 2026-03-13
 
-## [0.1.5] - 2026-2-4
+### Added
 
-- Added: OpenClaw adapter
-- Added: Push notification support
-- Added: More unit tests
+- GitHub Actions workflow for automated PyPI publishing via trusted publishers
+- Multimodality support for N8nAdapter (file and image handling)
 
-## [0.1.6] - 2026-2-5
+### Changed
 
-- Added: Add timeout & input mapper for adapters
-- Fixed: README fix
+- N8nAdapter now uses `isinstance` for FilePart check and filters file/image fields from text
+- N8nAdapter reuses HTTP client for better performance
+- N8nAdapter returns consistent `list[Part]` in multimodal mode
+- MIME types are now configurable in N8nAdapter
 
-## [0.2.1] - 2026-3-8
+### Fixed
+
+- Improved Ollama error messages with model name and parsed error detail
+- Use consistent `artifact_id` for streaming chunks in executor
+
+### Refactored
+
+- Extracted `_to_parts()` helper in executor for cleaner code
+
+## [0.2.1] - 2026-03-08
 
 ### Added
 
@@ -37,9 +45,11 @@
 
 - Separated Ollama HTTP client concerns from the A2A adapter layer for cleaner architecture
 
-## [0.2.0] - 2026-2-9
+## [0.2.0] - 2026-02-09
 
-### Breaking Changes (v0.1 API still works but is deprecated)
+### Breaking Changes
+
+v0.1 API still works but is deprecated.
 
 - New simplified adapter interface: `BaseA2AAdapter` with single `invoke()` method
 - New server functions: `serve_agent(adapter)` and `to_a2a(adapter)` replace manual AgentCard + serve pattern
@@ -71,3 +81,39 @@
 - SDK-First: delegates task management, SSE streaming, push notifications to A2A SDK
 - ~85% code reduction in adapter implementations
 - See `DESIGN_V0.2.md` for full architecture rationale
+
+## [0.1.6] - 2026-02-05
+
+### Added
+
+- Timeout & input mapper for adapters
+
+### Fixed
+
+- README fix
+
+## [0.1.5] - 2026-02-04
+
+### Added
+
+- OpenClaw adapter
+- Push notification support
+- More unit tests
+
+## [0.1.4] - 2026-01-22
+
+### Added
+
+- Init adapter for LangGraph
+- Task support for CrewAI adapter
+- More unit tests
+
+## [0.1.3] - 2025-12-31
+
+### Added
+
+- CHANGELOG
+
+### Fixed
+
+- Broken PyPI links
