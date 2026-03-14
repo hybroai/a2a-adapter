@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] - 2026-03-13
+
+### Changed
+
+- Correct default llama model name, and error out when wrong model name is provided
+
 ## [0.2.2] - 2026-03-13
 
 ### Added
