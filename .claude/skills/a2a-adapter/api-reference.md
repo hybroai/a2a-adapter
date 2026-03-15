@@ -1,31 +1,8 @@
-# a2a-adapter SDK — Agent Skill
-
-> This document teaches coding agents how to use the `a2a-adapter` SDK.
-> Feed this file to any AI coding assistant so it knows how to convert
-> AI agents into A2A Protocol servers using this library.
+# a2a-adapter API Reference
 
 **Version**: 0.2.0 | **Python**: >=3.11 | **License**: Apache-2.0
 
-## Install
-
-```bash
-pip install a2a-adapter                # Core (n8n, callable, ollama, openclaw)
-pip install a2a-adapter[crewai]        # + CrewAI
-pip install a2a-adapter[langchain]     # + LangChain
-pip install a2a-adapter[langgraph]     # + LangGraph
-pip install a2a-adapter[all]           # Everything
-```
-
-## Core Pattern (3 lines)
-
-```python
-from a2a_adapter import XxxAdapter, serve_agent
-
-adapter = XxxAdapter(...)       # Create adapter
-serve_agent(adapter, port=9000) # Start A2A server
-```
-
-`serve_agent()` starts a uvicorn server with auto-generated AgentCard at `/.well-known/agent.json`. All A2A protocol handling (JSON-RPC, task management, SSE streaming, push notifications) is done by the A2A SDK automatically.
+For installation and quickstart, see SKILL.md.
 
 ## Public API
 
@@ -34,7 +11,7 @@ All imports come from `a2a_adapter`:
 ```python
 from a2a_adapter import (
     # Core
-    BaseA2AAdapter,    # Abstract base — subclass for custom adapters
+    BaseA2AAdapter,    # Abstract base -- subclass for custom adapters
     AdapterMetadata,   # Dataclass for AgentCard auto-generation
     # Server
     serve_agent,       # One-line server: adapter -> uvicorn
@@ -57,7 +34,7 @@ from a2a_adapter import (
 
 ## Built-in Adapters
 
-### N8nAdapter — n8n webhook
+### N8nAdapter -- n8n webhook
 
 ```python
 from a2a_adapter import N8nAdapter, serve_agent
@@ -80,7 +57,7 @@ serve_agent(adapter, port=9000)
 
 Supports multimodal responses when the n8n workflow returns structured content.
 
-### LangChainAdapter — LangChain Runnable (auto-streaming)
+### LangChainAdapter -- LangChain Runnable (auto-streaming)
 
 ```python
 from langchain_openai import ChatOpenAI
@@ -98,7 +75,7 @@ adapter = LangChainAdapter(
 serve_agent(adapter, port=9001)  # Streaming auto-detected via hasattr(runnable, "astream")
 ```
 
-### LangGraphAdapter — LangGraph CompiledGraph (auto-streaming)
+### LangGraphAdapter -- LangGraph CompiledGraph (auto-streaming)
 
 ```python
 from a2a_adapter import LangGraphAdapter, serve_agent
@@ -116,7 +93,7 @@ serve_agent(adapter, port=9002)  # Streaming auto-detected
 
 When `input_key="messages"`, user text is auto-wrapped in `HumanMessage` if `langchain_core` is available.
 
-### CrewAIAdapter — CrewAI Crew
+### CrewAIAdapter -- CrewAI Crew
 
 ```python
 from a2a_adapter import CrewAIAdapter, serve_agent
@@ -131,7 +108,7 @@ adapter = CrewAIAdapter(
 serve_agent(adapter, port=9003)  # No streaming support
 ```
 
-### OpenClawAdapter — OpenClaw CLI
+### OpenClawAdapter -- OpenClaw CLI
 
 ```python
 from a2a_adapter import OpenClawAdapter, serve_agent
@@ -148,7 +125,7 @@ adapter = OpenClawAdapter(
 serve_agent(adapter, port=9004)  # Supports cancel() via process kill
 ```
 
-### OllamaAdapter — Local Ollama LLM (streaming)
+### OllamaAdapter -- Local Ollama LLM (streaming)
 
 ```python
 from a2a_adapter import OllamaAdapter, serve_agent
@@ -177,7 +154,7 @@ adapter = OllamaAdapter(model="llama3.2", name="Local LLM")
 serve_agent(adapter, port=10010)
 ```
 
-### CallableAdapter — Any async/sync function
+### CallableAdapter -- Any async/sync function
 
 ```python
 from a2a_adapter import CallableAdapter, serve_agent
@@ -196,9 +173,74 @@ serve_agent(adapter, port=9005)
 
 For streaming, `func` should be an async generator yielding str chunks.
 
-## Custom Adapter (subclass BaseA2AAdapter)
+## Server Functions
 
-For any framework not covered by built-in adapters:
+### `serve_agent()` -- development server
+
+```python
+serve_agent(
+    adapter: BaseA2AAdapter,
+    agent_card: AgentCard | None = None,   # Override auto-generated card
+    host: str = "0.0.0.0",
+    port: int = 9000,
+    log_level: str = "info",
+    **kwargs,                              # Passed to uvicorn.run()
+)
+```
+
+### `to_a2a()` -- production ASGI app
+
+```python
+app = to_a2a(
+    adapter: BaseA2AAdapter,
+    agent_card: AgentCard | None = None,
+    task_store: TaskStore | None = None,   # Default: InMemoryTaskStore
+    **card_overrides,                      # name=, description=, url=, version=, streaming=,
+                                           # provider=, documentation_url=, icon_url=
+)
+# Deploy with any ASGI server:
+# gunicorn app:app -k uvicorn.workers.UvicornWorker
+# hypercorn app:app
+# daphne app:app
+```
+
+Auto-enabled capabilities on the generated AgentCard: `streaming` (auto-detected), `push_notifications=True`, `state_transition_history=True`.
+
+### `build_agent_card()` -- generate AgentCard
+
+```python
+card = build_agent_card(
+    adapter: BaseA2AAdapter,
+    **overrides,     # name=, description=, url=, version=, streaming=,
+                     # provider=, documentation_url=, icon_url=
+)
+```
+
+Default url is `http://localhost:9000`. Override with `url="http://prod:8080"`.
+
+## BaseA2AAdapter Method Reference
+
+| Method | Required | Signature | Description |
+|---|---|---|---|
+| `invoke` | **Yes** | `async (str, str\|None, **kwargs) -> str \| list[Part]` | Execute agent, return text or multimodal |
+| `stream` | No | `async (str, str\|None, **kwargs) -> AsyncIterator[str \| Part]` | Yield text/multimodal chunks |
+| `cancel` | No | `async (str\|None, **kwargs) -> None` | Cancel current execution |
+| `close` | No | `async () -> None` | Release resources |
+| `get_metadata` | No | `() -> AdapterMetadata` | Metadata for AgentCard |
+| `supports_streaming` | No | `() -> bool` | Auto-detects from stream() override |
+
+All methods receiving `**kwargs` get `context=RequestContext` from the bridge layer.
+
+**Behavioral notes:**
+- `invoke()` is the ONLY required method; all others are optional
+- `stream()` is auto-detected: if overridden, `supports_streaming()` returns `True`
+- Exceptions in `invoke()`/`stream()` are caught and converted to failed tasks automatically
+- `context_id` enables multi-turn conversations (same ID = same conversation)
+- Adapter supports `async with` for resource management (`close()` called on exit)
+
+## Custom Adapter Example
+
+Full example showing all optional methods working together:
 
 ```python
 from a2a_adapter import BaseA2AAdapter, AdapterMetadata, serve_agent
@@ -236,27 +278,34 @@ class MyAdapter(BaseA2AAdapter):
 serve_agent(MyAdapter(), port=9000)
 ```
 
-**Key rules:**
-- `invoke()` is the ONLY required method. Signature: `(str, str|None, **kwargs) -> str | list[Part]`
-- `stream()` is auto-detected. If overridden, `supports_streaming()` returns True
-- Exceptions in `invoke()`/`stream()` are caught and converted to failed tasks
-- `context_id` enables multi-turn conversations (same ID = same conversation)
-- Adapter supports `async with` for resource management (`close()` called on exit)
-
-### Accessing the Full RequestContext
-
-The bridge layer passes `context=RequestContext` via `**kwargs`. Use it when you need more than just the text input:
+## AdapterMetadata
 
 ```python
-async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
-    context = kwargs.get('context')  # A2A SDK RequestContext
-    if context:
-        # Access full message parts (text, files, data, etc.)
-        for part in context.message.parts:
-            ...
-        # Access task ID
-        task_id = context.task_id
-    return "response"
+AdapterMetadata(
+    name="",                          # Agent name (defaults to class name in card)
+    description="",                   # What the agent does
+    version="1.0.0",                  # Semantic version
+    skills=[],                        # List of skill dicts (see below)
+    input_modes=["text"],             # Supported input MIME types
+    output_modes=["text"],            # Supported output MIME types
+    streaming=False,                  # Whether adapter supports streaming
+    provider=None,                    # Dict with "organization" and "url" keys
+    documentation_url=None,           # URL to agent documentation
+    icon_url=None,                    # URL to agent icon
+)
+```
+
+**Skill dict format:**
+```python
+{
+    "id": "skill-0",            # Unique skill ID
+    "name": "Main Skill",       # Human-readable name
+    "description": "...",       # What this skill does
+    "tags": ["tag1", "tag2"],   # Optional tags
+    "examples": ["..."],        # Optional example queries
+    "input_modes": ["text"],    # Optional per-skill input modes
+    "output_modes": ["text"],   # Optional per-skill output modes
+}
 ```
 
 ## Multimodal Responses
@@ -292,51 +341,6 @@ class MultimodalAdapter(BaseA2AAdapter):
 - `invoke()` -> `str` (text only) or `list[Part]` (multimodal)
 - `stream()` yields `str` (text chunks) or `Part` (multimodal chunks)
 
-## Server Functions
-
-### `serve_agent()` — development server
-
-```python
-serve_agent(
-    adapter: BaseA2AAdapter,
-    agent_card: AgentCard | None = None,   # Override auto-generated card
-    host: str = "0.0.0.0",
-    port: int = 9000,
-    log_level: str = "info",
-    **kwargs,                              # Passed to uvicorn.run()
-)
-```
-
-### `to_a2a()` — production ASGI app
-
-```python
-app = to_a2a(
-    adapter: BaseA2AAdapter,
-    agent_card: AgentCard | None = None,
-    task_store: TaskStore | None = None,   # Default: InMemoryTaskStore
-    **card_overrides,                      # name=, description=, url=, version=, streaming=,
-                                           # provider=, documentation_url=, icon_url=
-)
-# Deploy with any ASGI server:
-# gunicorn app:app -k uvicorn.workers.UvicornWorker
-# hypercorn app:app
-# daphne app:app
-```
-
-Auto-enabled capabilities on the generated AgentCard: `streaming` (auto-detected), `push_notifications=True`, `state_transition_history=True`.
-
-### `build_agent_card()` — generate AgentCard
-
-```python
-card = build_agent_card(
-    adapter: BaseA2AAdapter,
-    **overrides,     # name=, description=, url=, version=, streaming=,
-                     # provider=, documentation_url=, icon_url=
-)
-```
-
-Default url is `http://localhost:9000`. Override with `url="http://prod:8080"`.
-
 ## Config-Driven Loading
 
 ```python
@@ -368,104 +372,31 @@ adapter = load_adapter({"adapter": "my_framework"})
 
 Registered adapters take priority over built-ins with the same name.
 
-## Input Handling (all built-in adapters)
+## Input Handling Pipeline
 
-All adapters use a 3-priority input pipeline:
-1. **`input_mapper`** (highest priority): `Callable[[str, str|None], dict]`
+All built-in adapters use a 3-priority input pipeline:
+
+1. **`input_mapper`** (highest priority): `Callable[[str, str|None], dict]` -- custom function to transform raw input
 2. **JSON parse**: auto-parse if input looks like JSON
 3. **`input_key`** (fallback): wraps text as `{input_key: text}`
 
-## Architecture (for understanding, not for user code)
+## Accessing RequestContext
 
-```
-Client -> A2AStarletteApplication -> DefaultRequestHandler -> AdapterAgentExecutor -> YourAdapter.invoke()
-```
-
-The `AdapterAgentExecutor` bridge handles:
-- Extracting user text from `RequestContext` via `context.get_user_input()`
-- Routing to `invoke()` or `stream()` based on `adapter.supports_streaming()`
-- Converting text/multimodal responses to A2A events via `TaskUpdater`
-- Error handling (exception -> Task with state=failed, error message preserved)
-- Cancellation (`adapter.cancel()` -> Task with state=canceled)
-
-Users never interact with the bridge layer directly.
-
-### Request Flow
-
-**Non-streaming** (`message/send`):
-```
-HTTP POST / (JSON-RPC) -> DefaultRequestHandler.on_message_send()
-  -> asyncio.create_task(executor.execute(ctx, queue))
-    -> TaskUpdater.start_work()
-    -> adapter.invoke(user_input, context_id, context=ctx)
-    -> TaskUpdater.add_artifact(result)
-    -> TaskUpdater.complete()
-  -> ResultAggregator collects events -> returns Task
-```
-
-**Streaming** (`message/stream`):
-```
-HTTP POST / (JSON-RPC) -> DefaultRequestHandler.on_message_send_stream()
-  -> adapter.stream(user_input, context_id, context=ctx)
-    -> each chunk -> TaskUpdater.add_artifact(chunk, append=True)
-  -> events SSE-streamed to client
-  -> TaskUpdater.complete()
-```
-
-**Cancellation** (`tasks/cancel`):
-```
-HTTP POST / (JSON-RPC) -> DefaultRequestHandler.on_cancel_task()
-  -> cancels asyncio.Task
-    -> adapter.cancel(context=ctx)
-    -> TaskUpdater.cancel()
-```
-
-## API Quick Reference
-
-### BaseA2AAdapter
-
-| Method | Required | Signature | Description |
-|---|---|---|---|
-| `invoke` | **Yes** | `async (str, str\|None, **kwargs) -> str \| list[Part]` | Execute agent, return text or multimodal |
-| `stream` | No | `async (str, str\|None, **kwargs) -> AsyncIterator[str \| Part]` | Yield text/multimodal chunks |
-| `cancel` | No | `async (str\|None, **kwargs) -> None` | Cancel current execution |
-| `close` | No | `async () -> None` | Release resources |
-| `get_metadata` | No | `() -> AdapterMetadata` | Metadata for AgentCard |
-| `supports_streaming` | No | `() -> bool` | Auto-detects from stream() override |
-
-All methods receiving `**kwargs` get `context=RequestContext` from the bridge layer.
-
-### AdapterMetadata
+The bridge layer passes `context=RequestContext` via `**kwargs`. Use it when you need more than just the text input:
 
 ```python
-AdapterMetadata(
-    name="",                          # Agent name (defaults to class name in card)
-    description="",                   # What the agent does
-    version="1.0.0",                  # Semantic version
-    skills=[],                        # List of skill dicts (see below)
-    input_modes=["text"],             # Supported input MIME types
-    output_modes=["text"],            # Supported output MIME types
-    streaming=False,                  # Whether adapter supports streaming
-    provider=None,                    # Dict with "organization" and "url" keys
-    documentation_url=None,           # URL to agent documentation
-    icon_url=None,                    # URL to agent icon
-)
+async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
+    context = kwargs.get('context')  # A2A SDK RequestContext
+    if context:
+        # Access full message parts (text, files, data, etc.)
+        for part in context.message.parts:
+            ...
+        # Access task ID
+        task_id = context.task_id
+    return "response"
 ```
 
-**Skill dict format:**
-```python
-{
-    "id": "skill-0",            # Unique skill ID
-    "name": "Main Skill",       # Human-readable name
-    "description": "...",       # What this skill does
-    "tags": ["tag1", "tag2"],   # Optional tags
-    "examples": ["..."],        # Optional example queries
-    "input_modes": ["text"],    # Optional per-skill input modes
-    "output_modes": ["text"],   # Optional per-skill output modes
-}
-```
-
-### Resource Management
+## Resource Management
 
 Adapters support `async with` for automatic cleanup:
 
@@ -486,6 +417,52 @@ async with MyAdapter() as adapter:
 | `OpenClawAdapter` | No | Yes (kill) | No | None |
 | `OllamaAdapter` | Always | No | No | None |
 | `CallableAdapter` | Optional | No | No | None |
+
+## Architecture (Request Flow)
+
+```
+Client -> A2AStarletteApplication -> DefaultRequestHandler -> AdapterAgentExecutor -> YourAdapter.invoke()
+```
+
+The `AdapterAgentExecutor` bridge handles:
+- Extracting user text from `RequestContext` via `context.get_user_input()`
+- Routing to `invoke()` or `stream()` based on `adapter.supports_streaming()`
+- Converting text/multimodal responses to A2A events via `TaskUpdater`
+- Error handling (exception -> Task with state=failed, error message preserved)
+- Cancellation (`adapter.cancel()` -> Task with state=canceled)
+
+Users never interact with the bridge layer directly.
+
+### Non-streaming (`message/send`)
+
+```
+HTTP POST / (JSON-RPC) -> DefaultRequestHandler.on_message_send()
+  -> asyncio.create_task(executor.execute(ctx, queue))
+    -> TaskUpdater.start_work()
+    -> adapter.invoke(user_input, context_id, context=ctx)
+    -> TaskUpdater.add_artifact(result)
+    -> TaskUpdater.complete()
+  -> ResultAggregator collects events -> returns Task
+```
+
+### Streaming (`message/stream`)
+
+```
+HTTP POST / (JSON-RPC) -> DefaultRequestHandler.on_message_send_stream()
+  -> adapter.stream(user_input, context_id, context=ctx)
+    -> each chunk -> TaskUpdater.add_artifact(chunk, append=True)
+  -> events SSE-streamed to client
+  -> TaskUpdater.complete()
+```
+
+### Cancellation (`tasks/cancel`)
+
+```
+HTTP POST / (JSON-RPC) -> DefaultRequestHandler.on_cancel_task()
+  -> cancels asyncio.Task
+    -> adapter.cancel(context=ctx)
+    -> TaskUpdater.cancel()
+```
 
 ## Decision Guide
 
