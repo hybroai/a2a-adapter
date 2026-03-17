@@ -244,6 +244,7 @@ class OpenClawAdapter(BaseA2AAdapter):
         if proc and proc.returncode is None:
             logger.debug("Killing OpenClaw subprocess")
             proc.kill()
+            await proc.wait()
 
     async def close(self) -> None:
         """Ensure subprocess is cleaned up."""
@@ -1232,7 +1233,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
 
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client for push notifications."""
-        if self._http_client is None:
+        if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(timeout=30.0)
         return self._http_client
 
@@ -1460,6 +1461,10 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
         if proc and proc.returncode is None:
             logger.debug("Killing subprocess for task %s", task_id)
             proc.kill()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
 
         # Cancel the background task if still running and wait for it
         bg_task = self._background_tasks.get(task_id)
@@ -1521,6 +1526,10 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             if proc.returncode is None:
                 logger.debug("Killing subprocess %s during close", task_id)
                 proc.kill()
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
 
         # Cancel all pending background tasks
         tasks_to_cancel = []

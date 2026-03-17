@@ -360,7 +360,7 @@ class N8nAdapter(BaseA2AAdapter):
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client (lazy init)."""
-        if self._client is None:
+        if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(timeout=self.timeout)
         return self._client
 
@@ -632,7 +632,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client."""
-        if self._client is None:
+        if self._client is None or self._client.is_closed:
             # Use async_timeout for async mode since workflows may take longer
             timeout = self.async_timeout if self.async_mode else self.timeout
             self._client = httpx.AsyncClient(timeout=timeout)

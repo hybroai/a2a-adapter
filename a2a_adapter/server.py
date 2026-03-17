@@ -15,6 +15,7 @@ Replaces: client.py (deprecated in v0.2, removed in v0.3)
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -138,8 +139,9 @@ def to_a2a(
 
     task_store = task_store or InMemoryTaskStore()
     push_config_store = InMemoryPushNotificationConfigStore()
+    push_httpx_client = httpx.AsyncClient()
     push_sender = BasePushNotificationSender(
-        httpx_client=httpx.AsyncClient(),
+        httpx_client=push_httpx_client,
         config_store=push_config_store,
     )
 
@@ -151,11 +153,20 @@ def to_a2a(
         push_sender=push_sender,
     )
 
+    @asynccontextmanager
+    async def _lifespan(app):
+        yield
+        logger.info("Shutting down: closing adapter and HTTP clients")
+        try:
+            await adapter.close()
+        finally:
+            await push_httpx_client.aclose()
+
     app_builder = A2AStarletteApplication(
         agent_card=agent_card,
         http_handler=handler,
     )
-    return app_builder.build()
+    return app_builder.build(lifespan=_lifespan)
 
 
 def serve_agent(
