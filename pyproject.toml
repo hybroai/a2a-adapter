@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "a2a-adapter"
-version = "0.2.4"
+version = "0.2.5"
 description = "Convert any AI agent into an A2A Protocol server in 3 lines"
 readme = "README.md"
 license = "Apache-2.0"
@@ -22,7 +22,6 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "a2a>=0.44.0",
     "a2a-sdk[http-server]>=0.3.25",
     "uvicorn>=0.27.0",
     "httpx>=0.26.0",
