@@ -189,7 +189,7 @@ class OpenClawAdapter(BaseA2AAdapter):
 
         session_id = self._context_id_to_session_id(context_id)
         cmd = self._build_command(user_input, session_id)
-        logger.debug("Executing OpenClaw command: %s", " ".join(cmd))
+        logger.info("Executing OpenClaw command: %s", " ".join(cmd))
 
         env = os.environ.copy()
         env.update(self.env_vars)
@@ -231,10 +231,18 @@ class OpenClawAdapter(BaseA2AAdapter):
             )
 
         stdout_text = stdout.decode("utf-8", errors="replace").strip()
-        if not stdout_text:
-            raise RuntimeError("OpenClaw command returned empty output")
+        stderr_text = stderr.decode("utf-8", errors="replace").strip()
+        
+        # OpenClaw may output JSON to stderr instead of stdout in some configurations
+        # Try stderr if stdout is empty
+        output_text = stdout_text or stderr_text
+        
+        if not output_text:
+            raise RuntimeError(
+                "OpenClaw command returned empty output (both stdout and stderr empty)"
+            )
 
-        parsed = _extract_json_from_output(stdout_text)
+        parsed = _extract_json_from_output(output_text)
 
         return self._extract_response_text(parsed)
 

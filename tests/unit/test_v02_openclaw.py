@@ -239,18 +239,40 @@ async def test_invoke_nonzero_exit():
 
 @pytest.mark.asyncio
 async def test_invoke_empty_output():
-    """Test invoke raises on empty stdout."""
+    """Test invoke raises on empty stdout and stderr."""
     adapter = OpenClawAdapter(session_id="test")
 
     mock_proc = AsyncMock()
     mock_proc.communicate = AsyncMock(
-        return_value=(b"", b"")
+        return_value=(b"", b"")  # Both stdout and stderr empty
     )
     mock_proc.returncode = 0
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(RuntimeError, match="empty output"):
             await adapter.invoke("test")
+
+
+@pytest.mark.asyncio
+async def test_invoke_uses_stderr_when_stdout_empty():
+    """Test invoke uses stderr when stdout is empty (OpenClaw stderr output bug)."""
+    adapter = OpenClawAdapter(session_id="test")
+
+    mock_output = json.dumps({
+        "payloads": [{"text": "response from stderr"}],
+        "meta": {},
+    })
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(
+        return_value=(b"", mock_output.encode())  # stdout empty, stderr has JSON
+    )
+    mock_proc.returncode = 0
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        result = await adapter.invoke("test message")
+
+    assert result == "response from stderr"
 
 
 @pytest.mark.asyncio
@@ -293,10 +315,12 @@ async def test_cancel_kills_process():
     mock_proc = MagicMock()
     mock_proc.returncode = None  # Still running
     mock_proc.kill = MagicMock()
+    mock_proc.wait = AsyncMock()
 
     adapter._current_process = mock_proc
     await adapter.cancel()
     mock_proc.kill.assert_called_once()
+    mock_proc.wait.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -329,9 +353,11 @@ async def test_close_kills_process():
     mock_proc = MagicMock()
     mock_proc.returncode = None
     mock_proc.kill = MagicMock()
+    mock_proc.wait = AsyncMock()
     adapter._current_process = mock_proc
     await adapter.close()
     mock_proc.kill.assert_called_once()
+    mock_proc.wait.assert_called_once()
 
 
 # ──── Test: Streaming NOT supported ────
