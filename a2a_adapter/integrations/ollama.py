@@ -141,7 +141,9 @@ class OllamaClient:
             self._client = None
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
+        if self._client is None or (
+            isinstance(self._client, httpx.AsyncClient) and self._client.is_closed
+        ):
             self._client = httpx.AsyncClient(timeout=self.timeout)
         return self._client
 

@@ -189,7 +189,7 @@ class OpenClawAdapter(BaseA2AAdapter):
 
         session_id = self._context_id_to_session_id(context_id)
         cmd = self._build_command(user_input, session_id)
-        logger.info("Executing OpenClaw command: %s", " ".join(cmd))
+        logger.debug("Executing OpenClaw command: %s", " ".join(cmd))
 
         env = os.environ.copy()
         env.update(self.env_vars)
