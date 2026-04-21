@@ -138,13 +138,20 @@ class TestBuildCommand:
 
 class TestParseResult:
     def test_thread_started_extracts_thread_id(self, adapter):
-        stdout = json.dumps(_thread_started_event("thread-123"))
+        stdout = "\n".join([
+            json.dumps(_thread_started_event("thread-123")),
+            json.dumps(_item_completed_event("some output")),
+        ])
         result = adapter._parse_invoke_output(stdout, "ctx-1")
         assert isinstance(result, ParseResult)
         assert result.session_id == "thread-123"
+        assert result.text == "some output"
 
     def test_thread_started_nested_id(self, adapter):
-        stdout = json.dumps(_thread_started_nested_event("thread-nested-1"))
+        stdout = "\n".join([
+            json.dumps(_thread_started_nested_event("thread-nested-1")),
+            json.dumps(_item_completed_event("some output")),
+        ])
         result = adapter._parse_invoke_output(stdout, "ctx-1")
         assert result.session_id == "thread-nested-1"
 
@@ -181,15 +188,14 @@ class TestParseResult:
         assert result.session_id == "thread-mix"
         assert result.text == "Response text"
 
-    def test_no_text_returns_empty(self, adapter):
-        """No agent_message items -> returns empty string (not raise)."""
+    def test_no_text_raises_error(self, adapter):
+        """No agent_message items -> raises RuntimeError."""
         stdout = json.dumps(_thread_started_event("thread-only"))
-        result = adapter._parse_invoke_output(stdout, "ctx-1")
-        assert result.session_id == "thread-only"
-        assert result.text == ""
+        with pytest.raises(RuntimeError, match="no visible output"):
+            adapter._parse_invoke_output(stdout, "ctx-1")
 
-    def test_non_agent_message_items_ignored(self, adapter):
-        """item.completed with non-agent_message type is ignored."""
+    def test_non_agent_message_items_raises_error(self, adapter):
+        """item.completed with non-agent_message type only -> raises RuntimeError."""
         event = {
             "type": "item.completed",
             "item": {
@@ -198,8 +204,8 @@ class TestParseResult:
             },
         }
         stdout = json.dumps(event)
-        result = adapter._parse_invoke_output(stdout, "ctx-1")
-        assert result.text == ""
+        with pytest.raises(RuntimeError, match="no visible output"):
+            adapter._parse_invoke_output(stdout, "ctx-1")
 
     def test_non_json_lines_skipped(self, adapter):
         stdout = "not json\n" + json.dumps(_item_completed_event("real text")) + "\n"

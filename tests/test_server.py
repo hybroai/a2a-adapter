@@ -1,5 +1,6 @@
 """Tests for server.py — build_agent_card() and to_a2a()."""
 
+import httpx
 import pytest
 from a2a.types import AgentCard
 
@@ -18,7 +19,8 @@ class TestBuildAgentCard:
         card = build_agent_card(adapter)
         assert isinstance(card, AgentCard)
         assert card.name == "StubAdapter"
-        assert card.url == "http://localhost:9000"
+        assert len(card.supported_interfaces) == 1
+        assert card.supported_interfaces[0].url == "http://localhost:9000/"
         assert card.capabilities.streaming is False
 
     def test_streaming_auto_detected(self):
@@ -37,7 +39,8 @@ class TestBuildAgentCard:
         )
         assert card.name == "Custom"
         assert card.description == "desc"
-        assert card.url == "http://myhost:8080"
+        assert len(card.supported_interfaces) == 1
+        assert card.supported_interfaces[0].url == "http://myhost:8080"
         assert card.version == "2.0.0"
 
     def test_metadata_skills(self):
@@ -106,3 +109,19 @@ class TestToA2a:
         adapter = StubAdapter()
         app = to_a2a(adapter, name="Override")
         assert callable(app)
+
+    @pytest.mark.asyncio
+    async def test_legacy_agent_card_includes_empty_skills(self):
+        adapter = StubAdapter()
+        app = to_a2a(adapter)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            resp = await client.get("/.well-known/agent-card.json")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["skills"] == []
+        assert data["url"] == data["supportedInterfaces"][0]["url"]

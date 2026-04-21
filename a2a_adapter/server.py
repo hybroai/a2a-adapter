@@ -6,9 +6,8 @@ BaseA2AAdapter into a fully compliant A2A Protocol server.
 
 Design rationale:
     This layer wires together the adapter, bridge (AdapterAgentExecutor),
-    SDK handler (DefaultRequestHandler), and ASGI app (A2AStarletteApplication).
-    The old AdapterRequestHandler in client.py is completely replaced by
-    DefaultRequestHandler, which handles all A2A protocol details.
+    the SDK request handler, and a Starlette ASGI app built from the
+    a2a-sdk 1.x route helpers.
 
 Replaces: client.py (deprecated in v0.2, removed in v0.3)
 """
@@ -19,8 +18,10 @@ from typing import Any
 
 import httpx
 import uvicorn
-from a2a.server.apps import A2AStarletteApplication
+from a2a.server.context import ServerCallContext
 from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes, create_rest_routes
+from a2a.server.request_handlers.response_helpers import agent_card_to_dict
 from a2a.server.tasks import (
     BasePushNotificationSender,
     InMemoryPushNotificationConfigStore,
@@ -30,14 +31,60 @@ from a2a.server.tasks.task_store import TaskStore
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
+    AgentInterface,
     AgentProvider,
     AgentSkill,
 )
+from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH, PROTOCOL_VERSION_CURRENT, TransportProtocol
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from .base_adapter import BaseA2AAdapter
 from .executor import AdapterAgentExecutor
 
 logger = logging.getLogger(__name__)
+LEGACY_AGENT_CARD_PATH = "/.well-known/agent.json"
+
+
+class _SafeInMemoryPushNotificationConfigStore(InMemoryPushNotificationConfigStore):
+    """Ignore malformed empty-URL configs emitted by v0.3 compatibility clients."""
+
+    async def set_info(self, task_id, notification_config, context) -> None:
+        if not getattr(notification_config, "url", ""):
+            return
+        await super().set_info(task_id, notification_config, context)
+
+
+def _legacy_card_url(agent_card: AgentCard) -> str | None:
+    if agent_card.supported_interfaces:
+        primary = agent_card.supported_interfaces[0]
+        return primary.url or None
+    return None
+
+
+def _agent_card_json(agent_card: AgentCard) -> dict[str, Any]:
+    """Return a superset JSON card: A2A 1.0 + legacy top-level url."""
+    data = agent_card_to_dict(agent_card)
+    # Legacy consumers in Hybro backend still require `skills` to exist even
+    # when the A2A 1.0 proto omits empty repeated fields from JSON output.
+    data.setdefault("skills", [])
+    legacy_url = _legacy_card_url(agent_card)
+    if legacy_url:
+        data.setdefault("url", legacy_url)
+        data.setdefault("preferredTransport", TransportProtocol.JSONRPC)
+        data.setdefault("protocolVersion", PROTOCOL_VERSION_CURRENT)
+    return data
+
+
+def _create_compat_agent_card_routes(agent_card: AgentCard) -> list[Route]:
+    async def _get_agent_card(_request) -> JSONResponse:
+        return JSONResponse(_agent_card_json(agent_card))
+
+    paths = [AGENT_CARD_WELL_KNOWN_PATH]
+    if LEGACY_AGENT_CARD_PATH != AGENT_CARD_WELL_KNOWN_PATH:
+        paths.append(LEGACY_AGENT_CARD_PATH)
+    return [Route(path=path, endpoint=_get_agent_card, methods=["GET"]) for path in paths]
 
 
 def to_a2a(
@@ -75,17 +122,19 @@ def to_a2a(
         agent_card = build_agent_card(adapter, **card_overrides)
 
     task_store = task_store or InMemoryTaskStore()
-    push_config_store = InMemoryPushNotificationConfigStore()
+    push_config_store = _SafeInMemoryPushNotificationConfigStore()
     push_httpx_client = httpx.AsyncClient()
     push_sender = BasePushNotificationSender(
         httpx_client=push_httpx_client,
         config_store=push_config_store,
+        context=ServerCallContext(),
     )
 
     executor = AdapterAgentExecutor(adapter)
     handler = DefaultRequestHandler(
         agent_executor=executor,
         task_store=task_store,
+        agent_card=agent_card,
         push_config_store=push_config_store,
         push_sender=push_sender,
     )
@@ -99,11 +148,14 @@ def to_a2a(
         finally:
             await push_httpx_client.aclose()
 
-    app_builder = A2AStarletteApplication(
-        agent_card=agent_card,
-        http_handler=handler,
+    routes = []
+    routes.extend(_create_compat_agent_card_routes(agent_card))
+    routes.extend(
+        create_jsonrpc_routes(handler, rpc_url="/", enable_v0_3_compat=True)
     )
-    return app_builder.build(lifespan=_lifespan)
+    routes.extend(create_rest_routes(handler, enable_v0_3_compat=True))
+
+    return Starlette(routes=routes, lifespan=_lifespan)
 
 
 def serve_agent(
@@ -136,7 +188,10 @@ def serve_agent(
     """
     if agent_card is None:
         display_host = "localhost" if host in ("0.0.0.0", "::") else host
-        agent_card = build_agent_card(adapter, url=f"http://{display_host}:{port}")
+        agent_card = build_agent_card(
+            adapter,
+            url=f"http://{display_host}:{port}/",
+        )
 
     app = to_a2a(adapter, agent_card)
     uvicorn.run(app, host=host, port=port, log_level=log_level, **kwargs)
@@ -152,13 +207,13 @@ def build_agent_card(
     with 10+ fields. This function reads the adapter's get_metadata()
     and produces a reasonable default card.
 
-    The generated card is served at ``/.well-known/agent.json`` by the
-    A2A Starlette application.
+    The generated card is served at both the SDK 1.x well-known path and
+    the legacy ``/.well-known/agent.json`` alias for compatibility.
 
     Args:
         adapter: The adapter to generate a card for.
         **overrides: Override any auto-generated field.
-            Supported keys: name, description, url, version, streaming,
+            Supported keys: name, description, version, streaming, url,
             provider, documentation_url, icon_url.
 
     Returns:
@@ -188,13 +243,18 @@ def build_agent_card(
     return AgentCard(
         name=overrides.get("name", meta.name or type(adapter).__name__),
         description=overrides.get("description", meta.description or ""),
-        url=overrides.get("url", "http://localhost:9000"),
         version=overrides.get("version", meta.version),
         capabilities=AgentCapabilities(
             streaming=streaming,
             push_notifications=True,
-            state_transition_history=True,
         ),
+        supported_interfaces=[
+            AgentInterface(
+                url=overrides.get("url", "http://localhost:9000/"),
+                protocol_binding=TransportProtocol.JSONRPC,
+                protocol_version=PROTOCOL_VERSION_CURRENT,
+            )
+        ],
         skills=[
             AgentSkill(
                 id=s.get("id", f"skill-{i}"),

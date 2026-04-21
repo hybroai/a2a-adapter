@@ -23,9 +23,7 @@ from .server import build_agent_card, serve_agent, to_a2a
 from .loader import load_adapter, register_adapter
 
 # ──── v0.1 Backwards Compatibility (deprecated) ────
-from .adapter import BaseAgentAdapter  # deprecated: use BaseA2AAdapter
 from .loader import load_a2a_agent  # deprecated: use load_adapter
-from .client import build_agent_app  # deprecated: use to_a2a
 
 # Note: v0.1 serve_agent(card, adapter) is replaced by v0.2
 # serve_agent(adapter). The v0.2 version is imported above from .server.
@@ -56,6 +54,16 @@ def __getattr__(name: str):
     langchain, langgraph, etc.) until the user actually requests a
     specific adapter class.
     """
+    if name == "build_agent_app":
+        from .client import build_agent_app
+
+        globals()[name] = build_agent_app
+        return build_agent_app
+    if name == "BaseAgentAdapter":
+        from .adapter import BaseAgentAdapter
+
+        globals()[name] = BaseAgentAdapter
+        return BaseAgentAdapter
     if name in _ADAPTER_LAZY_MAP:
         import importlib
 

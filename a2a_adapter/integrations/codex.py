@@ -136,6 +136,9 @@ class CodexAdapter(BaseA2AAdapter):
                 )
                 raise RuntimeError(f"Codex turn failed: {error_msg}")
 
+        if not text_parts:
+            raise RuntimeError("Codex returned no visible output")
+
         response_text = "\n\n".join(text_parts)
         return ParseResult(text=response_text, session_id=thread_id)
 

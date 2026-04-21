@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
-from a2a.types import Part, TextPart
+from a2a.types import Part
 
 from a2a_adapter.base_adapter import AdapterMetadata, BaseA2AAdapter
 
