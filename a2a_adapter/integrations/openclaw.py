@@ -9,6 +9,8 @@ Contains:
     - OpenClawAgentAdapter (v0.1): Legacy interface, deprecated
 """
 
+from __future__ import annotations
+
 import asyncio
 from asyncio.subprocess import PIPE, Process as AsyncProcess
 import json
@@ -23,18 +25,37 @@ import httpx
 
 from a2a.types import (
     Artifact,
-    FilePart,
-    FileWithUri,
     Message,
-    MessageSendParams,
     Part,
-    PushNotificationConfig,
     Role,
     Task,
     TaskState,
     TaskStatus,
-    TextPart,
 )
+
+try:
+    from a2a.types import TextPart
+except ImportError:
+    TextPart = None  # type: ignore
+
+try:
+    from a2a.types import FilePart, FileWithUri
+except ImportError:
+    FilePart = None  # type: ignore
+    FileWithUri = None  # type: ignore
+
+try:
+    from a2a.types import TaskPushNotificationConfig as PushNotificationConfig
+except ImportError:
+    try:
+        from a2a.types import PushNotificationConfig
+    except ImportError:
+        PushNotificationConfig = None  # type: ignore
+
+try:
+    from a2a.types import SendMessageRequest as MessageSendParams
+except ImportError:
+    MessageSendParams = None  # type: ignore
 
 from ..adapter import BaseAgentAdapter
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter
@@ -500,10 +521,10 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
                 return result.status.message
             # Fallback: create a message from task
             return Message(
-                role=Role.agent,
+                role=Role.ROLE_AGENT,
                 message_id=str(uuid.uuid4()),
                 context_id=result.context_id,
-                parts=[Part(root=TextPart(text="Task completed"))],
+                parts=[Part(text="Task completed")],
             )
         return result
 
@@ -543,7 +564,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             id=task_id,
             context_id=context_id,
             status=TaskStatus(
-                state=TaskState.working,
+                state=TaskState.TASK_STATE_WORKING,
                 timestamp=now,
             ),
             history=[initial_message] if initial_message else None,
@@ -685,14 +706,12 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             logger.error("Task %s timed out after %s seconds", task_id, self.timeout)
             now = datetime.now(timezone.utc).isoformat()
             error_message = Message(
-                role=Role.agent,
+                role=Role.ROLE_AGENT,
                 message_id=str(uuid.uuid4()),
                 context_id=context_id,
                 parts=[
                     Part(
-                        root=TextPart(
-                            text=f"OpenClaw command timed out after {self.timeout} seconds"
-                        )
+                        text=f"OpenClaw command timed out after {self.timeout} seconds"
                     )
                 ],
             )
@@ -701,7 +720,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
                 id=task_id,
                 context_id=context_id,
                 status=TaskStatus(
-                    state=TaskState.failed,
+                    state=TaskState.TASK_STATE_FAILED,
                     message=error_message,
                     timestamp=now,
                 ),
@@ -760,7 +779,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
                 id=task_id,
                 context_id=context_id,
                 status=TaskStatus(
-                    state=TaskState.completed,
+                    state=TaskState.TASK_STATE_COMPLETED,
                     timestamp=now,
                 ),
                 artifacts=[response_artifact],  # A2A-compliant: outputs in artifacts
@@ -791,17 +810,17 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             logger.error("Task %s failed: %s", task_id, e)
             now = datetime.now(timezone.utc).isoformat()
             error_message = Message(
-                role=Role.agent,
+                role=Role.ROLE_AGENT,
                 message_id=str(uuid.uuid4()),
                 context_id=context_id,
-                parts=[Part(root=TextPart(text=f"OpenClaw command failed: {str(e)}"))],
+                parts=[Part(text=f"OpenClaw command failed: {str(e)}")],
             )
 
             failed_task = Task(
                 id=task_id,
                 context_id=context_id,
                 status=TaskStatus(
-                    state=TaskState.failed,
+                    state=TaskState.TASK_STATE_FAILED,
                     message=error_message,
                     timestamp=now,
                 ),
@@ -941,12 +960,9 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             if hasattr(msg, "parts") and msg.parts:
                 text_parts = []
                 for part in msg.parts:
-                    # Handle Part(root=TextPart(...)) structure
-                    if hasattr(part, "root") and hasattr(part.root, "text"):
-                        text_parts.append(part.root.text)
-                    # Handle direct TextPart
-                    elif hasattr(part, "text"):
-                        text_parts.append(part.text)
+                    text_value = getattr(part, "text", None)
+                    if text_value is not None:
+                        text_parts.append(text_value)
                 user_message = self._join_text_parts(text_parts)
 
         # Legacy support for messages array (deprecated)
@@ -1128,7 +1144,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             text = payload.get("text", "")
             logger.debug("Payload[%d] text length: %d, preview: %s", i, len(text) if text else 0, (text or "")[:100])
             if text:
-                parts.append(Part(root=TextPart(text=text)))
+                parts.append(Part(text=text))
 
             # Extract media URLs
             media_urls = payload.get("mediaUrls") or []
@@ -1140,24 +1156,24 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
                 mime_type = self._detect_mime_type(url)
                 parts.append(
                     Part(
-                        root=FilePart(
-                            file=FileWithUri(uri=url, mimeType=mime_type),
-                        )
+                        url=url,
+                        media_type=mime_type,
                     )
                 )
 
         # Fallback if no parts extracted
         if not parts:
             logger.warning("No parts extracted from OpenClaw output, using empty fallback")
-            parts.append(Part(root=TextPart(text="")))
+            parts.append(Part(text=""))
 
         logger.debug("Created Message with %d parts", len(parts))
         for i, part in enumerate(parts):
-            if hasattr(part, 'root') and hasattr(part.root, 'text'):
-                logger.debug("Part[%d] text length: %d", i, len(part.root.text) if part.root.text else 0)
+            text_value = getattr(part, 'text', None)
+            if text_value is not None:
+                logger.debug("Part[%d] text length: %d", i, len(text_value) if text_value else 0)
 
         return Message(
-            role=Role.agent,
+            role=Role.ROLE_AGENT,
             message_id=str(uuid.uuid4()),
             context_id=context_id,
             parts=parts,
@@ -1178,7 +1194,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             # Extract text
             text = payload.get("text", "")
             if text:
-                parts.append(Part(root=TextPart(text=text)))
+                parts.append(Part(text=text))
 
             # Extract media URLs
             media_urls = payload.get("mediaUrls") or []
@@ -1189,15 +1205,14 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
                 mime_type = self._detect_mime_type(url)
                 parts.append(
                     Part(
-                        root=FilePart(
-                            file=FileWithUri(uri=url, mimeType=mime_type),
-                        )
+                        url=url,
+                        media_type=mime_type,
                     )
                 )
 
         # Fallback if no parts extracted
         if not parts:
-            parts.append(Part(root=TextPart(text="")))
+            parts.append(Part(text=""))
 
         return Artifact(
             artifact_id=str(uuid.uuid4()),
@@ -1431,11 +1446,11 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             return False
 
         # Only allow deletion of tasks in terminal states
-        terminal_states = {TaskState.completed, TaskState.failed, TaskState.canceled}
+        terminal_states = {TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_CANCELED}
         if task.status.state not in terminal_states:
             raise ValueError(
                 f"Cannot delete task {task_id} with state={task.status.state}. "
-                f"Only tasks in terminal states ({', '.join(s.value for s in terminal_states)}) can be deleted."
+                f"Only tasks in terminal states can be deleted."
             )
 
         await self.task_store.delete(task_id)
@@ -1495,7 +1510,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
                 id=task_id,
                 context_id=task.context_id,
                 status=TaskStatus(
-                    state=TaskState.canceled,
+                    state=TaskState.TASK_STATE_CANCELED,
                     timestamp=now,
                 ),
                 history=task.history,
