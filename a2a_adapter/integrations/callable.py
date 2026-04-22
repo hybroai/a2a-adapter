@@ -9,6 +9,8 @@ Contains:
     - CallableAgentAdapter (v0.1): Legacy interface, deprecated
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import uuid
@@ -16,12 +18,21 @@ from typing import Any, AsyncIterator, Callable, Dict
 
 from a2a.types import (
     Message,
-    MessageSendParams,
-    Task,
-    TextPart,
-    Role,
     Part,
+    Role,
+    Task,
 )
+
+try:
+    from a2a.types import TextPart
+except ImportError:
+    TextPart = None  # type: ignore
+
+try:
+    from a2a.types import SendMessageRequest as MessageSendParams
+except ImportError:
+    MessageSendParams = None  # type: ignore
+
 from ..adapter import BaseAgentAdapter
 from ..base_adapter import BaseA2AAdapter, AdapterMetadata
 
@@ -214,12 +225,9 @@ class CallableAgentAdapter(BaseAgentAdapter):
             if hasattr(msg, "parts") and msg.parts:
                 text_parts = []
                 for part in msg.parts:
-                    # Handle Part(root=TextPart(...)) structure
-                    if hasattr(part, "root") and hasattr(part.root, "text"):
-                        text_parts.append(part.root.text)
-                    # Handle direct TextPart
-                    elif hasattr(part, "text"):
-                        text_parts.append(part.text)
+                    text_value = getattr(part, "text", None)
+                    if text_value is not None:
+                        text_parts.append(text_value)
                 user_message = self._join_text_parts(text_parts)
 
         # Legacy support for messages array (deprecated)
@@ -302,10 +310,10 @@ class CallableAgentAdapter(BaseAgentAdapter):
         context_id = self._extract_context_id(params)
 
         return Message(
-            role=Role.agent,
+            role=Role.ROLE_AGENT,
             message_id=str(uuid.uuid4()),
             context_id=context_id,
-            parts=[Part(root=TextPart(text=response_text))],
+            parts=[Part(text=response_text)],
         )
 
     def _extract_output_text(self, framework_output: Any) -> str:
@@ -381,10 +389,10 @@ class CallableAgentAdapter(BaseAgentAdapter):
 
         # Send final message with complete response
         final_message = Message(
-            role=Role.agent,
+            role=Role.ROLE_AGENT,
             message_id=message_id,
             context_id=context_id,
-            parts=[Part(root=TextPart(text=accumulated_text))],
+            parts=[Part(text=accumulated_text)],
         )
 
         # Send completion event
