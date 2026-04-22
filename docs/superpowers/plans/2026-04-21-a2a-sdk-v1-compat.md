@@ -113,9 +113,48 @@ from a2a.types import Message, Task
 from a2a.types import SendMessageRequest as MessageSendParams  # V1.0 alias; removed in 0.3.0
 ```
 
-- [ ] **Step 2: Fix adapter.py extract_raw_input — remove .root accessor**
+- [ ] **Step 2: Fix adapter.py extract_raw_input — docstring + code**
 
-In `a2a_adapter/adapter.py`, lines 89-108, the `extract_raw_input` method accesses `part.root.text`. Replace the part iteration block:
+**2a. Docstring cleanup** — In `a2a_adapter/adapter.py`, lines 66-81, the `extract_raw_input()` docstring references removed types. Replace:
+```python
+        """
+        Extract raw text content from A2A message parameters.
+        
+        This utility method handles:
+        - New format: message.parts with Part(root=TextPart(...)) structure
+        - Legacy format: messages array (deprecated)
+        - Edge case: part.root.text returning dict instead of str
+        
+        All adapters can use this method to extract user input consistently.
+        
+        Args:
+            params: A2A message parameters
+            
+        Returns:
+            Extracted text as string
+        """
+```
+with:
+```python
+        """
+        Extract raw text content from A2A message parameters.
+        
+        This utility method handles:
+        - New format: message.parts with Part(text=...) structure
+        - Legacy format: messages array (deprecated)
+        - Edge case: part.text returning dict instead of str
+        
+        All adapters can use this method to extract user input consistently.
+        
+        Args:
+            params: A2A message parameters
+            
+        Returns:
+            Extracted text as string
+        """
+```
+
+**2b. Code cleanup** — In the same method, lines 89-108, replace the part iteration block:
 
 ```python
                 for part in msg.parts:
@@ -1122,6 +1161,24 @@ Apply the same pattern as other adapters:
 - All `TaskState.canceled` → `TaskState.TASK_STATE_CANCELED`
 - `isinstance(result.parts[0].root, TextPart)` → check `result.parts[0].text is not None`
 - Any `.root.text` accessors → `.text`
+
+**Important: also fix `extract_raw_input()` (~line 943-950).** This block has both code and comments referencing removed types. Replace:
+```python
+                for part in msg.parts:
+                    # Handle Part(root=TextPart(...)) structure
+                    if hasattr(part, "root") and hasattr(part.root, "text"):
+                        text_parts.append(part.root.text)
+                    # Handle direct TextPart
+                    elif hasattr(part, "text"):
+                        text_parts.append(part.text)
+```
+with:
+```python
+                for part in msg.parts:
+                    text_value = getattr(part, "text", None)
+                    if text_value is not None:
+                        text_parts.append(text_value)
+```
 
 - [ ] **Step 3: Verify and commit**
 
