@@ -6,16 +6,16 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from a2a_adapter.integrations.langchain import LangChainAgentAdapter
-from a2a.types import Message, MessageSendParams, TextPart, Role, Part
+from a2a.types import Message, SendMessageRequest, Role, Part
 
 
-def make_message_send_params(text: str, context_id: str | None = None) -> MessageSendParams:
-    """Helper to create MessageSendParams with correct A2A types."""
-    return MessageSendParams(
+def make_message_send_params(text: str, context_id: str | None = None) -> SendMessageRequest:
+    """Helper to create SendMessageRequest with correct A2A types."""
+    return SendMessageRequest(
         message=Message(
             message_id="test-msg-id",
-            role=Role.user,
-            parts=[Part(root=TextPart(text=text))],
+            role=Role.ROLE_USER,
+            parts=[Part(text=text)],
             context_id=context_id,
         )
     )
@@ -54,13 +54,13 @@ class TestLangChainAdapterBasic:
         adapter = LangChainAgentAdapter(runnable=mock_runnable)
 
         # Create params with multiple text parts
-        params = MessageSendParams(
+        params = SendMessageRequest(
             message=Message(
                 message_id="test-msg-id",
-                role=Role.user,
+                role=Role.ROLE_USER,
                 parts=[
-                    Part(root=TextPart(text="part one")),
-                    Part(root=TextPart(text="part two")),
+                    Part(text="part one"),
+                    Part(text="part two"),
                 ],
                 context_id=None,
             )
@@ -87,7 +87,7 @@ class TestLangChainAdapterContextId:
 
         assert isinstance(result, Message)
         assert result.context_id == "ctx-123"
-        assert result.role == Role.agent
+        assert result.role == Role.ROLE_AGENT
 
     @pytest.mark.asyncio
     async def test_from_framework_handles_missing_context_id(self):
@@ -101,7 +101,8 @@ class TestLangChainAdapterContextId:
         result = await adapter.from_framework(framework_output, params)
 
         assert isinstance(result, Message)
-        assert result.context_id is None
+        # In V1.0, protobuf uses empty string for missing optional fields
+        assert result.context_id in (None, "")
 
 
 class TestLangChainAdapterOutputExtraction:
@@ -118,7 +119,7 @@ class TestLangChainAdapterOutputExtraction:
 
         result = await adapter.from_framework(framework_output, params)
 
-        assert result.parts[0].root.text == "simple string response"
+        assert result.parts[0].text == "simple string response"
 
     @pytest.mark.asyncio
     async def test_from_framework_extracts_ai_message_content(self):
@@ -133,7 +134,7 @@ class TestLangChainAdapterOutputExtraction:
         params = make_message_send_params("hello")
         result = await adapter.from_framework(mock_ai_message, params)
 
-        assert result.parts[0].root.text == "AI response content"
+        assert result.parts[0].text == "AI response content"
 
     @pytest.mark.asyncio
     async def test_from_framework_extracts_dict_with_output_key(self):
@@ -149,7 +150,7 @@ class TestLangChainAdapterOutputExtraction:
 
         result = await adapter.from_framework(framework_output, params)
 
-        assert result.parts[0].root.text == "extracted value"
+        assert result.parts[0].text == "extracted value"
 
     @pytest.mark.asyncio
     async def test_from_framework_extracts_dict_common_keys(self):
@@ -161,15 +162,15 @@ class TestLangChainAdapterOutputExtraction:
 
         # Test 'output' key
         result = await adapter.from_framework({"output": "from output"}, params)
-        assert result.parts[0].root.text == "from output"
+        assert result.parts[0].text == "from output"
 
         # Test 'result' key
         result = await adapter.from_framework({"result": "from result"}, params)
-        assert result.parts[0].root.text == "from result"
+        assert result.parts[0].text == "from result"
 
         # Test 'answer' key
         result = await adapter.from_framework({"answer": "from answer"}, params)
-        assert result.parts[0].root.text == "from answer"
+        assert result.parts[0].text == "from answer"
 
 
 class TestLangChainAdapterCallFramework:
@@ -206,9 +207,9 @@ class TestLangChainAdapterHandle:
         result = await adapter.handle(params)
 
         assert isinstance(result, Message)
-        assert result.role == Role.agent
+        assert result.role == Role.ROLE_AGENT
         assert result.context_id == "e2e-ctx"
-        assert result.parts[0].root.text == "processed response"
+        assert result.parts[0].text == "processed response"
 
         # Verify runnable was called with correct input
         call_args = mock_runnable.ainvoke.call_args
@@ -275,7 +276,7 @@ class TestLangChainAdapterLegacySupport:
         legacy_message = MagicMock()
         legacy_message.content = "legacy content"
 
-        params = MagicMock(spec=MessageSendParams)
+        params = MagicMock(spec=SendMessageRequest)
         params.message = None
         params.messages = [legacy_message]
 
