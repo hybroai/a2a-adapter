@@ -14,6 +14,8 @@ Supports flexible input handling:
 - input_key: Simple text mapping to a single key (default fallback)
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -22,12 +24,20 @@ from typing import Any, AsyncIterator, Callable, Dict
 
 from a2a.types import (
     Message,
-    MessageSendParams,
     Part,
     Role,
     Task,
-    TextPart,
 )
+
+try:
+    from a2a.types import TextPart
+except ImportError:
+    TextPart = None  # type: ignore
+
+try:
+    from a2a.types import SendMessageRequest as MessageSendParams
+except ImportError:
+    MessageSendParams = None  # type: ignore
 
 from ..adapter import BaseAgentAdapter
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter
@@ -411,10 +421,10 @@ class LangChainAgentAdapter(BaseAgentAdapter):
         context_id = self.extract_context_id(params)
 
         return Message(
-            role=Role.agent,
+            role=Role.ROLE_AGENT,
             message_id=str(uuid.uuid4()),
             context_id=context_id,
-            parts=[Part(root=TextPart(text=response_text))],
+            parts=[Part(text=response_text)],
         )
 
     def _extract_output_text(self, framework_output: Any) -> str:
@@ -501,10 +511,10 @@ class LangChainAgentAdapter(BaseAgentAdapter):
 
         # Send final message with complete response
         final_message = Message(
-            role=Role.agent,
+            role=Role.ROLE_AGENT,
             message_id=message_id,
             context_id=context_id,
-            parts=[Part(root=TextPart(text=accumulated_text))],
+            parts=[Part(text=accumulated_text)],
         )
 
         # Send completion event
