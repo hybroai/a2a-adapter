@@ -7,18 +7,18 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from a2a_adapter.integrations.langgraph import LangGraphAgentAdapter
-from a2a.types import Message, MessageSendParams, Task, TaskState, TextPart, Role, Part
+from a2a.types import Message, SendMessageRequest, Task, TaskState, Role, Part
 from a2a.server.tasks import InMemoryTaskStore
 
 
-def make_message_send_params(text: str, context_id: str | None = None) -> MessageSendParams:
-    """Helper to create MessageSendParams with correct A2A types."""
-    return MessageSendParams(
+def make_message_send_params(text: str, context_id: str | None = None) -> SendMessageRequest:
+    """Helper to create SendMessageRequest with correct A2A types."""
+    return SendMessageRequest(
         message=Message(
             message_id="test-msg-id",
-            role=Role.user,
-            parts=[Part(root=TextPart(text=text))],
-            context_id=context_id,
+            role=Role.ROLE_USER,
+            parts=[Part(text=text)],
+            context_id=context_id or "",
         )
     )
 
@@ -63,15 +63,15 @@ class TestLangGraphAdapterBasic:
         adapter = LangGraphAgentAdapter(graph=mock_graph, input_key="input")
 
         # Create params with multiple text parts
-        params = MessageSendParams(
+        params = SendMessageRequest(
             message=Message(
                 message_id="test-msg-id",
-                role=Role.user,
+                role=Role.ROLE_USER,
                 parts=[
-                    Part(root=TextPart(text="part one")),
-                    Part(root=TextPart(text="part two")),
+                    Part(text="part one"),
+                    Part(text="part two"),
                 ],
-                context_id=None,
+                context_id="",
             )
         )
         payload = await adapter.to_framework(params)
@@ -96,7 +96,7 @@ class TestLangGraphAdapterContextId:
 
         assert isinstance(result, Message)
         assert result.context_id == "ctx-123"
-        assert result.role == Role.agent
+        assert result.role == Role.ROLE_AGENT
 
     @pytest.mark.asyncio
     async def test_from_framework_handles_missing_context_id(self):
@@ -110,7 +110,8 @@ class TestLangGraphAdapterContextId:
         result = await adapter.from_framework(framework_output, params)
 
         assert isinstance(result, Message)
-        assert result.context_id is None
+        # V1.0 uses empty string ("") instead of None for unset optional string fields
+        assert result.context_id == ""
 
 
 class TestLangGraphAdapterOutputExtraction:
@@ -127,7 +128,7 @@ class TestLangGraphAdapterOutputExtraction:
 
         result = await adapter.from_framework(framework_output, params)
 
-        assert result.parts[0].root.text == "extracted value"
+        assert result.parts[0].text == "extracted value"
 
     @pytest.mark.asyncio
     async def test_from_framework_extracts_from_messages(self):
@@ -144,7 +145,7 @@ class TestLangGraphAdapterOutputExtraction:
 
         result = await adapter.from_framework(framework_output, params)
 
-        assert result.parts[0].root.text == "AI response from messages"
+        assert result.parts[0].text == "AI response from messages"
 
     @pytest.mark.asyncio
     async def test_from_framework_extracts_common_keys(self):
@@ -156,15 +157,15 @@ class TestLangGraphAdapterOutputExtraction:
 
         # Test 'output' key
         result = await adapter.from_framework({"output": "from output"}, params)
-        assert result.parts[0].root.text == "from output"
+        assert result.parts[0].text == "from output"
 
         # Test 'response' key
         result = await adapter.from_framework({"response": "from response"}, params)
-        assert result.parts[0].root.text == "from response"
+        assert result.parts[0].text == "from response"
 
         # Test 'answer' key
         result = await adapter.from_framework({"answer": "from answer"}, params)
-        assert result.parts[0].root.text == "from answer"
+        assert result.parts[0].text == "from answer"
 
     @pytest.mark.asyncio
     async def test_from_framework_extracts_dict_messages(self):
@@ -182,7 +183,7 @@ class TestLangGraphAdapterOutputExtraction:
 
         result = await adapter.from_framework(framework_output, params)
 
-        assert result.parts[0].root.text == "dict message response"
+        assert result.parts[0].text == "dict message response"
 
 
 class TestLangGraphAdapterCallFramework:
@@ -219,9 +220,9 @@ class TestLangGraphAdapterHandle:
         result = await adapter.handle(params)
 
         assert isinstance(result, Message)
-        assert result.role == Role.agent
+        assert result.role == Role.ROLE_AGENT
         assert result.context_id == "e2e-ctx"
-        assert result.parts[0].root.text == "processed response"
+        assert result.parts[0].text == "processed response"
 
 
 class TestLangGraphAdapterAsyncMode:
@@ -294,7 +295,7 @@ class TestLangGraphAdapterAsyncMode:
 
         # Verify we got a Task back
         assert isinstance(result, Task)
-        assert result.status.state == TaskState.working
+        assert result.status.state == TaskState.TASK_STATE_WORKING
         assert result.context_id == "async-ctx"
 
         # Clean up
@@ -320,9 +321,9 @@ class TestLangGraphAdapterAsyncMode:
         completed_task = await adapter.get_task(task_id)
 
         assert completed_task is not None
-        assert completed_task.status.state == TaskState.completed
+        assert completed_task.status.state == TaskState.TASK_STATE_COMPLETED
         assert completed_task.status.message is not None
-        assert "workflow result" in completed_task.status.message.parts[0].root.text
+        assert "workflow result" in completed_task.status.message.parts[0].text
 
         await adapter.close()
 
@@ -346,9 +347,9 @@ class TestLangGraphAdapterAsyncMode:
         failed_task = await adapter.get_task(task_id)
 
         assert failed_task is not None
-        assert failed_task.status.state == TaskState.failed
+        assert failed_task.status.state == TaskState.TASK_STATE_FAILED
         assert failed_task.status.message is not None
-        assert "failed" in failed_task.status.message.parts[0].root.text.lower()
+        assert "failed" in failed_task.status.message.parts[0].text.lower()
 
         await adapter.close()
 
@@ -374,7 +375,7 @@ class TestLangGraphAdapterAsyncMode:
         canceled_task = await adapter.cancel_task(task_id)
 
         assert canceled_task is not None
-        assert canceled_task.status.state == TaskState.canceled
+        assert canceled_task.status.state == TaskState.TASK_STATE_CANCELED
 
         await adapter.close()
 
@@ -418,8 +419,8 @@ class TestLangGraphAdapterAsyncMode:
         timed_out_task = await adapter.get_task(task_id)
 
         assert timed_out_task is not None
-        assert timed_out_task.status.state == TaskState.failed
-        assert "timed out" in timed_out_task.status.message.parts[0].root.text.lower()
+        assert timed_out_task.status.state == TaskState.TASK_STATE_FAILED
+        assert "timed out" in timed_out_task.status.message.parts[0].text.lower()
 
         await adapter.close()
 
@@ -527,7 +528,7 @@ class TestLangGraphAdapterLegacySupport:
         legacy_message = MagicMock()
         legacy_message.content = "legacy content"
 
-        params = MagicMock(spec=MessageSendParams)
+        params = MagicMock(spec=SendMessageRequest)
         params.message = None
         params.messages = [legacy_message]
 

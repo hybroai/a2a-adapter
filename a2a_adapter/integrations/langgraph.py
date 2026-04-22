@@ -31,6 +31,7 @@ from a2a.types import (
     TaskState,
     TaskStatus,
 )
+from a2a.server.context import ServerCallContext
 
 try:
     from a2a.types import TextPart
@@ -427,6 +428,10 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
         else:
             self.task_store = task_store  # type: ignore
 
+    def _create_minimal_context(self) -> ServerCallContext:
+        """Create a minimal ServerCallContext for task store operations."""
+        return ServerCallContext()
+
     async def handle(self, params: MessageSendParams) -> Message | Task:
         """
         Handle a non-streaming A2A message request.
@@ -471,7 +476,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
             initial_message = params.message
 
         # Create initial task with "working" state
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
         task = Task(
             id=task_id,
             context_id=context_id,
@@ -483,7 +488,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
         )
 
         # Save initial task state
-        await self.task_store.save(task)
+        await self.task_store.save(task, self._create_minimal_context())
         logger.debug("Created async task %s with state=working", task_id)
 
         # Start background processing with timeout
@@ -527,7 +532,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
                 return
 
             logger.error("Task %s timed out after %s seconds", task_id, self.async_timeout)
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(timezone.utc)
             error_message = Message(
                 role=Role.ROLE_AGENT,
                 message_id=str(uuid.uuid4()),
@@ -544,7 +549,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
                     timestamp=now,
                 ),
             )
-            await self.task_store.save(timeout_task)
+            await self.task_store.save(timeout_task, self._create_minimal_context())
 
     async def _execute_workflow_background(
         self,
@@ -581,7 +586,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
             history.append(response_message)
 
             # Update task to completed state
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(timezone.utc)
             completed_task = Task(
                 id=task_id,
                 context_id=context_id,
@@ -593,7 +598,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
                 history=history,
             )
 
-            await self.task_store.save(completed_task)
+            await self.task_store.save(completed_task, self._create_minimal_context())
             logger.debug("Task %s completed successfully", task_id)
 
         except asyncio.CancelledError:
@@ -606,7 +611,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
                 return
 
             logger.error("Task %s failed: %s", task_id, e)
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(timezone.utc)
             error_message = Message(
                 role=Role.ROLE_AGENT,
                 message_id=str(uuid.uuid4()),
@@ -624,7 +629,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
                 ),
             )
 
-            await self.task_store.save(failed_task)
+            await self.task_store.save(failed_task, self._create_minimal_context())
 
     # ---------- Input mapping ----------
 
@@ -959,7 +964,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
                 "Initialize adapter with async_mode=True"
             )
 
-        task = await self.task_store.get(task_id)
+        task = await self.task_store.get(task_id, self._create_minimal_context())
         if task:
             logger.debug("Retrieved task %s with state=%s", task_id, task.status.state)
         else:
@@ -998,9 +1003,9 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
                 pass
 
         # Update task state to canceled
-        task = await self.task_store.get(task_id)
+        task = await self.task_store.get(task_id, self._create_minimal_context())
         if task:
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(timezone.utc)
             canceled_task = Task(
                 id=task_id,
                 context_id=task.context_id,
@@ -1010,7 +1015,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
                 ),
                 history=task.history,
             )
-            await self.task_store.save(canceled_task)
+            await self.task_store.save(canceled_task, self._create_minimal_context())
             logger.debug("Task %s marked as canceled", task_id)
             return canceled_task
 
