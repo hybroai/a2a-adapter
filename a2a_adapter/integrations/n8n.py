@@ -29,6 +29,7 @@ import httpx
 from httpx import ConnectError, HTTPStatusError, ReadTimeout
 
 from a2a.server.agent_execution import RequestContext
+from a2a.server.context import ServerCallContext
 from a2a.types import (
     Artifact,
     Message,
@@ -606,6 +607,10 @@ class N8nAgentAdapter(BaseAgentAdapter):
         else:
             self.task_store = task_store  # type: ignore
 
+    def _create_minimal_context(self) -> ServerCallContext:
+        """Create a minimal ServerCallContext for task store operations."""
+        return ServerCallContext()
+
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client."""
         if self._client is None or self._client.is_closed:
@@ -664,7 +669,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
             initial_message = params.message
         
         # Create initial task with "working" state
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
         task = Task(
             id=task_id,
             context_id=context_id,
@@ -674,9 +679,9 @@ class N8nAgentAdapter(BaseAgentAdapter):
             ),
             history=[initial_message] if initial_message else None,
         )
-        
+
         # Save initial task state
-        await self.task_store.save(task)
+        await self.task_store.save(task, self._create_minimal_context())
         logger.debug("Created async task %s with state=working", task_id)
         
         # Start background processing with timeout
@@ -726,14 +731,14 @@ class N8nAgentAdapter(BaseAgentAdapter):
                 return
             
             logger.error("Task %s timed out after %s seconds", task_id, self.async_timeout)
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(timezone.utc)
             error_message = Message(
                 role=Role.ROLE_AGENT,
                 message_id=str(uuid.uuid4()),
                 context_id=context_id,
                 parts=[Part(text=f"Workflow timed out after {self.async_timeout} seconds")],
             )
-            
+
             timeout_task = Task(
                 id=task_id,
                 context_id=context_id,
@@ -743,7 +748,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
                     timestamp=now,
                 ),
             )
-            await self.task_store.save(timeout_task)
+            await self.task_store.save(timeout_task, self._create_minimal_context())
 
     async def _execute_workflow_background(
         self,
@@ -784,7 +789,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
             history.append(response_message)
             
             # Update task to completed state with artifacts (A2A compliant)
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(timezone.utc)
             completed_task = Task(
                 id=task_id,
                 context_id=context_id,
@@ -802,8 +807,8 @@ class N8nAgentAdapter(BaseAgentAdapter):
                     )
                 ],
             )
-            
-            await self.task_store.save(completed_task)
+
+            await self.task_store.save(completed_task, self._create_minimal_context())
             logger.debug("Task %s completed successfully", task_id)
             
         except asyncio.CancelledError:
@@ -819,14 +824,14 @@ class N8nAgentAdapter(BaseAgentAdapter):
             
             # Update task to failed state
             logger.error("Task %s failed: %s", task_id, e)
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(timezone.utc)
             error_message = Message(
                 role=Role.ROLE_AGENT,
                 message_id=str(uuid.uuid4()),
                 context_id=context_id,
                 parts=[Part(text=f"Workflow failed: {str(e)}")],
             )
-            
+
             failed_task = Task(
                 id=task_id,
                 context_id=context_id,
@@ -836,8 +841,8 @@ class N8nAgentAdapter(BaseAgentAdapter):
                     timestamp=now,
                 ),
             )
-            
-            await self.task_store.save(failed_task)
+
+            await self.task_store.save(failed_task, self._create_minimal_context())
 
     def _extract_response_text(self, framework_output: Dict[str, Any] | list) -> str:
         """Extract response text from n8n webhook output."""
@@ -1101,8 +1106,8 @@ class N8nAgentAdapter(BaseAgentAdapter):
                 "get_task() is only available in async mode. "
                 "Initialize adapter with async_mode=True"
             )
-        
-        task = await self.task_store.get(task_id)
+
+        task = await self.task_store.get(task_id, self._create_minimal_context())
         if task:
             logger.debug("Retrieved task %s with state=%s", task_id, task.status.state)
         else:
@@ -1132,8 +1137,8 @@ class N8nAgentAdapter(BaseAgentAdapter):
                 "delete_task() is only available in async mode. "
                 "Initialize adapter with async_mode=True"
             )
-        
-        task = await self.task_store.get(task_id)
+
+        task = await self.task_store.get(task_id, self._create_minimal_context())
         if not task:
             return False
         
@@ -1145,7 +1150,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
                 f"Only tasks in terminal states (completed, failed, canceled) can be deleted."
             )
         
-        await self.task_store.delete(task_id)
+        await self.task_store.delete(task_id, self._create_minimal_context())
         logger.debug("Deleted task %s", task_id)
         return True
 
@@ -1185,9 +1190,9 @@ class N8nAgentAdapter(BaseAgentAdapter):
                 pass  # Task may have failed, we're cancelling anyway
         
         # Update task state to canceled
-        task = await self.task_store.get(task_id)
+        task = await self.task_store.get(task_id, self._create_minimal_context())
         if task:
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(timezone.utc)
             canceled_task = Task(
                 id=task_id,
                 context_id=task.context_id,
@@ -1197,7 +1202,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
                 ),
                 history=task.history,
             )
-            await self.task_store.save(canceled_task)
+            await self.task_store.save(canceled_task, self._create_minimal_context())
             logger.debug("Task %s marked as canceled", task_id)
             return canceled_task
         

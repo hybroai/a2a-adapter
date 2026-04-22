@@ -7,18 +7,18 @@ import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
 from a2a_adapter.integrations.n8n import N8nAgentAdapter
-from a2a.types import Message, MessageSendParams, Task, TaskState, TextPart, Role, Part
+from a2a.types import Message, SendMessageRequest, Task, TaskState, Role, Part
 from a2a.server.tasks import InMemoryTaskStore
 
 
-def make_message_send_params(text: str, context_id: str | None = None) -> MessageSendParams:
-    """Helper to create MessageSendParams with correct A2A types."""
-    return MessageSendParams(
+def make_message_send_params(text: str, context_id: str | None = None) -> SendMessageRequest:
+    """Helper to create SendMessageRequest with correct A2A types."""
+    return SendMessageRequest(
         message=Message(
             message_id="test-msg-id",
-            role=Role.user,
-            parts=[Part(root=TextPart(text=text))],
-            context_id=context_id,
+            role=Role.ROLE_USER,
+            parts=[Part(text=text)],
+            context_id=context_id or "",
         )
     )
 
@@ -40,11 +40,12 @@ class TestN8nAdapterContextId:
     async def test_to_framework_handles_missing_context_id(self):
         """Test that to_framework handles missing context_id gracefully."""
         adapter = N8nAgentAdapter(webhook_url="http://example.com/webhook")
-        
+
         params = make_message_send_params("hello", context_id=None)
         payload = await adapter.to_framework(params)
-        
-        assert payload["metadata"]["context_id"] is None
+
+        # V1.0 uses empty string ("") instead of None for unset optional string fields
+        assert payload["metadata"]["context_id"] == ""
 
     @pytest.mark.asyncio
     async def test_to_framework_with_template_adds_context_id_at_root(self):
@@ -88,20 +89,21 @@ class TestN8nAdapterContextId:
         
         assert isinstance(result, Message)
         assert result.context_id == "ctx-789"
-        assert result.role == Role.agent
+        assert result.role == Role.ROLE_AGENT
 
     @pytest.mark.asyncio
     async def test_from_framework_handles_missing_context_id(self):
         """Test that from_framework handles missing context_id gracefully."""
         adapter = N8nAgentAdapter(webhook_url="http://example.com/webhook")
-        
+
         params = make_message_send_params("hello", context_id=None)
         framework_output = {"output": "response text"}
-        
+
         result = await adapter.from_framework(framework_output, params)
-        
+
         assert isinstance(result, Message)
-        assert result.context_id is None
+        # V1.0 uses empty string ("") instead of None for unset optional string fields
+        assert result.context_id == ""
 
     @pytest.mark.asyncio
     async def test_handle_preserves_context_id_end_to_end(self):
@@ -168,7 +170,7 @@ class TestN8nAdapterBasic:
         
         result = await adapter.from_framework(framework_output, params)
         
-        assert result.parts[0].root.text == "the response"
+        assert result.parts[0].text == "the response"
 
     @pytest.mark.asyncio
     async def test_from_framework_handles_array_response(self):
@@ -180,8 +182,8 @@ class TestN8nAdapterBasic:
         
         result = await adapter.from_framework(framework_output, params)
         
-        assert "first" in result.parts[0].root.text
-        assert "second" in result.parts[0].root.text
+        assert "first" in result.parts[0].text
+        assert "second" in result.parts[0].text
 
     def test_supports_streaming_returns_false(self):
         """Test that N8N adapter does not support streaming."""
@@ -270,7 +272,7 @@ class TestN8nAdapterAsyncMode:
             
             # Verify we got a Task back
             assert isinstance(result, Task)
-            assert result.status.state == TaskState.working
+            assert result.status.state == TaskState.TASK_STATE_WORKING
             assert result.context_id == "async-ctx"
             
             # Clean up
@@ -308,9 +310,9 @@ class TestN8nAdapterAsyncMode:
             completed_task = await adapter.get_task(task_id)
             
             assert completed_task is not None
-            assert completed_task.status.state == TaskState.completed
+            assert completed_task.status.state == TaskState.TASK_STATE_COMPLETED
             assert completed_task.status.message is not None
-            assert "workflow result" in completed_task.status.message.parts[0].root.text
+            assert "workflow result" in completed_task.status.message.parts[0].text
             
             await adapter.close()
 
@@ -340,9 +342,9 @@ class TestN8nAdapterAsyncMode:
             failed_task = await adapter.get_task(task_id)
             
             assert failed_task is not None
-            assert failed_task.status.state == TaskState.failed
+            assert failed_task.status.state == TaskState.TASK_STATE_FAILED
             assert failed_task.status.message is not None
-            assert "failed" in failed_task.status.message.parts[0].root.text.lower()
+            assert "failed" in failed_task.status.message.parts[0].text.lower()
             
             await adapter.close()
 
@@ -374,7 +376,7 @@ class TestN8nAdapterAsyncMode:
             canceled_task = await adapter.cancel_task(task_id)
             
             assert canceled_task is not None
-            assert canceled_task.status.state == TaskState.canceled
+            assert canceled_task.status.state == TaskState.TASK_STATE_CANCELED
             
             await adapter.close()
 
@@ -412,22 +414,22 @@ class TestN8nAdapterAsyncMode:
             params = make_message_send_params("user question", context_id="history-ctx")
             
             task = await adapter.handle(params)
-            
+
             # Initial task should have the user message in history
             assert task.history is not None
             assert len(task.history) == 1
-            assert task.history[0].role == Role.user
-            
+            assert task.history[0].role == Role.ROLE_USER
+
             # Wait for completion
             await asyncio.sleep(0.1)
-            
+
             completed_task = await adapter.get_task(task.id)
-            
+
             # Completed task should have both user and agent messages
             assert completed_task.history is not None
             assert len(completed_task.history) == 2
-            assert completed_task.history[0].role == Role.user
-            assert completed_task.history[1].role == Role.agent
+            assert completed_task.history[0].role == Role.ROLE_USER
+            assert completed_task.history[1].role == Role.ROLE_AGENT
             
             await adapter.close()
 
@@ -495,8 +497,8 @@ class TestN8nAdapterAsyncMode:
             timed_out_task = await adapter.get_task(task_id)
             
             assert timed_out_task is not None
-            assert timed_out_task.status.state == TaskState.failed
-            assert "timed out" in timed_out_task.status.message.parts[0].root.text.lower()
+            assert timed_out_task.status.state == TaskState.TASK_STATE_FAILED
+            assert "timed out" in timed_out_task.status.message.parts[0].text.lower()
             
             await adapter.close()
 
@@ -511,11 +513,11 @@ class TestN8nAdapterAsyncMode:
         # Track when workflow execution attempts to save
         save_calls = []
         original_save = adapter.task_store.save
-        
-        async def tracking_save(task):
+
+        async def tracking_save(task, context):
             save_calls.append(task.status.state)
-            await original_save(task)
-        
+            await original_save(task, context)
+
         adapter.task_store.save = tracking_save
         
         # Mock a slow HTTP client
@@ -540,10 +542,10 @@ class TestN8nAdapterAsyncMode:
             
             # Final state should be canceled
             final_task = await adapter.get_task(task_id)
-            assert final_task.status.state == TaskState.canceled
+            assert final_task.status.state == TaskState.TASK_STATE_CANCELED
             
             # The last save should be "canceled", not "completed" or "failed"
-            assert save_calls[-1] == TaskState.canceled
+            assert save_calls[-1] == TaskState.TASK_STATE_CANCELED
             
             await adapter.close()
 
@@ -574,7 +576,7 @@ class TestN8nAdapterAsyncMode:
             
             # Verify task is completed
             completed_task = await adapter.get_task(task_id)
-            assert completed_task.status.state == TaskState.completed
+            assert completed_task.status.state == TaskState.TASK_STATE_COMPLETED
             
             # Delete the task
             result = await adapter.delete_task(task_id)
