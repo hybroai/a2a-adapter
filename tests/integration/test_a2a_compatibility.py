@@ -8,7 +8,8 @@ Message objects that other A2A agents can accept.
 
 import pytest
 from a2a_adapter.integrations.n8n import N8nAgentAdapter
-from a2a.types import MessageSendParams, Message, Role, Part, TextPart
+from a2a.types import SendMessageRequest, Message, Role, Part
+from google.protobuf.json_format import MessageToDict
 
 
 @pytest.fixture
@@ -21,11 +22,11 @@ def adapter():
 def user_params():
     """Create mock input parameters (like from another A2A agent)."""
     user_message = Message(
-        role=Role.user,
+        role=Role.ROLE_USER,
         message_id='incoming-msg-123',
-        parts=[Part(root=TextPart(text='What is AI?'))]
+        parts=[Part(text='What is AI?')]
     )
-    return MessageSendParams(message=user_message)
+    return SendMessageRequest(message=user_message)
 
 
 @pytest.mark.asyncio
@@ -43,10 +44,10 @@ async def test_n8n_adapter_creates_a2a_compatible_messages(
     result = await adapter.from_framework(n8n_response, user_params)
 
     # Verify A2A compliance
-    assert result.role == Role.agent, f"Role should be Role.agent, got {result.role}"
+    assert result.role == Role.ROLE_AGENT, f"Role should be Role.ROLE_AGENT, got {result.role}"
     assert result.message_id, "Message should have an ID"
     assert len(result.parts) == 1, "Message should have exactly 1 part"
-    assert isinstance(result.parts[0].root, TextPart), "Part should contain TextPart"
+    assert result.parts[0].text is not None, "Part should contain text"
 
 
 @pytest.mark.asyncio
@@ -61,8 +62,8 @@ async def test_n8n_adapter_json_serialization(adapter, user_params, n8n_response
     result = await adapter.from_framework(n8n_response, user_params)
 
     # Test JSON serialization (critical for A2A protocol)
-    json_data = result.model_dump()
-    assert json_data['role'] == 'agent', "JSON role should be 'agent'"
+    json_data = MessageToDict(result, preserving_proto_field_name=False)
+    assert json_data['role'] == 'ROLE_AGENT', "JSON role should be 'ROLE_AGENT'"
     assert 'messageId' in json_data, "JSON should have camelCase messageId"
     assert 'parts' in json_data, "JSON should have parts array"
 
