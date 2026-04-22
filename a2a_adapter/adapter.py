@@ -15,7 +15,8 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator, Callable, Dict
 
-from a2a.types import Message, MessageSendParams, Task
+from a2a.types import Message, Task
+from a2a.types import SendMessageRequest as MessageSendParams  # V1.0 alias; removed in 0.3.0
 
 logger = logging.getLogger(__name__)
 
@@ -65,17 +66,17 @@ class BaseAgentAdapter(ABC):
     def extract_raw_input(self, params: MessageSendParams) -> str:
         """
         Extract raw text content from A2A message parameters.
-        
+
         This utility method handles:
-        - New format: message.parts with Part(root=TextPart(...)) structure
+        - New format: message.parts with Part(text=...) structure
         - Legacy format: messages array (deprecated)
-        - Edge case: part.root.text returning dict instead of str
-        
+        - Edge case: part.text returning dict instead of str
+
         All adapters can use this method to extract user input consistently.
-        
+
         Args:
             params: A2A message parameters
-            
+
         Returns:
             Extracted text as string
         """
@@ -87,19 +88,8 @@ class BaseAgentAdapter(ABC):
             if hasattr(msg, "parts") and msg.parts:
                 text_parts = []
                 for part in msg.parts:
-                    # Handle Part(root=TextPart(...)) structure
-                    if hasattr(part, "root") and hasattr(part.root, "text"):
-                        text_value = part.root.text
-                        # Handle dict type - convert to JSON string
-                        if isinstance(text_value, dict):
-                            text_parts.append(json.dumps(text_value, ensure_ascii=False))
-                        elif isinstance(text_value, str):
-                            text_parts.append(text_value)
-                        else:
-                            text_parts.append(str(text_value))
-                    # Handle direct TextPart
-                    elif hasattr(part, "text"):
-                        text_value = part.text
+                    text_value = getattr(part, "text", None)
+                    if text_value is not None:
                         if isinstance(text_value, dict):
                             text_parts.append(json.dumps(text_value, ensure_ascii=False))
                         elif isinstance(text_value, str):

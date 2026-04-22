@@ -147,7 +147,7 @@ class BaseA2AAdapter(ABC):
 
         Args:
             user_input: The user's message as plain text.
-                Extracted from A2A MessageSendParams by the bridge layer
+                Extracted from A2A SendMessageRequest by the bridge layer
                 using SDK's RequestContext.get_user_input().
             context_id: Conversation context ID for multi-turn support.
                 Same context_id = same conversation. None for single-turn.
@@ -155,8 +155,9 @@ class BaseA2AAdapter(ABC):
 
         Keyword Args:
             context: The A2A SDK ``RequestContext`` object, providing access
-                to the full message including non-text parts (``FilePart``,
-                ``DataPart``, etc.). Access via ``kwargs.get('context')``.
+                to the full message including non-text parts (parts with
+                ``url``, ``raw``, or ``data`` fields). Access via
+                ``kwargs.get('context')``.
                 Use ``context.message.parts`` to iterate over all parts.
 
         Returns:
@@ -169,15 +170,13 @@ class BaseA2AAdapter(ABC):
                 return "Hello, world!"
 
             # Multimodal response with text and file
-            from a2a.types import Part, TextPart, FilePart, FileWithUri
+            from a2a.types import Part
             async def invoke(self, user_input, context_id=None, **kwargs):
                 return [
-                    Part(root=TextPart(text="Generated report")),
-                    Part(root=FilePart(file=FileWithUri(
-                        uri="http://example.com/report.pdf",
-                        name="report.pdf",
-                        mimeType="application/pdf"
-                    )))
+                    Part(text="Generated report"),
+                    Part(url="http://example.com/report.pdf",
+                         filename="report.pdf",
+                         media_type="application/pdf")
                 ]
 
         Raises:
@@ -221,13 +220,11 @@ class BaseA2AAdapter(ABC):
 
             # Multimodal streaming
             async def stream(self, user_input, context_id=None, **kwargs):
-                from a2a.types import Part, TextPart, FilePart, FileWithUri
+                from a2a.types import Part
                 yield "Generating chart..."
-                yield Part(root=FilePart(file=FileWithUri(
-                    uri="http://example.com/chart.png",
-                    name="chart.png",
-                    mimeType="image/png"
-                )))
+                yield Part(url="http://example.com/chart.png",
+                           filename="chart.png",
+                           media_type="image/png")
         """
         raise NotImplementedError
         # Make this an async generator so type checkers are happy

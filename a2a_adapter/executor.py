@@ -159,10 +159,10 @@ class AdapterAgentExecutor(AgentExecutor):
         """Extract text content from multimodal parts for completion message.
 
         Args:
-            parts: List of Part objects (may contain TextPart, FilePart, etc.)
+            parts: List of Part objects (may contain text, file, or data parts).
 
         Returns:
-            Concatenated text from all TextPart objects, or a placeholder
+            Concatenated text from all text parts, or a placeholder
             if no text parts are found.
         """
         texts = []
