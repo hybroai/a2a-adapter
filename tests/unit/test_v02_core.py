@@ -158,7 +158,7 @@ def test_build_card_defaults():
     card = build_agent_card(MinimalAdapter())
     assert card.name == "MinimalAdapter"  # Falls back to class name
     assert card.description == ""
-    assert card.url == "http://localhost:9000"
+    assert card.supported_interfaces[0].url == "http://localhost:9000/"
     assert card.capabilities.streaming is False
     assert card.capabilities.push_notifications is True
     assert card.skills == []
@@ -187,7 +187,7 @@ def test_build_card_overrides():
     )
     assert card.name == "Override Name"
     assert card.description == "Override Desc"
-    assert card.url == "http://custom:8080"
+    assert card.supported_interfaces[0].url == "http://custom:8080"
     assert card.version == "9.9.9"
 
 
@@ -240,7 +240,7 @@ def test_serve_agent_url_from_port():
             serve_agent(MinimalAdapter(), port=9008)
 
             card = mock_to_a2a.call_args[1].get("agent_card") or mock_to_a2a.call_args[0][1]
-            assert card.url == "http://localhost:9008"
+            assert card.supported_interfaces[0].url == "http://localhost:9008/"
 
 
 def test_serve_agent_wildcard_host_normalized():
@@ -251,7 +251,7 @@ def test_serve_agent_wildcard_host_normalized():
             serve_agent(MinimalAdapter(), host="0.0.0.0", port=9005)
 
             card = mock_to_a2a.call_args[1].get("agent_card") or mock_to_a2a.call_args[0][1]
-            assert card.url == "http://localhost:9005"
+            assert card.supported_interfaces[0].url == "http://localhost:9005/"
 
 
 def test_serve_agent_ipv6_wildcard_normalized():
@@ -262,7 +262,7 @@ def test_serve_agent_ipv6_wildcard_normalized():
             serve_agent(MinimalAdapter(), host="::", port=9005)
 
             card = mock_to_a2a.call_args[1].get("agent_card") or mock_to_a2a.call_args[0][1]
-            assert card.url == "http://localhost:9005"
+            assert card.supported_interfaces[0].url == "http://localhost:9005/"
 
 
 def test_serve_agent_custom_host_preserved():
@@ -273,16 +273,17 @@ def test_serve_agent_custom_host_preserved():
             serve_agent(MinimalAdapter(), host="192.168.1.100", port=9010)
 
             card = mock_to_a2a.call_args[1].get("agent_card") or mock_to_a2a.call_args[0][1]
-            assert card.url == "http://192.168.1.100:9010"
+            assert card.supported_interfaces[0].url == "http://192.168.1.100:9010/"
 
 
 def test_serve_agent_prebuilt_card_not_overridden():
     """When a pre-built agent_card is provided, serve_agent should not override it."""
-    from a2a.types import AgentCard, AgentCapabilities
+    from a2a.types import AgentCard, AgentCapabilities, AgentInterface
 
     custom_card = AgentCard(
-        name="Custom", description="", url="https://prod.example.com",
+        name="Custom", description="",
         version="1.0", capabilities=AgentCapabilities(streaming=False),
+        supported_interfaces=[AgentInterface(url="https://prod.example.com")],
         skills=[], default_input_modes=["text"], default_output_modes=["text"],
     )
     with patch("a2a_adapter.server.uvicorn") as mock_uvicorn:
@@ -291,7 +292,7 @@ def test_serve_agent_prebuilt_card_not_overridden():
             serve_agent(MinimalAdapter(), agent_card=custom_card, port=9999)
 
             card = mock_to_a2a.call_args[1].get("agent_card") or mock_to_a2a.call_args[0][1]
-            assert card.url == "https://prod.example.com"
+            assert card.supported_interfaces[0].url == "https://prod.example.com"
 
 
 # ═══════════════════════════════════════════════════
@@ -305,11 +306,12 @@ def test_to_a2a_returns_app():
 
 
 def test_to_a2a_with_custom_card():
-    from a2a.types import AgentCard, AgentCapabilities
+    from a2a.types import AgentCard, AgentCapabilities, AgentInterface
 
     card = AgentCard(
-        name="Custom", description="", url="http://x",
+        name="Custom", description="",
         version="1.0", capabilities=AgentCapabilities(streaming=False),
+        supported_interfaces=[AgentInterface(url="http://x")],
         skills=[], default_input_modes=["text"], default_output_modes=["text"],
     )
     app = to_a2a(MinimalAdapter(), agent_card=card)
@@ -443,4 +445,4 @@ def test_import_all_adapters():
 
 def test_version():
     from a2a_adapter import __version__
-    assert __version__ == "0.2.0"
+    assert __version__ == "0.2.9"

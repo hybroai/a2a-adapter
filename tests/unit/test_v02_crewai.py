@@ -267,7 +267,7 @@ def test_build_agent_card():
     assert card.name == "Test Crew"
     assert card.description == "A test crew"
     assert card.capabilities.streaming is False
-    assert card.url == "http://localhost:9004"
+    assert card.supported_interfaces[0].url == "http://localhost:9004"
 
 
 def test_to_a2a_builds_app():

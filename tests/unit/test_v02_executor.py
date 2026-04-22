@@ -94,8 +94,10 @@ def make_mock_context(user_input="test input", task_id="task-1", context_id="ctx
 
 
 def make_mock_event_queue():
-    """Create a mock EventQueue."""
-    return MagicMock()
+    """Create a mock EventQueue with async enqueue_event."""
+    queue = MagicMock()
+    queue.enqueue_event = AsyncMock()
+    return queue
 
 
 # ──── Test: Execute with invoke() ────
@@ -217,11 +219,13 @@ async def test_execute_streaming_complete_message():
         updater_instance = AsyncMock()
         MockUpdater.return_value = updater_instance
 
-        with patch("a2a_adapter.executor.new_agent_text_message") as mock_msg:
-            mock_msg.return_value = "final_message"
-            await executor.execute(ctx, queue)
-            # new_agent_text_message should be called with full text
-            mock_msg.assert_called_with("hello world", "ctx-1", "task-1")
+        await executor.execute(ctx, queue)
+
+        # Verify new_agent_message was called with the full concatenated text
+        updater_instance.new_agent_message.assert_called_once()
+        parts = updater_instance.new_agent_message.call_args[0][0]
+        assert len(parts) == 1
+        assert parts[0].text == "hello world"
 
 
 # ──── Test: Error Handling ────

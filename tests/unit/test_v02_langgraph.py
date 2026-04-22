@@ -346,7 +346,7 @@ def test_build_agent_card():
     assert card.name == "Graph Agent"
     assert card.description == "A test agent"
     assert card.capabilities.streaming is True
-    assert card.url == "http://localhost:8000"
+    assert card.supported_interfaces[0].url == "http://localhost:8000"
 
 
 def test_to_a2a_builds_app():
