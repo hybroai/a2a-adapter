@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.10] - 2026-04-22
+
+### Changed
+
+- Bump version to 0.2.10
+
+## [0.2.9] - 2026-04-22
+
+### Breaking Changes
+
+- Upgraded `a2a-sdk` dependency to `>=1,<2` (A2A SDK V1.0)
+
+### Changed
+
+- Full A2A SDK V1.0 compatibility sweep across all adapters and core infrastructure
+- Migrated all adapters (Callable, CrewAI, LangChain, LangGraph, N8n, OpenClaw) to V1.0 imports and types
+- Migrated core infrastructure (`adapter.py`, `client.py`, `base_adapter.py`, `executor.py`) to V1.0
+- N8n adapter multimodal rewrite for V1.0 proto Part fields
+- Symbol-level `ImportError` guards in `client.py` for narrower dependency checks
+
+### Fixed
+
+- OpenClaw adapter now handles silent completions and explicit failures in responses
+- All test suites migrated to A2A SDK V1.0 types (`Part`, `TextPart`, `AgentCard.url`, async `event_queue`)
+
+### Removed
+
+- Development docs cleaned up
+
+## [0.2.8] - 2026-04-20
+
+### Added
+
+- `HermesAdapter` — adapter for Hermes agents with streaming support, run failure propagation, and same-session request serialization
+- `ClaudeCodeAdapter` and `CodexAdapter` — adapters for Claude Code and Codex CLI agents with opt-in constructor flags
+- 60 new unit tests for core adapter modules
+- Hermes agent adapter test suite
+
+### Fixed
+
+- Fix malformed `TextPart` from empty streaming chunks
+- Hermes adapter: close streaming artifacts on error, propagate run failures to A2A task state
+
 ## [0.2.7] - 2026-03-26
 
 ### Fixed
