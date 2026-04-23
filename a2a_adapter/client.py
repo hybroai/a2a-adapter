@@ -11,11 +11,14 @@ Single-agent A2A server helpers.
     This module will be removed in v0.3.0.
 """
 
-try:
-    import warnings
-    from typing import AsyncGenerator
+import warnings
+from typing import AsyncGenerator
 
-    import uvicorn
+# These SDK types/modules were removed or relocated in a2a-sdk>=1.0.
+# Guard only these so unrelated import errors (missing uvicorn, broken
+# local imports, etc.) surface naturally instead of being masked.
+_HAS_LEGACY_SDK = True
+try:
     from a2a.server.apps import A2AStarletteApplication
     from a2a.server.request_handlers.request_handler import RequestHandler
     from a2a.types import UnsupportedOperationError
@@ -42,9 +45,14 @@ try:
         TaskResubscriptionRequest,
         TaskStatusUpdateEvent,
     )
+except ImportError:
+    _HAS_LEGACY_SDK = False
+
+
+if _HAS_LEGACY_SDK:
+    import uvicorn
 
     from .adapter import BaseAgentAdapter
-
 
     class AdapterRequestHandler(RequestHandler):
         """
@@ -202,7 +210,6 @@ try:
 
             return DeleteTaskPushNotificationConfigResponse(result={})
 
-
     def build_agent_app(
         agent_card: AgentCard,
         adapter: BaseAgentAdapter,
@@ -237,7 +244,6 @@ try:
 
         # Build and return the actual ASGI application
         return app_builder.build()
-
 
     def serve_agent(
         agent_card: AgentCard,
@@ -283,7 +289,7 @@ try:
             **uvicorn_kwargs,
         )
 
-except ImportError:
+else:
 
     def build_agent_app(*args, **kwargs):
         raise RuntimeError(
@@ -298,4 +304,3 @@ except ImportError:
             "Use a2a_adapter.server.serve_agent(adapter) instead. See: "
             "https://github.com/hybro-ai/a2a-adapter/blob/main/docs/migration-v0.2.md"
         )
-
