@@ -44,8 +44,7 @@ class HermesAdapter(BaseA2AAdapter):
         from a2a_adapter import HermesAdapter, serve_agent
 
         adapter = HermesAdapter(
-            model="anthropic/claude-sonnet-4-20250514",
-            provider="openrouter",
+            model="anthropic/claude-sonnet-4",
             enabled_toolsets=["hermes-cli"],
         )
         serve_agent(adapter, port=9010)

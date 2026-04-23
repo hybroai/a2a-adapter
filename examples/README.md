@@ -23,6 +23,10 @@ export ANTHROPIC_API_KEY="your-key"
 
 # For Codex examples
 # npm install -g @openai/codex
+
+# For Hermes examples — clone https://github.com/NousResearch/hermes-agent
+# export PYTHONPATH=/path/to/hermes-agent:$PYTHONPATH
+# Run `hermes setup` once for ~/.hermes/config.yaml and API keys.
 ```
 
 ## Examples

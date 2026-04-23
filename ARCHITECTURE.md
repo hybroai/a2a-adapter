@@ -132,6 +132,7 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 | `LangGraphAdapter` | `ainvoke()` / `astream()` with state delta streaming | Yes (auto-detected) |
 | `CrewAIAdapter` | `kickoff_async()` with sync fallback | No |
 | `OpenClawAdapter` | Subprocess exec + JSON parse + cancel (kill) | No |
+| `HermesAdapter` | Gateway pattern: `SessionDB` + `AIAgent.run_conversation()` in a thread pool; requires Hermes on `PYTHONPATH` | Yes (callback → queue) |
 | `OllamaAdapter` | Wraps `OllamaClient` HTTP client (`/api/chat`) | Yes (NDJSON streaming) |
 | `CallableAdapter` | Direct function call | Optional |
 
@@ -169,7 +170,8 @@ a2a_adapter/
     ├── langgraph.py     # LangGraphAdapter + LangGraphAgentAdapter
     ├── crewai.py        # CrewAIAdapter + CrewAIAgentAdapter
     ├── ollama.py        # OllamaClient + OllamaAdapter
-    └── openclaw.py      # OpenClawAdapter + OpenClawAgentAdapter
+    ├── openclaw.py      # OpenClawAdapter + OpenClawAgentAdapter
+    └── hermes.py        # HermesAdapter (Hermes Agent gateway pattern)
 ```
 
 ## Testing Strategy

@@ -6,7 +6,7 @@
 
 **Convert any AI agent into an A2A Protocol server in 3 lines.**
 
-A Python SDK that makes any agent framework (n8n, LangGraph, CrewAI, LangChain, [OpenClaw](https://openclaw.ai/), Claude Code, Codex, Ollama, or a plain function) compatible with the [A2A (Agent-to-Agent) Protocol](https://github.com/a2aproject/A2A).
+A Python SDK that makes any agent framework (n8n, LangGraph, CrewAI, LangChain, [OpenClaw](https://openclaw.ai/), [Hermes Agent](https://github.com/NousResearch/hermes-agent), Claude Code, Codex, Ollama, or a plain function) compatible with the [A2A (Agent-to-Agent) Protocol](https://github.com/a2aproject/A2A).
 
 ```python
 from a2a_adapter import N8nAdapter, serve_agent
@@ -20,9 +20,9 @@ That's it. Your agent is now A2A-compatible with auto-generated AgentCard, task 
 ## Features
 
 - **3-line setup** — `import`, `create`, `serve`
-- **Built-in adapters** — including n8n, LangChain, LangGraph, CrewAI, OpenClaw, Claude Code, Codex, Ollama, and more
+- **Built-in adapters** — including n8n, LangChain, LangGraph, CrewAI, OpenClaw, Hermes, Claude Code, Codex, Ollama, and more
 - **Streaming** — auto-detected for LangChain and LangGraph
-- **Auto AgentCard** — generated from adapter metadata, served at `/.well-known/agent.json`
+- **Auto AgentCard** — generated from adapter metadata, served at `/.well-known/agent-card.json` (and legacy `/.well-known/agent.json`)
 - **SDK-First** — delegates task management, SSE, push notifications to the A2A SDK
 - **Extensible** — `register_adapter()` for third-party frameworks
 - **Minimal surface** — implement `invoke()`, get a full A2A server
@@ -98,6 +98,26 @@ client = OllamaClient(model="llama3.2")
 adapter = OllamaAdapter(client=client, name="My Local LLM")
 serve_agent(adapter, port=10010)
 ```
+
+### Hermes Agent
+
+[Hermes](https://github.com/NousResearch/hermes-agent) is not installed by this package. Clone the repo and put it on `PYTHONPATH`, run `hermes setup` for credentials and `~/.hermes/config.yaml`, then:
+
+Model strings are Hermes’s usual `provider/model` form (same as `hermes config set model`), not necessarily identical to the bare `model` field in Anthropic’s HTTP API.
+
+```python
+from a2a_adapter import HermesAdapter, serve_agent
+
+adapter = HermesAdapter(
+    model="anthropic/claude-sonnet-4",
+    enabled_toolsets=["hermes-cli"],
+    name="Hermes",
+    description="Tool use, persistent memory, streaming",
+)
+serve_agent(adapter, port=9010)
+```
+
+See [`examples/hermes_agent.py`](examples/hermes_agent.py) for a runnable template (including `PYTHONPATH` setup).
 
 ### Claude Code
 
@@ -215,6 +235,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design documentation, and [D
 | **LangGraph** | `LangGraphAdapter` | Yes | `hasattr(graph, "astream")` |
 | **CrewAI** | `CrewAIAdapter` | - | - |
 | **OpenClaw** | `OpenClawAdapter` | - | - |
+| **Hermes** | `HermesAdapter` | Yes | Always |
 | **Ollama** | `OllamaAdapter` | Yes | Always |
 | **Claude Code** | `ClaudeCodeAdapter` | Yes | Always |
 | **Codex** | `CodexAdapter` | - | - |
