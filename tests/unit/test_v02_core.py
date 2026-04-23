@@ -445,4 +445,4 @@ def test_import_all_adapters():
 
 def test_version():
     from a2a_adapter import __version__
-    assert __version__ == "0.2.9"
+    assert __version__ == "0.2.10"
