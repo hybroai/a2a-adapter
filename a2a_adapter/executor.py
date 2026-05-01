@@ -104,11 +104,22 @@ class AdapterAgentExecutor(AgentExecutor):
         resulting JSON ``{"kind": "text"}`` (no ``text`` key) fails Pydantic
         validation on the receiving end.  Filter these out before they reach
         the wire.
+
+        Also catches Parts where no ``oneof content`` variant was set at all
+        (e.g. ``Part()``), which serialize to ``{}`` on the wire.
         """
         if isinstance(chunk, str):
             return chunk == ""
         if isinstance(chunk, Part):
-            return chunk.text == ""
+            try:
+                if not chunk.HasField("content"):
+                    return True
+            except ValueError:
+                pass
+            variant = chunk.WhichOneof("content")
+            if variant == "text":
+                return chunk.text == ""
+            return variant is None
         return False
 
     @staticmethod
