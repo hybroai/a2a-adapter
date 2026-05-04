@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.11] - 2026-05-04
+
+### Fixed
+
+- Fix Part emptiness check for missing oneof content variant
+
+### Added
+
+- Regression tests for Part emptiness check edge cases
+- Documentation for Hermes adapter and aligned HermesAdapter example
+
 ## [0.2.10] - 2026-04-22
 
 ### Changed
