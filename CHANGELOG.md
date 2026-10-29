@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- CLI `--skill` option (JSON, repeatable) to describe Agent Card skills
+
+### Changed
+
+- CLI Agent Cards list one skill built from the card name and description by
+  default, so they are A2A spec-compliant (a2a-sdk no longer warns that the
+  required `skills` field is empty)
+
 ## [0.2.14] - 2026-10-16
 
 ### Changed

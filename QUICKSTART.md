@@ -218,7 +218,14 @@ to the next request, except for Pi, which needs a server restart.
 The server binds to `127.0.0.1:9000` unless you pass `--host`/`--port`. Its
 Agent Card is named after the agent and the folder it works in, such as
 `Claude Code (my-app)`, so several local agents stay distinguishable in an A2A
-client. Override it with `--name` and `--description`.
+client. Override it with `--name` and `--description`. The card lists one
+skill built from that name and description; describe what the agent offers more
+precisely with one or more `--skill` options:
+
+```bash
+a2a-adapter claude --cwd ./reviewer --name "Security reviewer" \
+  --skill '{"id": "security-review", "name": "Security review", "description": "Reviews a diff for security issues", "tags": ["code-review"]}'
+```
 
 Check that it's up by opening the Agent Card, for example
 `http://127.0.0.1:9010/.well-known/agent-card.json`.
