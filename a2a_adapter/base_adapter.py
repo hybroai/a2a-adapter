@@ -64,9 +64,16 @@ class AdapterMetadata:
 
 @dataclass(frozen=True, slots=True)
 class CommandResult:
-    """Output of _build_command() — carries resume metadata for stale retry."""
+    """Output of _build_command() — carries resume metadata for stale retry.
+
+    ``stdin`` is written to the subprocess's standard input (then closed) when
+    set. Use it for the user message instead of an argv element: Linux limits a
+    single argument to 128 KiB (``MAX_ARG_STRLEN``), so large prompts passed on
+    the command line fail with ``OSError: [Errno 7] Argument list too long``.
+    """
     args: list[str]
     used_resume: bool
+    stdin: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,12 +300,15 @@ class BaseA2AAdapter(ABC):
         # 2. Build command (subclass hook)
         cmd_result = self._build_command(user_input, context_key)
         logger.debug("Executing command: %s", " ".join(cmd_result.args))
+        stdin_bytes = (
+            cmd_result.stdin.encode("utf-8") if cmd_result.stdin is not None else None
+        )
 
         # 3. Spawn
         try:
             proc = await create_subprocess_exec(
                 *cmd_result.args,
-                stdin=DEVNULL,
+                stdin=PIPE if stdin_bytes is not None else DEVNULL,
                 stdout=PIPE,
                 stderr=PIPE,
                 cwd=self.working_dir,
@@ -316,9 +326,12 @@ class BaseA2AAdapter(ABC):
         self._active_processes[task_id] = proc
         try:
             try:
-                stdout_bytes, stderr_bytes = await wait_for(
-                    proc.communicate(), timeout=self.timeout
+                communicate = (
+                    proc.communicate(input=stdin_bytes)
+                    if stdin_bytes is not None
+                    else proc.communicate()
                 )
+                stdout_bytes, stderr_bytes = await wait_for(communicate, timeout=self.timeout)
             except asyncio.TimeoutError:
                 if proc.returncode is None:
                     proc.kill()
@@ -406,7 +419,7 @@ class BaseA2AAdapter(ABC):
         try:
             proc = await create_subprocess_exec(
                 *cmd_result.args,
-                stdin=DEVNULL,
+                stdin=PIPE if cmd_result.stdin is not None else DEVNULL,
                 stdout=PIPE,
                 stderr=PIPE,
                 cwd=self.working_dir,
@@ -435,6 +448,13 @@ class BaseA2AAdapter(ABC):
                 stderr_chunks.append(chunk)
 
         stderr_task = asyncio.create_task(_drain_stderr())
+        # Feed stdin concurrently with reading stdout so a large prompt cannot
+        # deadlock against a child that starts writing before it finishes reading.
+        stdin_task = (
+            asyncio.create_task(self._feed_stdin(proc, cmd_result.stdin))
+            if cmd_result.stdin is not None
+            else None
+        )
         aborted = False
 
         try:
@@ -483,15 +503,20 @@ class BaseA2AAdapter(ABC):
             self._active_processes.pop(task_id, None)
 
             if aborted:
-                stderr_task.cancel()
-                try:
-                    await stderr_task
-                except asyncio.CancelledError:
-                    pass
+                for task in (stderr_task, stdin_task):
+                    if task is None:
+                        continue
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
                 await proc.wait()
             else:
                 await proc.wait()
                 await stderr_task
+                if stdin_task is not None:
+                    await stdin_task
 
         stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
 
@@ -537,6 +562,20 @@ class BaseA2AAdapter(ABC):
             raise RuntimeError("Command returned no output")
 
     # ──── Utility methods ────
+
+    @staticmethod
+    async def _feed_stdin(proc: Process, data: str) -> None:
+        """Write ``data`` to the subprocess's stdin, then close it to signal EOF."""
+        assert proc.stdin is not None
+        try:
+            proc.stdin.write(data.encode("utf-8"))
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            # The child exited before reading everything; its exit code and
+            # stderr describe the real failure, so don't mask it here.
+            pass
+        finally:
+            proc.stdin.close()
 
     def _get_context_lock(self, context_key: str) -> asyncio.Lock:
         """Get or create a per-context asyncio.Lock."""

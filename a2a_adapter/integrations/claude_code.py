@@ -138,7 +138,9 @@ class ClaudeCodeAdapter(BaseA2AAdapter):
         cmd = [
             self.claude_path,
             *self.cli_args,
-            "-p", message,
+            # The prompt goes through stdin (see CommandResult.stdin): `claude -p`
+            # reads it from there when no prompt argument is given.
+            "-p",
             "--output-format", "stream-json",
             "--verbose",
             "--disallowedTools", "AskUserQuestion",
@@ -148,7 +150,7 @@ class ClaudeCodeAdapter(BaseA2AAdapter):
         session_id = self._sessions.get(context_key)
         if session_id:
             cmd.extend(["--resume", session_id])
-        return CommandResult(args=cmd, used_resume=bool(session_id))
+        return CommandResult(args=cmd, used_resume=bool(session_id), stdin=message)
 
     def _parse_invoke_output(
         self, stdout_text: str, context_key: str
