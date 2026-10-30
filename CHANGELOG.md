@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- CLI `--skill` option (JSON, repeatable) to describe Agent Card skills
+- CLI `--skill` option (JSON, repeatable) to describe Agent Card skills; each needs a non-empty `tags`
+  list, which A2A requires
 
 ### Changed
 

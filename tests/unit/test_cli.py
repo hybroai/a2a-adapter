@@ -242,6 +242,12 @@ def test_cli_skill_options_replace_the_default(tmp_path):
         "tags": ["code-review", "security"],
         "examples": ["Review this diff"],
     }
+    summary = {
+        "id": "summary",
+        "name": "Summary",
+        "description": "Summarizes a diff",
+        "tags": ["summary"],
+    }
     with patch("a2a_adapter.cli.serve_agent") as serve:
         main(
             [
@@ -251,7 +257,7 @@ def test_cli_skill_options_replace_the_default(tmp_path):
                 "--skill",
                 json.dumps(review),
                 "--skill",
-                '{"id": "summary", "name": "Summary", "description": "Summarizes a diff"}',
+                json.dumps(summary),
             ]
         )
 
@@ -272,14 +278,42 @@ def test_cli_agent_card_with_default_skill_is_spec_compliant(tmp_path, caplog):
     assert "not spec-compliant" not in caplog.text
 
 
+def test_cli_agent_card_with_skill_options_is_spec_compliant(tmp_path, caplog):
+    skill = {
+        "id": "review",
+        "name": "Review",
+        "description": "Reviews a diff",
+        "tags": ["code-review"],
+    }
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        main(["claude", "--cwd", str(tmp_path), "--skill", json.dumps(skill)])
+
+    card = build_agent_card(serve.call_args.args[0], url="http://127.0.0.1:9000/")
+    with caplog.at_level(logging.WARNING):
+        data = _agent_card_json(card)
+
+    assert data["skills"][0]["tags"] == ["code-review"]
+    assert "not spec-compliant" not in caplog.text
+
+
 @pytest.mark.parametrize(
     "value, message",
     [
         ("not json", "must be a JSON object"),
         ('["a"]', "must be a JSON object"),
         ('{"id": "x", "name": "X"}', "non-empty string 'description'"),
-        ('{"id": "x", "name": "X", "description": "d", "tags": "t"}', "'tags' must be a list"),
-        ('{"id": "x", "name": "X", "description": "d", "extra": 1}', "unknown keys: extra"),
+        ('{"id": "x", "name": "X", "description": "d"}', "needs 'tags'"),
+        ('{"id": "x", "name": "X", "description": "d", "tags": []}', "needs 'tags'"),
+        ('{"id": "x", "name": "X", "description": "d", "tags": "t"}', "needs 'tags'"),
+        ('{"id": "x", "name": "X", "description": "d", "tags": [""]}', "needs 'tags'"),
+        (
+            '{"id": "x", "name": "X", "description": "d", "tags": ["t"], "examples": "e"}',
+            "'examples' must be a list",
+        ),
+        (
+            '{"id": "x", "name": "X", "description": "d", "tags": ["t"], "extra": 1}',
+            "unknown keys: extra",
+        ),
     ],
 )
 def test_cli_rejects_invalid_skill(tmp_path, capsys, value, message):

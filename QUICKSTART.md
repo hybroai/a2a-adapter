@@ -220,7 +220,7 @@ Agent Card is named after the agent and the folder it works in, such as
 `Claude Code (my-app)`, so several local agents stay distinguishable in an A2A
 client. Override it with `--name` and `--description`. The card lists one
 skill built from that name and description; describe what the agent offers more
-precisely with one or more `--skill` options:
+precisely with one or more `--skill` options (each needs at least one tag):
 
 ```bash
 a2a-adapter claude --cwd ./reviewer --name "Security reviewer" \

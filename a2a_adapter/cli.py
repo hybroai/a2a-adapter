@@ -111,8 +111,8 @@ def _add_server_options(
         type=_skill,
         metavar="JSON",
         help=(
-            "Agent Card skill as a JSON object with id, name, description and optional "
-            "tags/examples; repeatable (default: one skill from the card name and description)"
+            "Agent Card skill as a JSON object with id, name, description, tags (at least one) "
+            "and optional examples; repeatable (default: one skill from the card name and description)"
         ),
     )
     parser.add_argument("--log-level", default="info", help="Uvicorn log level")
@@ -209,10 +209,13 @@ def _skill(value: str) -> dict:
     for key in ("id", "name", "description"):
         if not isinstance(skill.get(key), str) or not skill[key]:
             raise argparse.ArgumentTypeError(f"--skill needs a non-empty string {key!r}")
-    for key in ("tags", "examples"):
-        value = skill.get(key, [])
-        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-            raise argparse.ArgumentTypeError(f"--skill {key!r} must be a list of strings")
+    # A2A requires at least one tag per skill; a2a-sdk warns on a missing or empty list.
+    tags = skill.get("tags")
+    if not isinstance(tags, list) or not tags or not all(isinstance(t, str) and t for t in tags):
+        raise argparse.ArgumentTypeError("--skill needs 'tags': a non-empty list of non-empty strings")
+    examples = skill.get("examples", [])
+    if not isinstance(examples, list) or not all(isinstance(e, str) for e in examples):
+        raise argparse.ArgumentTypeError("--skill 'examples' must be a list of strings")
     unknown = set(skill) - {"id", "name", "description", "tags", "examples"}
     if unknown:
         raise argparse.ArgumentTypeError(f"--skill has unknown keys: {', '.join(sorted(unknown))}")
