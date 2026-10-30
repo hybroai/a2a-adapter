@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude Code prompts are now sent on stdin instead of as a `-p` argument, so
+  large prompts (over 128 KiB, e.g. big diffs) no longer fail with
+  `OSError: [Errno 7] Argument list too long`. CLI adapters can opt in by
+  setting the new `CommandResult.stdin` field
+
 ## [0.2.14] - 2026-10-16
 
 ### Changed

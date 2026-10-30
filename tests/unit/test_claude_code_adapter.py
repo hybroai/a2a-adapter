@@ -9,6 +9,7 @@ retry, session persistence (D4), loader integration, and flat import.
 import asyncio
 import json
 import os
+import sys
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -74,6 +75,13 @@ class AsyncLineIterator:
         return b""  # EOF
 
 
+def _stdin_stub() -> MagicMock:
+    """Simulates proc.stdin (asyncio StreamWriter): write()/close() are sync, drain() is async."""
+    stdin = MagicMock()
+    stdin.drain = AsyncMock()
+    return stdin
+
+
 class AsyncChunkReader:
     """Simulates proc.stderr as a read()-capable stream that returns data once then EOF.
 
@@ -125,8 +133,9 @@ class TestBuildCommand:
         cmd = adapter._build_command("hello world", "_default")
         assert cmd.args[0] == "claude"
         assert "-p" in cmd.args
-        idx_p = cmd.args.index("-p")
-        assert cmd.args[idx_p + 1] == "hello world"
+        # The prompt is sent on stdin, never as an argv element
+        assert "hello world" not in cmd.args
+        assert cmd.stdin == "hello world"
         assert "--output-format" in cmd.args
         idx_of = cmd.args.index("--output-format")
         assert cmd.args[idx_of + 1] == "stream-json"
@@ -242,6 +251,81 @@ class TestBuildCommand:
 # ──── Test: _parse_invoke_output ────
 
 
+class TestPromptViaStdin:
+    """The prompt goes to stdin so it is not bound by the per-argument limit."""
+
+    @pytest.mark.asyncio
+    async def test_invoke_writes_prompt_to_stdin(self, adapter, mock_proc):
+        stdout = "\n".join(
+            json.dumps(e) for e in [_assistant_event("ok"), _result_event("ok")]
+        )
+        mock_proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
+
+        with patch(
+            "a2a_adapter.base_adapter.create_subprocess_exec",
+            return_value=mock_proc,
+        ) as spawn:
+            await adapter.invoke("héllo 프롬프트", context=_make_context("task-in"))
+
+        assert spawn.call_args.kwargs["stdin"] == asyncio.subprocess.PIPE
+        assert "héllo 프롬프트" not in spawn.call_args.args
+        mock_proc.communicate.assert_awaited_once_with(input="héllo 프롬프트".encode())
+
+    @pytest.mark.asyncio
+    async def test_stream_writes_prompt_to_stdin_and_closes_it(self, adapter):
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.pid = 7
+        mock_proc.stdout = AsyncLineIterator(
+            [_json_line(_assistant_event("ok")), _json_line(_result_event("ok"))]
+        )
+        mock_proc.stderr = AsyncChunkReader(b"")
+        mock_proc.stdin = _stdin_stub()
+        mock_proc.kill = MagicMock()
+        mock_proc.wait = AsyncMock()
+
+        with patch(
+            "a2a_adapter.base_adapter.create_subprocess_exec",
+            return_value=mock_proc,
+        ) as spawn:
+            chunks = [c async for c in adapter.stream("stream 프롬프트", context=_make_context("t"))]
+
+        assert chunks == ["ok"]
+        assert spawn.call_args.kwargs["stdin"] == asyncio.subprocess.PIPE
+        mock_proc.stdin.write.assert_called_once_with("stream 프롬프트".encode())
+        mock_proc.stdin.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(os.name != "posix", reason="uses a POSIX shebang script")
+    @pytest.mark.parametrize("method", ["invoke", "stream"])
+    async def test_prompt_larger_than_argv_limit(self, tmp_path, method):
+        """A 300 KB prompt reaches a real subprocess intact (argv would fail at 128 KiB)."""
+        fake_claude = tmp_path / "claude"
+        fake_claude.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\n"
+            "data = sys.stdin.buffer.read()\n"
+            "text = f'{len(data)} {sys.argv.count(\"-p\")}'\n"
+            "print(json.dumps({'type': 'assistant', 'message': {'content': "
+            "[{'type': 'text', 'text': text}]}}))\n"
+            "print(json.dumps({'type': 'result', 'result': text, 'session_id': 's'}))\n"
+        )
+        fake_claude.chmod(0o755)
+        adapter = ClaudeCodeAdapter(
+            working_dir=str(tmp_path),
+            claude_path=str(fake_claude),
+            session_store_path=str(tmp_path / "s.json"),
+        )
+        prompt = "가" * 100_000  # 300,000 bytes in UTF-8
+
+        if method == "invoke":
+            out = await adapter.invoke(prompt, context=_make_context("big"))
+        else:
+            out = "".join([c async for c in adapter.stream(prompt, context=_make_context("big"))])
+
+        assert out == f"{len(prompt.encode('utf-8'))} 1"
+
+
 class TestParseInvokeOutput:
     def test_assistant_events(self, adapter):
         stdout = "\n".join([
@@ -355,6 +439,7 @@ class TestInvokeStreamConsistency:
         mock_proc_stream.pid = 2
         mock_proc_stream.stdout = AsyncLineIterator(lines)
         mock_proc_stream.stderr = AsyncChunkReader(b"")
+        mock_proc_stream.stdin = _stdin_stub()
         mock_proc_stream.kill = MagicMock()
         mock_proc_stream.wait = AsyncMock()
 
@@ -488,6 +573,7 @@ class TestStream:
         mock_proc.pid = 999
         mock_proc.stdout = AsyncLineIterator(lines)
         mock_proc.stderr = AsyncChunkReader(b"")
+        mock_proc.stdin = _stdin_stub()
         mock_proc.kill = MagicMock()
         mock_proc.wait = AsyncMock()
 
@@ -519,6 +605,7 @@ class TestStream:
         mock_proc.pid = 888
         mock_proc.stdout = AsyncLineIterator(lines)
         mock_proc.stderr = AsyncChunkReader(b"stream error")
+        mock_proc.stdin = _stdin_stub()
         mock_proc.kill = MagicMock()
         mock_proc.wait = AsyncMock()
 
@@ -546,6 +633,7 @@ class TestStream:
         mock_proc.pid = 777
         mock_proc.stdout = AsyncLineIterator(lines)
         mock_proc.stderr = AsyncChunkReader(b"")
+        mock_proc.stdin = _stdin_stub()
         mock_proc.kill = MagicMock()
         mock_proc.wait = AsyncMock()
 
@@ -603,6 +691,7 @@ class TestStream:
         mock_proc.pid = 666
         mock_proc.stdout = AsyncLineIterator(lines)
         mock_proc.stderr = AsyncChunkReader(b"")
+        mock_proc.stdin = _stdin_stub()
         mock_proc.kill = MagicMock()
         mock_proc.wait = AsyncMock()
 
@@ -628,6 +717,7 @@ class TestStream:
         mock_proc.pid = 555
         mock_proc.stdout = AsyncLineIterator([])
         mock_proc.stderr = AsyncChunkReader(b"")
+        mock_proc.stdin = _stdin_stub()
         mock_proc.kill = MagicMock()
         mock_proc.wait = AsyncMock()
 
@@ -654,7 +744,7 @@ class TestPerContextSerial:
         event_first_started = asyncio.Event()
         event_release_first = asyncio.Event()
 
-        async def slow_communicate():
+        async def slow_communicate(input=None):
             execution_order.append("first_start")
             event_first_started.set()
             await event_release_first.wait()
@@ -665,7 +755,7 @@ class TestPerContextSerial:
             ])
             return (stdout.encode(), b"")
 
-        async def fast_communicate():
+        async def fast_communicate(input=None):
             execution_order.append("second_start")
             stdout = "\n".join([
                 json.dumps(_assistant_event("r2")),
@@ -736,7 +826,7 @@ class TestPerContextSerial:
         started_count = 0
         release = asyncio.Event()
 
-        async def tracked_communicate():
+        async def tracked_communicate(input=None):
             nonlocal started_count
             started_count += 1
             if started_count >= 2:
@@ -788,7 +878,7 @@ class TestCancelRunning:
         """Start a long-running invoke(), call cancel(), verify CancelledByAdapterError."""
         started = asyncio.Event()
 
-        async def blocking_communicate():
+        async def blocking_communicate(input=None):
             started.set()
             await asyncio.sleep(60)  # Will be killed
             return (b"", b"")
@@ -1040,6 +1130,7 @@ class TestStaleSessionRetry:
         mock_proc.wait = AsyncMock()
         mock_proc.stdout = AsyncLineIterator([])
         mock_proc.stderr = AsyncChunkReader(b"Environment error: missing API key")
+        mock_proc.stdin = _stdin_stub()
         mock_proc.returncode = 1
 
         with patch(
@@ -1075,6 +1166,7 @@ class TestStaleSessionRetry:
                 # First call: stale failure (no output, stderr empty too)
                 proc.stdout = AsyncLineIterator([])
                 proc.stderr = AsyncChunkReader(b"")
+                proc.stdin = _stdin_stub()
                 proc.returncode = 1
             else:
                 # Second call: success (assistant text is the response)
@@ -1083,6 +1175,7 @@ class TestStaleSessionRetry:
                     _json_line(_result_event("metadata", "new-sess-s")),
                 ])
                 proc.stderr = AsyncChunkReader(b"")
+                proc.stdin = _stdin_stub()
                 proc.returncode = 0
             return proc
 
@@ -1112,6 +1205,7 @@ class TestStaleSessionRetry:
         mock_proc.wait = AsyncMock()
         mock_proc.stdout = AsyncLineIterator([])
         mock_proc.stderr = AsyncChunkReader(b"")
+        mock_proc.stdin = _stdin_stub()
         mock_proc.returncode = -9  # SIGKILL
 
         with patch(
@@ -1341,6 +1435,7 @@ class TestStreamingStdoutEOF:
         mock_proc.pid = 42
         mock_proc.stdout = AsyncLineIterator(lines)
         mock_proc.stderr = AsyncChunkReader(b"some warnings")
+        mock_proc.stdin = _stdin_stub()
         mock_proc.kill = MagicMock()
 
         # returncode starts as None (process still "running" from OS perspective)
