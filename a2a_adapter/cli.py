@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import sys
@@ -104,6 +105,16 @@ def _add_server_options(
         "--name", default="", help='Agent Card display name (default: "<Agent> (<folder>)")'
     )
     parser.add_argument("--description", default="", help="Agent Card description")
+    parser.add_argument(
+        "--skill",
+        action="append",
+        type=_skill,
+        metavar="JSON",
+        help=(
+            "Agent Card skill as a JSON object with id, name, description, tags (at least one) "
+            "and optional examples; repeatable (default: one skill from the card name and description)"
+        ),
+    )
     parser.add_argument("--log-level", default="info", help="Uvicorn log level")
     parser.add_argument("--executable", help="Path to the underlying agent executable")
 
@@ -187,6 +198,37 @@ def _working_directory(parser: argparse.ArgumentParser, value: str) -> str:
     return str(path)
 
 
+def _skill(value: str) -> dict:
+    """Parse one ``--skill`` JSON object into the adapter's skill dict."""
+    try:
+        skill = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(f"--skill must be a JSON object: {exc}") from None
+    if not isinstance(skill, dict):
+        raise argparse.ArgumentTypeError("--skill must be a JSON object")
+    for key in ("id", "name", "description"):
+        if not isinstance(skill.get(key), str) or not skill[key]:
+            raise argparse.ArgumentTypeError(f"--skill needs a non-empty string {key!r}")
+    # A2A requires at least one tag per skill; a2a-sdk warns on a missing or empty list.
+    tags = skill.get("tags")
+    if not isinstance(tags, list) or not tags or not all(isinstance(t, str) and t for t in tags):
+        raise argparse.ArgumentTypeError("--skill needs 'tags': a non-empty list of non-empty strings")
+    examples = skill.get("examples", [])
+    if not isinstance(examples, list) or not all(isinstance(e, str) for e in examples):
+        raise argparse.ArgumentTypeError("--skill 'examples' must be a list of strings")
+    unknown = set(skill) - {"id", "name", "description", "tags", "examples"}
+    if unknown:
+        raise argparse.ArgumentTypeError(f"--skill has unknown keys: {', '.join(sorted(unknown))}")
+    return skill
+
+
+def _card_skills(agent: str, name: str, description: str, skills: list[dict] | None) -> list[dict]:
+    """A2A requires at least one skill; default to one describing the whole agent."""
+    if skills:
+        return skills
+    return [{"id": agent, "name": name, "description": description, "tags": [agent]}]
+
+
 def _card_identity(agent: str, working_dir: str, name: str, description: str) -> tuple[str, str]:
     """Default the Agent Card to "<Product> (<folder>)" so instances are distinguishable."""
     product = _AGENT_DISPLAY_NAMES[agent]
@@ -215,6 +257,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _validate_agent_args(parser, args.agent, agent_args)
     working_dir = _working_directory(parser, args.cwd)
     name, description = _card_identity(args.agent, working_dir, args.name, args.description)
+    skills = _card_skills(args.agent, name, description, args.skill)
 
     if args.agent == "pi":
         adapter = PiAdapter(
@@ -226,6 +269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout=args.timeout,
             name=name,
             description=description,
+            skills=skills,
         )
     elif args.agent == "codex":
         adapter = CodexAdapter(
@@ -235,6 +279,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout=args.timeout,
             name=name,
             description=description,
+            skills=skills,
         )
     elif args.agent == "claude":
         adapter = ClaudeCodeAdapter(
@@ -244,6 +289,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout=args.timeout,
             name=name,
             description=description,
+            skills=skills,
         )
     elif args.agent == "openclaw":
         adapter = OpenClawAdapter(
@@ -256,6 +302,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             cli_args=agent_args,
             name=name,
             description=description,
+            skills=skills,
         )
     else:  # pragma: no cover - argparse limits this to registered subcommands
         raise AssertionError(f"unsupported agent: {args.agent}")

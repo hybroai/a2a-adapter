@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- CLI `--skill` option (JSON, repeatable) to describe Agent Card skills; each needs a non-empty `tags`
+  list, which A2A requires
+
+### Changed
+
+- CLI Agent Cards list one skill built from the card name and description by
+  default, so they are A2A spec-compliant (a2a-sdk no longer warns that the
+  required `skills` field is empty)
 ### Fixed
 
 - Claude Code prompts are now sent on stdin instead of as a `-p` argument, so

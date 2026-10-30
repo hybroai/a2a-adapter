@@ -115,6 +115,7 @@ a2a-adapter openclaw --port 9008 --agent-id main --thinking high
 | `--host` / `--port` | `127.0.0.1` / `9000` | Bind address; use `--host 0.0.0.0` to accept remote connections |
 | `--name` | `<Agent> (<folder>)`, e.g. `Claude Code (my-app)` | Agent Card display name |
 | `--description` | `<Agent> agent working in <folder>` | Agent Card description |
+| `--skill` | one skill from the card name and description | Agent Card skill as JSON (`id`, `name`, `description`, at least one entry in `tags`, optional `examples`); repeatable |
 | `--timeout` | `600` | Per-request timeout in seconds |
 | `--executable` | `claude`, `codex`, `pi`, `openclaw` | Path to the agent executable |
 

@@ -1,5 +1,7 @@
 """Tests for the thin a2a-adapter command-line entry point."""
 
+import json
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -9,6 +11,7 @@ from a2a_adapter.integrations.claude_code import ClaudeCodeAdapter
 from a2a_adapter.integrations.codex import CodexAdapter
 from a2a_adapter.integrations.openclaw import OpenClawAdapter
 from a2a_adapter.integrations.pi import PiAdapter
+from a2a_adapter.server import _agent_card_json, build_agent_card
 
 
 def test_pi_cli_uses_current_contract_and_forwards_native_args(tmp_path, monkeypatch):
@@ -218,3 +221,102 @@ def test_cli_name_and_description_override_defaults(tmp_path):
     meta = serve.call_args.args[0].get_metadata()
     assert meta.name == "Reviewer"
     assert meta.description == "Reviews PRs"
+
+
+@pytest.mark.parametrize("agent", ["pi", "codex", "claude", "openclaw"])
+def test_cli_defaults_to_one_skill_describing_the_agent(tmp_path, agent):
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        main([agent, "--cwd", str(tmp_path), "--name", "Reviewer", "--description", "Reviews"])
+
+    meta = serve.call_args.args[0].get_metadata()
+    assert meta.skills == [
+        {"id": agent, "name": "Reviewer", "description": "Reviews", "tags": [agent]}
+    ]
+
+
+def test_cli_skill_options_replace_the_default(tmp_path):
+    review = {
+        "id": "security-review",
+        "name": "Security review",
+        "description": "Reviews a diff for security issues",
+        "tags": ["code-review", "security"],
+        "examples": ["Review this diff"],
+    }
+    summary = {
+        "id": "summary",
+        "name": "Summary",
+        "description": "Summarizes a diff",
+        "tags": ["summary"],
+    }
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        main(
+            [
+                "claude",
+                "--cwd",
+                str(tmp_path),
+                "--skill",
+                json.dumps(review),
+                "--skill",
+                json.dumps(summary),
+            ]
+        )
+
+    meta = serve.call_args.args[0].get_metadata()
+    assert [s["id"] for s in meta.skills] == ["security-review", "summary"]
+    assert meta.skills[0] == review
+
+
+def test_cli_agent_card_with_default_skill_is_spec_compliant(tmp_path, caplog):
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        main(["claude", "--cwd", str(tmp_path)])
+
+    card = build_agent_card(serve.call_args.args[0], url="http://127.0.0.1:9000/")
+    with caplog.at_level(logging.WARNING):
+        data = _agent_card_json(card)
+
+    assert data["skills"][0]["id"] == "claude"
+    assert "not spec-compliant" not in caplog.text
+
+
+def test_cli_agent_card_with_skill_options_is_spec_compliant(tmp_path, caplog):
+    skill = {
+        "id": "review",
+        "name": "Review",
+        "description": "Reviews a diff",
+        "tags": ["code-review"],
+    }
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        main(["claude", "--cwd", str(tmp_path), "--skill", json.dumps(skill)])
+
+    card = build_agent_card(serve.call_args.args[0], url="http://127.0.0.1:9000/")
+    with caplog.at_level(logging.WARNING):
+        data = _agent_card_json(card)
+
+    assert data["skills"][0]["tags"] == ["code-review"]
+    assert "not spec-compliant" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "value, message",
+    [
+        ("not json", "must be a JSON object"),
+        ('["a"]', "must be a JSON object"),
+        ('{"id": "x", "name": "X"}', "non-empty string 'description'"),
+        ('{"id": "x", "name": "X", "description": "d"}', "needs 'tags'"),
+        ('{"id": "x", "name": "X", "description": "d", "tags": []}', "needs 'tags'"),
+        ('{"id": "x", "name": "X", "description": "d", "tags": "t"}', "needs 'tags'"),
+        ('{"id": "x", "name": "X", "description": "d", "tags": [""]}', "needs 'tags'"),
+        (
+            '{"id": "x", "name": "X", "description": "d", "tags": ["t"], "examples": "e"}',
+            "'examples' must be a list",
+        ),
+        (
+            '{"id": "x", "name": "X", "description": "d", "tags": ["t"], "extra": 1}',
+            "unknown keys: extra",
+        ),
+    ],
+)
+def test_cli_rejects_invalid_skill(tmp_path, capsys, value, message):
+    with pytest.raises(SystemExit):
+        main(["claude", "--cwd", str(tmp_path), "--skill", value])
+    assert message in capsys.readouterr().err
