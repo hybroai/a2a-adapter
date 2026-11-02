@@ -134,6 +134,11 @@ class LangGraphAdapter(BaseA2AAdapter):
                 ``context_id``, so a graph compiled with a checkpointer keeps
                 conversation memory per context (default: "thread_id").
                 A value already set in ``config`` wins. ``None`` disables it.
+                The client chooses the ``context_id``, so any client that
+                knows a context's id can continue that thread. When one
+                server is shared by clients that must not see each other's
+                conversations, set this to ``None`` (or authenticate
+                callers and keep context ids secret).
         """
         self.graph = graph
         self.input_key = input_key
