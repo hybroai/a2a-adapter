@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import time
@@ -26,7 +27,14 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict
 
 import httpx
-from httpx import ConnectError, HTTPStatusError, ReadTimeout
+from httpx import (
+    ConnectError,
+    ConnectTimeout,
+    HTTPStatusError,
+    PoolTimeout,
+    ReadTimeout,
+    TransportError,
+)
 
 from a2a.server.agent_execution import RequestContext
 from a2a.server.context import ServerCallContext
@@ -84,6 +92,32 @@ class N8nAdapter(BaseA2AAdapter):
     Forwards user messages to an n8n webhook URL and extracts the response.
     Supports flexible payload construction and retry with exponential backoff.
 
+    Retries: by default only failures where the request cannot have reached
+    n8n are retried (connection failed, connect timeout, connection pool
+    timeout), so one message never runs the workflow twice. A 5xx, a read
+    timeout or a dropped or reset connection may mean the workflow already ran (or is
+    still running) and is not retried unless ``retry_on_server_error=True``,
+    which is only safe when the webhook is idempotent. 4xx responses are
+    never retried.
+
+    Payload precedence (later wins): ``default_inputs`` < client fields
+    (parsed JSON message or ``input_mapper`` output) < ``payload_template`` <
+    the context fields the adapter sets (``metadata.context_id``, or
+    ``context_id`` when a template is used). ``default_inputs`` are defaults a
+    client may override; ``payload_template`` keys are fixed by the operator.
+    For plain-text messages the text goes in ``message_field``. Context fields
+    are added for JSON and plain-text messages, not to ``input_mapper``
+    output, which the operator's mapper controls.
+
+    File URLs (multimodal_mode): a client-supplied file URL is passed to the
+    webhook as ``uri`` and not fetched. With ``fetch_file_urls=True`` the
+    adapter downloads it and embeds the bytes; only ``http``/``https`` URLs
+    are allowed, redirects are not followed, bodies over ``max_file_bytes``
+    are rejected, and any fetch failure fails the request. Private or
+    internal addresses are NOT blocked, so enabling this lets clients make
+    the server request any host it can reach; enable it only for trusted
+    clients or behind an egress proxy.
+
     Example::
 
         from a2a_adapter import N8nAdapter, serve_agent
@@ -108,6 +142,7 @@ class N8nAdapter(BaseA2AAdapter):
         headers: Dict[str, str] | None = None,
         max_retries: int = 2,
         backoff: float = 0.25,
+        retry_on_server_error: bool = False,
         payload_template: Dict[str, Any] | None = None,
         message_field: str = "message",
         parse_json_input: bool = True,
@@ -117,6 +152,8 @@ class N8nAdapter(BaseA2AAdapter):
         file_field: str = "files",
         image_field: str = "images",
         encode_files_base64: bool = True,
+        fetch_file_urls: bool = False,
+        max_file_bytes: int = 10 * 1024 * 1024,
         supported_input_types: list[str] | None = None,
         supported_output_types: list[str] | None = None,
         name: str = "",
@@ -134,16 +171,27 @@ class N8nAdapter(BaseA2AAdapter):
             headers: Optional additional HTTP headers.
             max_retries: Retry attempts for transient failures (default: 2).
             backoff: Base backoff seconds between retries (default: 0.25).
+            retry_on_server_error: Also retry 5xx responses, read timeouts and
+                dropped connections, which can re-run a workflow that already
+                started. Enable only for idempotent webhooks (default: False).
             payload_template: Optional base payload dict to merge with message.
+                Its keys always win over client-supplied JSON.
             message_field: Field name for user message in payload (default: "message").
             parse_json_input: Auto-parse JSON input (default: True).
             input_mapper: Custom function for input transformation.
                 Signature: (raw_input: str, context_id: str | None) -> dict.
-            default_inputs: Default values to merge into payload.
+            default_inputs: Default values to merge into payload. Client JSON
+                may override them.
             multimodal_mode: Enable multimodal support for files/images (default: False).
             file_field: JSON field name for file attachments (default: "files").
             image_field: JSON field name for image attachments (default: "images").
             encode_files_base64: Encode files as base64 in JSON (default: True).
+            fetch_file_urls: Download client-supplied file URLs and embed the
+                content instead of passing the URL through (default: False).
+                Each download must finish within ``timeout`` seconds.
+                See the class docstring for the limits and the SSRF caveat.
+            max_file_bytes: Maximum size of one fetched file when
+                fetch_file_urls is enabled (default: 10 MiB).
             supported_input_types: MIME types the workflow accepts (default: common types).
             supported_output_types: MIME types the workflow produces (default: common types).
             name: Optional agent name for AgentCard generation.
@@ -158,6 +206,7 @@ class N8nAdapter(BaseA2AAdapter):
         self.headers = dict(headers) if headers else {}
         self.max_retries = max(0, int(max_retries))
         self.backoff = float(backoff)
+        self.retry_on_server_error = retry_on_server_error
         self.payload_template = dict(payload_template) if payload_template else {}
         self.message_field = message_field
         self.parse_json_input = parse_json_input
@@ -167,6 +216,8 @@ class N8nAdapter(BaseA2AAdapter):
         self.file_field = file_field
         self.image_field = image_field
         self.encode_files_base64 = encode_files_base64
+        self.fetch_file_urls = fetch_file_urls
+        self.max_file_bytes = int(max_file_bytes)
         self._supported_input_types = supported_input_types
         self._supported_output_types = supported_output_types
         self._name = name
@@ -259,12 +310,16 @@ class N8nAdapter(BaseA2AAdapter):
             1. input_mapper (custom function) — highest priority
             2. parse_json_input (auto JSON parsing)
             3. message_field (fallback for plain text)
+
+        In every branch payload_template keys override client-derived fields;
+        the JSON and plain-text branches then set the context fields. See the
+        class docstring for the full precedence.
         """
         # Priority 1: Custom input_mapper
         if self.input_mapper is not None:
             try:
                 mapped = self.input_mapper(user_input, context_id)
-                return {**self.payload_template, **self.default_inputs, **mapped}
+                return {**self.default_inputs, **mapped, **self.payload_template}
             except Exception as e:
                 logger.warning("input_mapper failed: %s, falling back", e)
 
@@ -273,21 +328,52 @@ class N8nAdapter(BaseA2AAdapter):
             try:
                 parsed = json.loads(user_input)
                 if isinstance(parsed, dict):
-                    return {**self.payload_template, **self.default_inputs, **parsed}
+                    payload = {
+                        **self.default_inputs, **parsed, **self.payload_template,
+                    }
+                    self._set_context(payload, context_id)
+                    return payload
             except json.JSONDecodeError:
                 pass
 
         # Priority 3: Fallback to message_field
-        payload: Dict[str, Any] = {
-            **self.payload_template,
+        payload = {
             **self.default_inputs,
+            **self.payload_template,
             self.message_field: user_input,
         }
-        if not self.payload_template:
-            payload["metadata"] = {"context_id": context_id}
-        elif "context_id" not in payload:
-            payload["context_id"] = context_id
+        self._set_context(payload, context_id)
         return payload
+
+    def _set_context(self, payload: Dict[str, Any], context_id: str | None) -> None:
+        """Set the context fields so client input cannot replace them.
+
+        Without a payload_template the id goes in ``metadata.context_id``
+        (other client metadata keys are kept; a non-dict client ``metadata``
+        is replaced). With one it goes in ``context_id`` unless the template
+        sets that key itself, and a client ``metadata.context_id`` is
+        overwritten unless the template sets ``metadata``.
+        """
+        metadata = payload.get("metadata")
+        if not self.payload_template:
+            if metadata is not None and not isinstance(metadata, dict):
+                logger.warning(
+                    "Replacing non-object client 'metadata' (%s) with context metadata",
+                    type(metadata).__name__,
+                )
+            if not isinstance(metadata, dict):
+                metadata = {}
+            payload["metadata"] = {**metadata, "context_id": context_id}
+            return
+
+        if "context_id" not in self.payload_template:
+            payload["context_id"] = context_id
+        if (
+            "metadata" not in self.payload_template
+            and isinstance(metadata, dict)
+            and "context_id" in metadata
+        ):
+            payload["metadata"] = {**metadata, "context_id": context_id}
 
     async def _build_multimodal_payload(
         self,
@@ -295,38 +381,39 @@ class N8nAdapter(BaseA2AAdapter):
         context_id: str | None,
         context: RequestContext,
     ) -> Dict[str, Any]:
-        """Build webhook payload with files/images from context.message.parts."""
+        """Build webhook payload with files/images from context.message.parts.
+
+        URL parts are passed through as ``uri`` unless fetch_file_urls is set;
+        a failed fetch raises instead of dropping the file.
+        """
         payload = self._build_payload(user_input, context_id)
 
         files = []
         images = []
 
         for part in context.message.parts:
-            if part.HasField("url") or part.HasField("raw"):
-                try:
-                    file_data = await self._fetch_file_content(part)
-                    file_entry: Dict[str, Any] = {
-                        "name": part.filename or "file",
-                        "mime_type": part.media_type,
-                    }
+            if not (part.HasField("url") or part.HasField("raw")):
+                continue
 
-                    if self.encode_files_base64:
-                        file_entry["data"] = base64.b64encode(file_data).decode("utf-8")
-                    else:
-                        file_entry["data"] = file_data
+            file_entry: Dict[str, Any] = {
+                "name": part.filename or "file",
+                "mime_type": part.media_type,
+            }
 
-                    if part.HasField("url"):
-                        file_entry["uri"] = part.url
+            if part.HasField("raw") or self.fetch_file_urls:
+                file_data = await self._fetch_file_content(part)
+                if self.encode_files_base64:
+                    file_entry["data"] = base64.b64encode(file_data).decode("utf-8")
+                else:
+                    file_entry["data"] = file_data
 
-                    if part.media_type and part.media_type.startswith("image/"):
-                        images.append(file_entry)
-                    else:
-                        files.append(file_entry)
+            if part.HasField("url"):
+                file_entry["uri"] = part.url
 
-                except Exception as e:
-                    logger.warning(
-                        "Failed to fetch file %s: %s", part.filename or "unknown", e
-                    )
+            if part.media_type and part.media_type.startswith("image/"):
+                images.append(file_entry)
+            else:
+                files.append(file_entry)
 
         if files:
             payload[self.file_field] = files
@@ -343,23 +430,75 @@ class N8nAdapter(BaseA2AAdapter):
 
         Returns:
             File content as bytes.
+
+        Raises:
+            ValueError: The URL is not http/https, the body exceeds
+                max_file_bytes, the fetch took longer than ``timeout`` in
+                total, or it failed (including any redirect).
         """
         if part.HasField("url"):
-            client = await self._get_client()
-            resp = await client.get(part.url)
-            resp.raise_for_status()
-            return resp.content
+            return await self._fetch_url(part.url)
         elif part.HasField("raw"):
             return part.raw
         else:
             raise ValueError(f"Part has no url or raw data: {part}")
+
+    async def _fetch_url(self, url: str) -> bytes:
+        """Download a client-supplied URL, capped at max_file_bytes and timeout."""
+        try:
+            return await asyncio.wait_for(self._download(url), self.timeout)
+        except asyncio.TimeoutError as e:
+            raise ValueError(
+                f"Fetching file {url} timed out after {self.timeout}s"
+            ) from e
+
+    async def _download(self, url: str) -> bytes:
+        try:
+            scheme = httpx.URL(url).scheme
+        except httpx.InvalidURL as e:
+            raise ValueError(f"Invalid file URL {url!r}: {e}") from e
+        if scheme not in ("http", "https"):
+            raise ValueError(f"File URL scheme {scheme!r} not allowed: {url}")
+
+        client = await self._get_client()
+        limit = self.max_file_bytes
+        try:
+            async with client.stream("GET", url, follow_redirects=False) as resp:
+                resp.raise_for_status()
+                declared = resp.headers.get("Content-Length")
+                if declared and declared.isdigit() and int(declared) > limit:
+                    raise ValueError(
+                        f"File at {url} exceeds max_file_bytes ({declared} > {limit})"
+                    )
+                chunks: list[bytes] = []
+                size = 0
+                async for chunk in resp.aiter_bytes():
+                    size += len(chunk)
+                    if size > limit:
+                        raise ValueError(
+                            f"File at {url} exceeds max_file_bytes ({limit})"
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks)
+        except httpx.HTTPError as e:
+            raise ValueError(f"Failed to fetch file {url}: {e}") from e
 
     # ──── Internal: HTTP POST with Retry ────
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client (lazy init)."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            # Expire idle sockets before n8n's (Node's default 5s) keep-alive
+            # timeout closes them; a request on a socket the server just
+            # closed fails as RemoteProtocolError, which is not retried.
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout,
+                limits=httpx.Limits(
+                    max_connections=100,
+                    max_keepalive_connections=20,
+                    keepalive_expiry=2.0,
+                ),
+            )
         return self._client
 
     async def _post_with_retry(self, payload: Dict[str, Any]) -> Any:
@@ -367,7 +506,10 @@ class N8nAdapter(BaseA2AAdapter):
 
         Error policy:
             - 4xx: no retry, raise ValueError
-            - 5xx / network errors: retry, then raise RuntimeError
+            - connect failures (request never sent): retry, then raise RuntimeError
+            - 5xx / read timeout / other transport errors (reset or dropped
+              connection): the workflow may have run, so raise RuntimeError
+              at once unless retry_on_server_error
         """
         client = await self._get_client()
         req_id = str(uuid.uuid4())
@@ -396,19 +538,32 @@ class N8nAdapter(BaseA2AAdapter):
                 return resp.json()
 
             except HTTPStatusError as e:
-                if attempt < self.max_retries:
+                if self.retry_on_server_error and attempt < self.max_retries:
                     await asyncio.sleep(self.backoff * (2 ** attempt))
                     continue
                 raise RuntimeError(
-                    f"n8n upstream 5xx after retries (req_id={req_id}): {e}"
+                    f"n8n upstream {e.response.status_code} "
+                    f"(req_id={req_id}, attempts={attempt + 1}): {e}"
                 ) from e
 
-            except (ConnectError, ReadTimeout) as e:
+            except (ConnectError, ConnectTimeout, PoolTimeout) as e:
+                # The request was never sent, so retrying cannot re-run the workflow.
                 if attempt < self.max_retries:
                     await asyncio.sleep(self.backoff * (2 ** attempt))
                     continue
                 raise RuntimeError(
                     f"n8n upstream unavailable/timeout after retries (req_id={req_id}): {e}"
+                ) from e
+
+            except TransportError as e:
+                # ReadTimeout, reset or dropped connection, ...: n8n may have
+                # received the request and started the workflow.
+                if self.retry_on_server_error and attempt < self.max_retries:
+                    await asyncio.sleep(self.backoff * (2 ** attempt))
+                    continue
+                raise RuntimeError(
+                    f"n8n upstream timeout or connection error "
+                    f"(req_id={req_id}, attempts={attempt + 1}): {e!r}"
                 ) from e
 
         raise RuntimeError("Unexpected error in retry loop.")
@@ -462,33 +617,64 @@ class N8nAdapter(BaseA2AAdapter):
         if text:
             parts.append(Part(text=text))
 
-        if self.file_field in output:
-            for file_ref in output[self.file_field]:
-                if isinstance(file_ref, dict):
-                    parts.append(
-                        Part(
-                            url=file_ref.get("url") or file_ref.get("uri"),
-                            filename=file_ref.get("name"),
-                            media_type=file_ref.get("mime_type")
-                            or file_ref.get("mimeType"),
-                        )
-                    )
-
-        if self.image_field in output:
-            for img_ref in output[self.image_field]:
-                if isinstance(img_ref, dict):
-                    parts.append(
-                        Part(
-                            url=img_ref.get("url") or img_ref.get("uri"),
-                            filename=img_ref.get("name"),
-                            media_type=img_ref.get("mime_type")
-                            or img_ref.get("mimeType", "image/png"),
-                        )
-                    )
+        parts.extend(self._file_ref_parts(output.get(self.file_field), None))
+        parts.extend(self._file_ref_parts(output.get(self.image_field), "image/png"))
 
         if not parts:
             return [Part(text="[Empty response]")]
         return parts
+
+    def _file_ref_parts(
+        self, refs: Any, default_media_type: str | None
+    ) -> list[Part]:
+        """Convert response file refs to Parts, skipping unusable ones.
+
+        A ref becomes a url Part when it has ``url``/``uri``, or a raw Part
+        when it has base64 ``data``. Refs with neither, invalid base64, or a
+        field that is not a list (e.g. ``null``) yield nothing, so no empty
+        Part reaches the wire.
+        """
+        if not isinstance(refs, list):
+            return []
+
+        parts: list[Part] = []
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            meta = {
+                "filename": self._str_field(ref, "name"),
+                "media_type": self._str_field(ref, "mime_type", "mimeType")
+                or default_media_type,
+            }
+            location = self._str_field(ref, "url", "uri")
+            data = ref.get("data")
+            if location:
+                parts.append(Part(url=location, **meta))
+            elif isinstance(data, str) and data:
+                try:
+                    raw = base64.b64decode(data, validate=True)
+                except (binascii.Error, ValueError):
+                    logger.warning(
+                        "Skipping n8n file ref %r with invalid base64 data",
+                        ref.get("name"),
+                    )
+                    continue
+                parts.append(Part(raw=raw, **meta))
+            else:
+                logger.warning(
+                    "Skipping n8n file ref %r with no url, uri or data",
+                    ref.get("name"),
+                )
+        return parts
+
+    @staticmethod
+    def _str_field(ref: Dict[str, Any], *keys: str) -> str | None:
+        """Return the first non-empty string value among ``keys``."""
+        for key in keys:
+            value = ref.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════
