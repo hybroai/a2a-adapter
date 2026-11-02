@@ -26,7 +26,14 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict
 
 import httpx
-from httpx import ConnectError, HTTPStatusError, ReadTimeout
+from httpx import (
+    ConnectError,
+    ConnectTimeout,
+    HTTPStatusError,
+    PoolTimeout,
+    ReadTimeout,
+    RemoteProtocolError,
+)
 
 from a2a.server.agent_execution import RequestContext
 from a2a.server.context import ServerCallContext
@@ -84,6 +91,14 @@ class N8nAdapter(BaseA2AAdapter):
     Forwards user messages to an n8n webhook URL and extracts the response.
     Supports flexible payload construction and retry with exponential backoff.
 
+    Retries: by default only failures where the request cannot have reached
+    n8n are retried (connection failed, connect timeout, connection pool
+    timeout), so one message never runs the workflow twice. A 5xx, a read
+    timeout or a dropped connection may mean the workflow already ran (or is
+    still running) and is not retried unless ``retry_on_server_error=True``,
+    which is only safe when the webhook is idempotent. 4xx responses are
+    never retried.
+
     Example::
 
         from a2a_adapter import N8nAdapter, serve_agent
@@ -108,6 +123,7 @@ class N8nAdapter(BaseA2AAdapter):
         headers: Dict[str, str] | None = None,
         max_retries: int = 2,
         backoff: float = 0.25,
+        retry_on_server_error: bool = False,
         payload_template: Dict[str, Any] | None = None,
         message_field: str = "message",
         parse_json_input: bool = True,
@@ -134,6 +150,9 @@ class N8nAdapter(BaseA2AAdapter):
             headers: Optional additional HTTP headers.
             max_retries: Retry attempts for transient failures (default: 2).
             backoff: Base backoff seconds between retries (default: 0.25).
+            retry_on_server_error: Also retry 5xx responses, read timeouts and
+                dropped connections, which can re-run a workflow that already
+                started. Enable only for idempotent webhooks (default: False).
             payload_template: Optional base payload dict to merge with message.
             message_field: Field name for user message in payload (default: "message").
             parse_json_input: Auto-parse JSON input (default: True).
@@ -158,6 +177,7 @@ class N8nAdapter(BaseA2AAdapter):
         self.headers = dict(headers) if headers else {}
         self.max_retries = max(0, int(max_retries))
         self.backoff = float(backoff)
+        self.retry_on_server_error = retry_on_server_error
         self.payload_template = dict(payload_template) if payload_template else {}
         self.message_field = message_field
         self.parse_json_input = parse_json_input
@@ -367,7 +387,9 @@ class N8nAdapter(BaseA2AAdapter):
 
         Error policy:
             - 4xx: no retry, raise ValueError
-            - 5xx / network errors: retry, then raise RuntimeError
+            - connect failures (request never sent): retry, then raise RuntimeError
+            - 5xx / read timeout / dropped connection: the workflow may have
+              run, so raise RuntimeError at once unless retry_on_server_error
         """
         client = await self._get_client()
         req_id = str(uuid.uuid4())
@@ -396,14 +418,26 @@ class N8nAdapter(BaseA2AAdapter):
                 return resp.json()
 
             except HTTPStatusError as e:
-                if attempt < self.max_retries:
+                if self.retry_on_server_error and attempt < self.max_retries:
                     await asyncio.sleep(self.backoff * (2 ** attempt))
                     continue
                 raise RuntimeError(
-                    f"n8n upstream 5xx after retries (req_id={req_id}): {e}"
+                    f"n8n upstream {e.response.status_code} "
+                    f"(req_id={req_id}, attempts={attempt + 1}): {e}"
                 ) from e
 
-            except (ConnectError, ReadTimeout) as e:
+            except (ReadTimeout, RemoteProtocolError) as e:
+                # n8n may have received the request and started the workflow.
+                if self.retry_on_server_error and attempt < self.max_retries:
+                    await asyncio.sleep(self.backoff * (2 ** attempt))
+                    continue
+                raise RuntimeError(
+                    f"n8n upstream timeout or dropped connection "
+                    f"(req_id={req_id}, attempts={attempt + 1}): {e}"
+                ) from e
+
+            except (ConnectError, ConnectTimeout, PoolTimeout) as e:
+                # The request was never sent, so retrying cannot re-run the workflow.
                 if attempt < self.max_retries:
                     await asyncio.sleep(self.backoff * (2 ** attempt))
                     continue
