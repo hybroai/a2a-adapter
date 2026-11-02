@@ -9,7 +9,6 @@ command building, output parsing, and stream line handling.
 import json
 import logging
 import os
-import uuid
 from collections.abc import AsyncIterator, Sequence
 
 from ..base_adapter import (
@@ -68,7 +67,6 @@ class ClaudeCodeAdapter(BaseA2AAdapter):
             session_store_path=session_store_path
             or os.path.join(default_state_dir("claude-code", working_dir), "sessions.json"),
         )
-        self.session_id = f"a2a-{uuid.uuid4().hex[:12]}"
         self.claude_path = claude_path
         self.cli_args = list(cli_args or [])
         self._name = name
@@ -97,8 +95,7 @@ class ClaudeCodeAdapter(BaseA2AAdapter):
         self, user_input: str, context_id: str | None = None, **kwargs
     ) -> str:
         context = kwargs.get("context")
-        prefix = getattr(self, "session_id", "a2a")
-        key = f"{prefix}-{context_id}" if context_id else prefix
+        key = context_id or "_default"
         task_id = context.task_id if context else key
         lock = self._get_context_lock(key)
         async with lock:
@@ -110,8 +107,7 @@ class ClaudeCodeAdapter(BaseA2AAdapter):
         self, user_input: str, context_id: str | None = None, **kwargs
     ) -> AsyncIterator[str]:
         context = kwargs.get("context")
-        prefix = getattr(self, "session_id", "a2a")
-        key = f"{prefix}-{context_id}" if context_id else prefix
+        key = context_id or "_default"
         task_id = context.task_id if context else key
         lock = self._get_context_lock(key)
         async with lock:

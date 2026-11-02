@@ -32,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   so a crash mid-write no longer corrupts `sessions.json` and drops every
   saved session. A corrupt or unreadable store is now logged as a warning
   instead of being reset silently
+- Claude Code conversations now resume after a server restart. Sessions were
+  keyed by a random per-process prefix, so saved `--resume` ids were never
+  matched again and the store filled with dead entries; they are now keyed by
+  the A2A `context_id` (`_default` without one), as Codex already did. The
+  `ClaudeCodeAdapter.session_id` attribute is removed. Entries saved by older
+  versions use the old keys and are never matched, so the old
+  `claude-code/sessions.json` is not worth moving
 
 ## [0.2.15] - 2026-11-01
 
