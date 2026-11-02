@@ -98,6 +98,8 @@ class LangGraphAdapter(BaseA2AAdapter):
         provider: dict | None = None,
         documentation_url: str | None = None,
         icon_url: str | None = None,
+        config: Dict[str, Any] | None = None,
+        thread_id_key: str | None = "thread_id",
     ) -> None:
         """Initialize the LangGraph adapter.
 
@@ -116,6 +118,12 @@ class LangGraphAdapter(BaseA2AAdapter):
             provider: Optional dict with 'organization' and 'url' keys.
             documentation_url: Optional URL to the agent's documentation.
             icon_url: Optional URL to an icon for the agent.
+            config: Base RunnableConfig passed to every ``ainvoke``/``astream``
+                call (e.g. ``recursion_limit`` or extra ``configurable`` keys).
+            thread_id_key: ``configurable`` key that receives the A2A
+                ``context_id``, so a graph compiled with a checkpointer keeps
+                conversation memory per context (default: "thread_id").
+                A value already set in ``config`` wins. ``None`` disables it.
         """
         self.graph = graph
         self.input_key = input_key
@@ -131,12 +139,15 @@ class LangGraphAdapter(BaseA2AAdapter):
         self._provider = provider
         self._documentation_url = documentation_url
         self._icon_url = icon_url
+        self.config = config or {}
+        self.thread_id_key = thread_id_key
 
     async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         """Invoke the graph and return a text response."""
         inputs = self._build_inputs(user_input, context_id)
         result = await asyncio.wait_for(
-            self.graph.ainvoke(inputs), timeout=self.timeout,
+            self.graph.ainvoke(inputs, **self._config_kwargs(context_id)),
+            timeout=self.timeout,
         )
         return self._extract_output(result)
 
@@ -144,7 +155,7 @@ class LangGraphAdapter(BaseA2AAdapter):
         """Stream state deltas from the graph via astream()."""
         inputs = self._build_inputs(user_input, context_id)
         last_text = ""
-        async for state in self.graph.astream(inputs):
+        async for state in self.graph.astream(inputs, **self._config_kwargs(context_id)):
             text = self._extract_streaming_text(state)
             if text and text != last_text:
                 delta = text[len(last_text):] if text.startswith(last_text) else text
@@ -169,6 +180,19 @@ class LangGraphAdapter(BaseA2AAdapter):
         )
 
     # ──── Internal: Input Building ────
+
+    def _config_kwargs(self, context_id: str | None) -> Dict[str, Any]:
+        """Build the ``config`` kwarg, mapping context_id to the thread key.
+
+        Returns an empty dict when there is no config, so graphs whose
+        ``ainvoke``/``astream`` take no ``config`` argument keep working.
+        """
+        config = dict(self.config)
+        if self.thread_id_key and context_id:
+            configurable = dict(config.get("configurable") or {})
+            configurable.setdefault(self.thread_id_key, context_id)
+            config["configurable"] = configurable
+        return {"config": config} if config else {}
 
     def _build_inputs(self, user_input: str, context_id: str | None) -> Dict[str, Any]:
         """Build graph inputs with 3-priority pipeline."""

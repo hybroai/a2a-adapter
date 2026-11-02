@@ -24,11 +24,11 @@ class MockGraph:
         self._final_state = final_state or {"output": "graph result"}
         self.last_input = None
 
-    async def ainvoke(self, inputs):
+    async def ainvoke(self, inputs, config=None):
         self.last_input = inputs
         return self._final_state
 
-    async def astream(self, inputs):
+    async def astream(self, inputs, config=None, stream_mode=None):
         self.last_input = inputs
         # Simulate intermediate states building up
         yield {"output": "partial"}
@@ -42,11 +42,11 @@ class MockGraphMessages:
         self._messages = messages or [{"role": "assistant", "content": "graph says hi"}]
         self.last_input = None
 
-    async def ainvoke(self, inputs):
+    async def ainvoke(self, inputs, config=None):
         self.last_input = inputs
         return {"messages": self._messages}
 
-    async def astream(self, inputs):
+    async def astream(self, inputs, config=None, stream_mode=None):
         self.last_input = inputs
         yield {"messages": self._messages[:1]}
         yield {"messages": self._messages}
@@ -55,7 +55,7 @@ class MockGraphMessages:
 class MockGraphNoStream:
     """Graph without astream method — streaming not supported."""
 
-    async def ainvoke(self, inputs):
+    async def ainvoke(self, inputs, config=None):
         return {"output": "no stream"}
 
 
@@ -72,11 +72,11 @@ class MockGraphWithLCMessages:
     def __init__(self):
         self.last_input = None
 
-    async def ainvoke(self, inputs):
+    async def ainvoke(self, inputs, config=None):
         self.last_input = inputs
         return {"messages": [MockMessageObject("lc message content")]}
 
-    async def astream(self, inputs):
+    async def astream(self, inputs, config=None, stream_mode=None):
         self.last_input = inputs
         yield {"messages": [MockMessageObject("lc streaming")]}
 
@@ -374,3 +374,84 @@ def test_flat_import():
     """Verify from a2a_adapter import LangGraphAdapter works."""
     from a2a_adapter import LangGraphAdapter as LG
     assert LG is LangGraphAdapter
+
+
+# ──── Test: context_id → checkpointer thread_id ────
+
+
+class ConfigRecordingGraph:
+    """Graph that records the config passed to ainvoke/astream."""
+
+    def __init__(self):
+        self.configs = []
+
+    async def ainvoke(self, inputs, config=None):
+        self.configs.append(config)
+        return {"output": "ok"}
+
+    async def astream(self, inputs, config=None, stream_mode=None):
+        self.configs.append(config)
+        yield {"agent": {"output": "ok"}}
+
+
+@pytest.mark.asyncio
+async def test_invoke_maps_context_id_to_thread_id():
+    graph = ConfigRecordingGraph()
+    adapter = LangGraphAdapter(graph=graph, input_key="query")
+    await adapter.invoke("hi", context_id="ctx-1")
+    assert graph.configs == [{"configurable": {"thread_id": "ctx-1"}}]
+
+
+@pytest.mark.asyncio
+async def test_stream_maps_context_id_to_thread_id():
+    graph = ConfigRecordingGraph()
+    adapter = LangGraphAdapter(graph=graph, input_key="query")
+    _ = [c async for c in adapter.stream("hi", context_id="ctx-1")]
+    assert graph.configs == [{"configurable": {"thread_id": "ctx-1"}}]
+
+
+@pytest.mark.asyncio
+async def test_thread_id_key_renamed():
+    graph = ConfigRecordingGraph()
+    adapter = LangGraphAdapter(graph=graph, input_key="query", thread_id_key="session")
+    await adapter.invoke("hi", context_id="ctx-1")
+    assert graph.configs == [{"configurable": {"session": "ctx-1"}}]
+
+
+@pytest.mark.asyncio
+async def test_thread_id_mapping_disabled():
+    graph = ConfigRecordingGraph()
+    adapter = LangGraphAdapter(graph=graph, input_key="query", thread_id_key=None)
+    await adapter.invoke("hi", context_id="ctx-1")
+    assert graph.configs == [None]
+
+
+@pytest.mark.asyncio
+async def test_user_config_kept_and_merged():
+    graph = ConfigRecordingGraph()
+    user_config = {"recursion_limit": 5, "configurable": {"user_id": "u1"}}
+    adapter = LangGraphAdapter(graph=graph, input_key="query", config=user_config)
+    await adapter.invoke("hi", context_id="ctx-1")
+    assert graph.configs == [
+        {"recursion_limit": 5, "configurable": {"user_id": "u1", "thread_id": "ctx-1"}}
+    ]
+    # The caller's dict is not mutated across requests.
+    assert user_config == {"recursion_limit": 5, "configurable": {"user_id": "u1"}}
+
+
+@pytest.mark.asyncio
+async def test_user_supplied_thread_id_wins():
+    graph = ConfigRecordingGraph()
+    adapter = LangGraphAdapter(
+        graph=graph, input_key="query", config={"configurable": {"thread_id": "fixed"}},
+    )
+    await adapter.invoke("hi", context_id="ctx-1")
+    assert graph.configs == [{"configurable": {"thread_id": "fixed"}}]
+
+
+@pytest.mark.asyncio
+async def test_no_context_id_passes_user_config_only():
+    graph = ConfigRecordingGraph()
+    adapter = LangGraphAdapter(graph=graph, input_key="query", config={"recursion_limit": 5})
+    await adapter.invoke("hi")
+    assert graph.configs == [{"recursion_limit": 5}]
