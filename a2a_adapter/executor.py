@@ -216,11 +216,14 @@ class AdapterAgentExecutor(AgentExecutor):
                     )
                 prev_chunk = chunk
         except Exception:
-            if chunks:
+            # Close the artifact with the held-back chunk, which has not
+            # been sent yet; re-sending chunks[-1] would duplicate content.
+            if prev_chunk is not None:
+                chunks.append(prev_chunk)
                 await updater.add_artifact(
-                    self._to_parts(chunks[-1]),
+                    self._to_parts(prev_chunk),
                     artifact_id=artifact_id,
-                    append=True,
+                    append=len(chunks) > 1,
                     last_chunk=True,
                 )
             raise
