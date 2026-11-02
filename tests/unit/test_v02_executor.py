@@ -401,3 +401,18 @@ async def test_execute_invoke_all_empty_parts_skips_artifact():
         updater_instance.add_artifact.assert_not_awaited()
         updater_instance.complete.assert_awaited_once()
         updater_instance.failed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_invoke_empty_string_skips_artifact():
+    """An empty str result emits no empty-text artifact but still completes."""
+    executor = AdapterAgentExecutor(InvokeOnlyAdapter(""))
+
+    with patch("a2a_adapter.executor.TaskUpdater") as MockUpdater:
+        updater_instance = AsyncMock(spec=TaskUpdater)
+        MockUpdater.return_value = updater_instance
+
+        await executor.execute(make_mock_context(), make_mock_event_queue())
+
+        updater_instance.add_artifact.assert_not_awaited()
+        updater_instance.complete.assert_awaited_once()

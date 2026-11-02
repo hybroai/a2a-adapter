@@ -33,7 +33,7 @@ from httpx import (
     HTTPStatusError,
     PoolTimeout,
     ReadTimeout,
-    RemoteProtocolError,
+    TransportError,
 )
 
 from a2a.server.agent_execution import RequestContext
@@ -95,7 +95,7 @@ class N8nAdapter(BaseA2AAdapter):
     Retries: by default only failures where the request cannot have reached
     n8n are retried (connection failed, connect timeout, connection pool
     timeout), so one message never runs the workflow twice. A 5xx, a read
-    timeout or a dropped connection may mean the workflow already ran (or is
+    timeout or a dropped or reset connection may mean the workflow already ran (or is
     still running) and is not retried unless ``retry_on_server_error=True``,
     which is only safe when the webhook is idempotent. 4xx responses are
     never retried.
@@ -355,6 +355,13 @@ class N8nAdapter(BaseA2AAdapter):
             payload["metadata"] = {**metadata, "context_id": context_id}
         elif "context_id" not in self.payload_template:
             payload["context_id"] = context_id
+            metadata = payload.get("metadata")
+            if (
+                "metadata" not in self.payload_template
+                and isinstance(metadata, dict)
+                and "context_id" in metadata
+            ):
+                payload["metadata"] = {**metadata, "context_id": context_id}
 
     async def _build_multimodal_payload(
         self,
@@ -425,7 +432,10 @@ class N8nAdapter(BaseA2AAdapter):
 
     async def _fetch_url(self, url: str) -> bytes:
         """Download a client-supplied URL, capped at max_file_bytes."""
-        scheme = httpx.URL(url).scheme
+        try:
+            scheme = httpx.URL(url).scheme
+        except httpx.InvalidURL as e:
+            raise ValueError(f"Invalid file URL {url!r}: {e}") from e
         if scheme not in ("http", "https"):
             raise ValueError(f"File URL scheme {scheme!r} not allowed: {url}")
 
@@ -457,7 +467,17 @@ class N8nAdapter(BaseA2AAdapter):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client (lazy init)."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            # Expire idle sockets before n8n's (Node's default 5s) keep-alive
+            # timeout closes them; a request on a socket the server just
+            # closed fails as RemoteProtocolError, which is not retried.
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout,
+                limits=httpx.Limits(
+                    max_connections=100,
+                    max_keepalive_connections=20,
+                    keepalive_expiry=2.0,
+                ),
+            )
         return self._client
 
     async def _post_with_retry(self, payload: Dict[str, Any]) -> Any:
@@ -466,8 +486,9 @@ class N8nAdapter(BaseA2AAdapter):
         Error policy:
             - 4xx: no retry, raise ValueError
             - connect failures (request never sent): retry, then raise RuntimeError
-            - 5xx / read timeout / dropped connection: the workflow may have
-              run, so raise RuntimeError at once unless retry_on_server_error
+            - 5xx / read timeout / other transport errors (reset or dropped
+              connection): the workflow may have run, so raise RuntimeError
+              at once unless retry_on_server_error
         """
         client = await self._get_client()
         req_id = str(uuid.uuid4())
@@ -504,16 +525,6 @@ class N8nAdapter(BaseA2AAdapter):
                     f"(req_id={req_id}, attempts={attempt + 1}): {e}"
                 ) from e
 
-            except (ReadTimeout, RemoteProtocolError) as e:
-                # n8n may have received the request and started the workflow.
-                if self.retry_on_server_error and attempt < self.max_retries:
-                    await asyncio.sleep(self.backoff * (2 ** attempt))
-                    continue
-                raise RuntimeError(
-                    f"n8n upstream timeout or dropped connection "
-                    f"(req_id={req_id}, attempts={attempt + 1}): {e}"
-                ) from e
-
             except (ConnectError, ConnectTimeout, PoolTimeout) as e:
                 # The request was never sent, so retrying cannot re-run the workflow.
                 if attempt < self.max_retries:
@@ -521,6 +532,17 @@ class N8nAdapter(BaseA2AAdapter):
                     continue
                 raise RuntimeError(
                     f"n8n upstream unavailable/timeout after retries (req_id={req_id}): {e}"
+                ) from e
+
+            except TransportError as e:
+                # ReadTimeout, reset or dropped connection, ...: n8n may have
+                # received the request and started the workflow.
+                if self.retry_on_server_error and attempt < self.max_retries:
+                    await asyncio.sleep(self.backoff * (2 ** attempt))
+                    continue
+                raise RuntimeError(
+                    f"n8n upstream timeout or connection error "
+                    f"(req_id={req_id}, attempts={attempt + 1}): {e!r}"
                 ) from e
 
         raise RuntimeError("Unexpected error in retry loop.")
@@ -599,14 +621,13 @@ class N8nAdapter(BaseA2AAdapter):
             if not isinstance(ref, dict):
                 continue
             meta = {
-                "filename": ref.get("name"),
-                "media_type": ref.get("mime_type")
-                or ref.get("mimeType")
+                "filename": self._str_field(ref, "name"),
+                "media_type": self._str_field(ref, "mime_type", "mimeType")
                 or default_media_type,
             }
-            location = ref.get("url") or ref.get("uri")
+            location = self._str_field(ref, "url", "uri")
             data = ref.get("data")
-            if isinstance(location, str) and location:
+            if location:
                 parts.append(Part(url=location, **meta))
             elif isinstance(data, str) and data:
                 try:
@@ -624,6 +645,15 @@ class N8nAdapter(BaseA2AAdapter):
                     ref.get("name"),
                 )
         return parts
+
+    @staticmethod
+    def _str_field(ref: Dict[str, Any], *keys: str) -> str | None:
+        """Return the first non-empty string value among ``keys``."""
+        for key in keys:
+            value = ref.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════

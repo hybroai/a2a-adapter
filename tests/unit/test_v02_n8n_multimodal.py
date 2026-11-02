@@ -106,9 +106,15 @@ class TestFetchFileUrls:
         assert payload["files"][0]["uri"] == "http://example.com/doc.pdf"
 
     async def test_content_length_over_limit_raises(self, adapter):
-        adapter._client = _client_for(lambda req: httpx.Response(200, content=b"x" * 17))
+        async def body():
+            raise AssertionError("body read despite oversized Content-Length")
+            yield b""
 
-        with pytest.raises(ValueError, match="exceeds"):
+        adapter._client = _client_for(
+            lambda req: httpx.Response(200, headers={"Content-Length": "17"}, content=body())
+        )
+
+        with pytest.raises(ValueError, match=r"\(17 > 16\)"):
             await adapter._build_multimodal_payload(
                 "check this", "ctx-1", self._ctx("http://example.com/doc.pdf")
             )
@@ -141,14 +147,27 @@ class TestFetchFileUrls:
             )
 
     async def test_redirect_not_followed(self, adapter):
-        adapter._client = _client_for(
-            lambda req: httpx.Response(302, headers={"Location": "http://10.0.0.1/"})
-        )
+        seen = []
+
+        def handler(req):
+            seen.append(str(req.url))
+            if req.url.host == "example.com":
+                return httpx.Response(302, headers={"Location": "http://10.0.0.1/"})
+            return httpx.Response(200, content=b"internal")
+
+        adapter._client = _client_for(handler)
 
         with pytest.raises(ValueError, match="Failed to fetch"):
             await adapter._build_multimodal_payload(
                 "check this", "ctx-1", self._ctx("http://example.com/doc.pdf")
             )
+        assert seen == ["http://example.com/doc.pdf"]
+
+    async def test_invalid_url_raises_value_error(self, adapter):
+        adapter._client = _client_for(_fail_if_called)
+
+        with pytest.raises(ValueError):
+            await adapter._build_multimodal_payload("x", "ctx-1", self._ctx("http://a:port/"))
 
     async def test_connect_error_raises(self, adapter):
         def handler(req):
@@ -300,3 +319,15 @@ class TestExtractResponseMalformedRefs:
     def test_only_malformed_refs_gives_placeholder(self, adapter):
         parts = adapter._extract_response({"files": [{"name": "x"}], "images": None})
         assert [p.text for p in parts] == ["[Empty response]"]
+
+    def test_non_string_name_and_mime_ignored(self, adapter):
+        output = {"files": [{"url": "http://x/a.pdf", "name": 123, "mime_type": {}}]}
+        parts = adapter._extract_response(output)
+        assert len(parts) == 1
+        assert parts[0].url == "http://x/a.pdf"
+        assert parts[0].filename == ""
+
+    def test_non_string_url_falls_back_to_uri(self, adapter):
+        output = {"files": [{"url": {"bad": 1}, "uri": "http://x/a.pdf"}]}
+        parts = adapter._extract_response(output)
+        assert [p.url for p in parts] == ["http://x/a.pdf"]
