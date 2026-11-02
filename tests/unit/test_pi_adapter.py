@@ -1,12 +1,14 @@
 """Tests for the single-process, single-session Pi adapter."""
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
+from a2a_adapter.base_adapter import default_state_dir
 from a2a_adapter.exceptions import CancelledByAdapterError
 from a2a_adapter.integrations.pi import PiAdapter, PiTurnAbortedError
 from a2a_adapter.loader import load_adapter
@@ -75,6 +77,19 @@ def adapter(tmp_path, fake_rpc) -> PiAdapter:
 
 
 class TestPiAdapter:
+    def test_default_session_dir_is_per_user_and_per_project(self, tmp_path):
+        proj_a = tmp_path / "proj-a"
+        proj_b = tmp_path / "proj-b"
+        a = PiAdapter(working_dir=str(proj_a))
+        b = PiAdapter(working_dir=str(proj_b))
+        assert a.session_dir == os.path.join(default_state_dir("pi", str(proj_a)), "sessions")
+        assert not a.session_dir.startswith(str(proj_a) + os.sep)
+        assert a.session_dir != b.session_dir
+
+    def test_explicit_session_dir_wins(self, tmp_path):
+        a = PiAdapter(working_dir=str(tmp_path), session_dir=str(tmp_path / "s"))
+        assert a.session_dir == str(tmp_path / "s")
+
     @pytest.mark.asyncio
     async def test_lazy_starts_once_and_reuses_process(self, adapter, fake_rpc):
         first = await adapter.invoke("first", context_id="ctx-1", context=_context("task-1"))

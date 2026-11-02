@@ -15,7 +15,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from a2a_adapter.integrations.claude_code import ClaudeCodeAdapter
-from a2a_adapter.base_adapter import AdapterMetadata
+from a2a_adapter.base_adapter import AdapterMetadata, default_state_dir
 from a2a_adapter.exceptions import CancelledByAdapterError
 from a2a_adapter.loader import load_adapter
 from a2a_adapter.server import build_agent_card, to_a2a
@@ -149,8 +149,8 @@ class TestBuildCommand:
         assert cmd.used_resume is False
 
     def test_command_with_session(self, adapter):
-        adapter._sessions[f"{adapter.session_id}-ctx-1"] = "sess-xyz"
-        cmd = adapter._build_command("test", f"{adapter.session_id}-ctx-1")
+        adapter._sessions["ctx-1"] = "sess-xyz"
+        cmd = adapter._build_command("test", "ctx-1")
         assert "--resume" in cmd.args
         idx = cmd.args.index("--resume")
         assert cmd.args[idx + 1] == "sess-xyz"
@@ -484,7 +484,7 @@ class TestInvoke:
 
         # Assistant text is the response, not result.result
         assert result == "Hello World"
-        assert adapter._sessions[f"{adapter.session_id}-ctx-1"] == "sess-1"
+        assert adapter._sessions["ctx-1"] == "sess-1"
 
     @pytest.mark.asyncio
     async def test_invoke_error_exit_reports_result_error_over_stderr(self, adapter, mock_proc):
@@ -592,7 +592,7 @@ class TestStream:
         assert "chunk1" in chunks
         assert "chunk2" in chunks
         assert "metadata" not in chunks
-        assert adapter._sessions[f"{adapter.session_id}-ctx-s"] == "sess-stream"
+        assert adapter._sessions["ctx-s"] == "sess-stream"
 
     @pytest.mark.asyncio
     async def test_stream_error_exit_raises(self, adapter):
@@ -707,7 +707,7 @@ class TestStream:
                     pass
 
         # Session should still be saved from result event
-        assert adapter._sessions[f"{adapter.session_id}-ctx-no-text"] == "sess-meta"
+        assert adapter._sessions["ctx-no-text"] == "sess-meta"
 
     @pytest.mark.asyncio
     async def test_stream_empty_output_raises(self, adapter):
@@ -1011,7 +1011,7 @@ class TestStaleSessionRetry:
     async def test_invoke_stale_session_retries(self, adapter):
         """Non-zero exit + empty stdout + empty stderr + had --resume -> retry."""
         # Pre-set a session so --resume is used
-        adapter._sessions[f"{adapter.session_id}-ctx-stale"] = "old-session"
+        adapter._sessions["ctx-stale"] = "old-session"
 
         call_count = 0
 
@@ -1047,13 +1047,13 @@ class TestStaleSessionRetry:
         assert result == "retry success"
         assert call_count == 2
         # Session should be updated to the new one
-        assert adapter._sessions.get(f"{adapter.session_id}-ctx-stale") == "new-sess"
+        assert adapter._sessions.get("ctx-stale") == "new-sess"
 
     @pytest.mark.asyncio
     async def test_no_retry_on_signal_kill(self, adapter):
         """Signal kill (returncode < 0) + empty stdout + had --resume -> NO retry.
         Only positive exit codes trigger stale session retry."""
-        adapter._sessions[f"{adapter.session_id}-ctx-sig"] = "old-session"
+        adapter._sessions["ctx-sig"] = "old-session"
 
         mock_proc = AsyncMock()
         mock_proc.communicate = AsyncMock(return_value=(b"", b""))
@@ -1072,7 +1072,7 @@ class TestStaleSessionRetry:
                 )
 
         # Session should NOT have been cleared (no stale retry path taken)
-        assert adapter._sessions.get(f"{adapter.session_id}-ctx-sig") == "old-session"
+        assert adapter._sessions.get("ctx-sig") == "old-session"
 
     @pytest.mark.asyncio
     async def test_invoke_no_retry_without_resume(self, adapter):
@@ -1097,7 +1097,7 @@ class TestStaleSessionRetry:
     async def test_invoke_no_retry_with_stderr(self, adapter):
         """Non-zero exit + empty stdout + had --resume BUT stderr has content
         -> NO retry. Stderr indicates a real error (auth, env, etc.)."""
-        adapter._sessions[f"{adapter.session_id}-ctx-stderr"] = "valid-session"
+        adapter._sessions["ctx-stderr"] = "valid-session"
 
         mock_proc = AsyncMock()
         mock_proc.communicate = AsyncMock(
@@ -1117,12 +1117,12 @@ class TestStaleSessionRetry:
                 )
 
         # Session should NOT have been cleared — it's still valid
-        assert adapter._sessions.get(f"{adapter.session_id}-ctx-stderr") == "valid-session"
+        assert adapter._sessions.get("ctx-stderr") == "valid-session"
 
     @pytest.mark.asyncio
     async def test_stream_no_retry_with_stderr(self, adapter):
         """stream() with stderr content should NOT trigger stale retry."""
-        adapter._sessions[f"{adapter.session_id}-ctx-stderr-s"] = "valid-session"
+        adapter._sessions["ctx-stderr-s"] = "valid-session"
 
         mock_proc = AsyncMock()
         mock_proc.pid = 1
@@ -1145,12 +1145,12 @@ class TestStaleSessionRetry:
                     pass
 
         # Session should NOT have been cleared
-        assert adapter._sessions.get(f"{adapter.session_id}-ctx-stderr-s") == "valid-session"
+        assert adapter._sessions.get("ctx-stderr-s") == "valid-session"
 
     @pytest.mark.asyncio
     async def test_stream_stale_session_retries(self, adapter):
         """stream() also retries on stale session (both stdout and stderr empty)."""
-        adapter._sessions[f"{adapter.session_id}-ctx-ss"] = "old-session"
+        adapter._sessions["ctx-ss"] = "old-session"
 
         call_count = 0
 
@@ -1192,12 +1192,12 @@ class TestStaleSessionRetry:
 
         assert "stream retry ok" in chunks
         assert call_count == 2
-        assert adapter._sessions.get(f"{adapter.session_id}-ctx-ss") == "new-sess-s"
+        assert adapter._sessions.get("ctx-ss") == "new-sess-s"
 
     @pytest.mark.asyncio
     async def test_stream_no_retry_on_signal_kill(self, adapter):
         """Signal kill (returncode < 0) + no output + had --resume -> NO retry in stream."""
-        adapter._sessions[f"{adapter.session_id}-ctx-sig-s"] = "old-session"
+        adapter._sessions["ctx-sig-s"] = "old-session"
 
         mock_proc = AsyncMock()
         mock_proc.pid = 1
@@ -1220,13 +1220,59 @@ class TestStaleSessionRetry:
                     pass
 
         # Session should NOT have been cleared
-        assert adapter._sessions.get(f"{adapter.session_id}-ctx-sig-s") == "old-session"
+        assert adapter._sessions.get("ctx-sig-s") == "old-session"
 
 
 # ──── Test: Session persistence (D4) ────
 
 
 class TestSessionPersistence:
+    @pytest.mark.asyncio
+    async def test_session_resumes_after_restart(self, tmp_path, mock_proc):
+        """A session recorded by one process is resumed by the next one on
+        the same store for the same context_id."""
+        store = str(tmp_path / "sessions.json")
+        first = ClaudeCodeAdapter(working_dir=str(tmp_path), session_store_path=store)
+        stdout = "\n".join([
+            json.dumps(_assistant_event("hi")),
+            json.dumps(_result_event("metadata", "sess-persisted")),
+        ])
+        mock_proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
+        with patch(
+            "a2a_adapter.base_adapter.create_subprocess_exec",
+            return_value=mock_proc,
+        ):
+            await first.invoke("hello", context_id="ctx-1", context=_make_context("t1"))
+
+        second = ClaudeCodeAdapter(working_dir=str(tmp_path), session_store_path=store)
+        with patch(
+            "a2a_adapter.base_adapter.create_subprocess_exec",
+            return_value=mock_proc,
+        ) as spawn:
+            await second.invoke("again", context_id="ctx-1", context=_make_context("t2"))
+
+        args = spawn.call_args[0]
+        assert args[args.index("--resume") + 1] == "sess-persisted"
+        cmd = second._build_command("again", "ctx-1")
+        assert cmd.args[cmd.args.index("--resume") + 1] == "sess-persisted"
+
+    @pytest.mark.asyncio
+    async def test_session_keys_are_context_ids(self, adapter, mock_proc):
+        """Sessions are keyed by context_id, or "_default" without one, so
+        the keys mean the same thing in every process."""
+        stdout = "\n".join([
+            json.dumps(_assistant_event("ok")),
+            json.dumps(_result_event("metadata", "sess-1")),
+        ])
+        mock_proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
+        with patch(
+            "a2a_adapter.base_adapter.create_subprocess_exec",
+            return_value=mock_proc,
+        ):
+            await adapter.invoke("a", context_id="ctx-1", context=_make_context("t1"))
+            await adapter.invoke("b", context=_make_context("t2"))
+        assert adapter._sessions == {"ctx-1": "sess-1", "_default": "sess-1"}
+
     def test_save_and_load_roundtrip(self, tmp_path):
         store = str(tmp_path / "sessions.json")
         a1 = ClaudeCodeAdapter(
@@ -1273,11 +1319,25 @@ class TestSessionPersistence:
         assert a._sessions == {}
 
     def test_default_session_store_path(self, tmp_path):
-        a = ClaudeCodeAdapter(working_dir=str(tmp_path))
-        expected = os.path.join(
-            str(tmp_path), ".a2a-adapter", "claude-code", "sessions.json"
+        """The default store lives in the per-user state dir, not in the
+        project the agent works on, and differs per working dir."""
+        proj_a = tmp_path / "proj-a"
+        proj_b = tmp_path / "proj-b"
+        a = ClaudeCodeAdapter(working_dir=str(proj_a))
+        b = ClaudeCodeAdapter(working_dir=str(proj_b))
+        assert a._session_store_path == os.path.join(
+            default_state_dir("claude-code", str(proj_a)), "sessions.json"
         )
-        assert a._session_store_path == expected
+        assert not a._session_store_path.startswith(str(proj_a) + os.sep)
+        assert a._session_store_path != b._session_store_path
+
+    def test_default_store_survives_restart(self, tmp_path):
+        a1 = ClaudeCodeAdapter(working_dir=str(tmp_path))
+        a1._sessions = {"ctx-1": "sess-A"}
+        a1._save_sessions()
+        a2 = ClaudeCodeAdapter(working_dir=str(tmp_path))
+        assert a2._sessions == {"ctx-1": "sess-A"}
+        assert not (tmp_path / ".a2a-adapter").exists()
 
     def test_save_sessions_basename_path(self, tmp_path, monkeypatch):
         """session_store_path with no directory (bare basename) should not
@@ -1460,7 +1520,7 @@ class TestStreamingStdoutEOF:
 
         # Verify: response was collected correctly
         assert "response text" in chunks
-        assert adapter._sessions[f"{adapter.session_id}-ctx-eof"] == "sess-eof"
+        assert adapter._sessions["ctx-eof"] == "sess-eof"
 
         # KEY ASSERTION: proc.kill() was NOT called (no abort path triggered)
         mock_proc.kill.assert_not_called()

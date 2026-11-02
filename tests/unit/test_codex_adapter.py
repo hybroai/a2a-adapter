@@ -14,7 +14,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from a2a_adapter.integrations.codex import CodexAdapter
-from a2a_adapter.base_adapter import AdapterMetadata, CommandResult, ParseResult
+from a2a_adapter.base_adapter import AdapterMetadata, CommandResult, ParseResult, default_state_dir
 from a2a_adapter.exceptions import CancelledByAdapterError
 from a2a_adapter.loader import load_adapter
 from a2a_adapter.server import build_agent_card, to_a2a
@@ -905,11 +905,25 @@ class TestSessionPersistence:
         assert a._sessions == {}
 
     def test_default_session_store_path(self, tmp_path):
-        a = CodexAdapter(working_dir=str(tmp_path))
-        expected = os.path.join(
-            str(tmp_path), ".a2a-adapter", "codex", "sessions.json"
+        """The default store lives in the per-user state dir, not in the
+        project the agent works on, and differs per working dir."""
+        proj_a = tmp_path / "proj-a"
+        proj_b = tmp_path / "proj-b"
+        a = CodexAdapter(working_dir=str(proj_a))
+        b = CodexAdapter(working_dir=str(proj_b))
+        assert a._session_store_path == os.path.join(
+            default_state_dir("codex", str(proj_a)), "sessions.json"
         )
-        assert a._session_store_path == expected
+        assert not a._session_store_path.startswith(str(proj_a) + os.sep)
+        assert a._session_store_path != b._session_store_path
+
+    def test_default_store_survives_restart(self, tmp_path):
+        a1 = CodexAdapter(working_dir=str(tmp_path))
+        a1._sessions = {"ctx-1": "sess-A"}
+        a1._save_sessions()
+        a2 = CodexAdapter(working_dir=str(tmp_path))
+        assert a2._sessions == {"ctx-1": "sess-A"}
+        assert not (tmp_path / ".a2a-adapter").exists()
 
 
 # ──── Test: Metadata ────

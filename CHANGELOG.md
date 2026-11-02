@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Claude Code, Codex and Pi session state now defaults to a per-user location,
+  `$XDG_STATE_HOME/a2a-adapter/<agent>/<hash of working dir>/` (or
+  `~/.local/state/a2a-adapter/...`), instead of `<working_dir>/.a2a-adapter/`,
+  which left an untracked folder in the agent's project. Explicit
+  `session_store_path` / `session_dir` arguments still win. Existing state is
+  not migrated: to keep it, move the contents of
+  `<working_dir>/.a2a-adapter/<agent>/` into the directory
+  `a2a_adapter.base_adapter.default_state_dir(<agent>, <working_dir>)` returns
+  (see the README), or delete the old folder
+
 ### Fixed
 
 - A stream that fails mid-flight now closes its artifact with the last chunk it
@@ -18,6 +30,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   managed `-p` / `-c`; Pi matches flags exactly. Claude Code still rejects
   them, since its parser reads glued short flags (`-print` is `-p`), and Codex
   still rejects glued forms of its managed flags such as `-opath` or `-C/tmp`
+- CLI adapter session stores are written atomically (temp file, then rename),
+  so a crash mid-write no longer corrupts `sessions.json` and drops every
+  saved session. A corrupt or unreadable store is now logged as a warning
+  instead of being reset silently
+- Claude Code conversations now resume after a server restart. Sessions were
+  keyed by a random per-process prefix, so saved `--resume` ids were never
+  matched again and the store filled with dead entries; they are now keyed by
+  the A2A `context_id` (`_default` without one, shared by every such request
+  and now kept across restarts), as Codex already did. The
+  `ClaudeCodeAdapter.session_id` attribute is removed. Entries saved by older
+  versions use the old keys and are never matched, so the old
+  `claude-code/sessions.json` is not worth moving
+- Hermes conversation history now survives a server restart: the SessionDB
+  session id is `a2a-<context_id>` instead of a random per-process prefix
+  plus the context id. A call without a `context_id` gets a fresh one-off
+  session; it used to share one session with every other such call in the
+  same process. The `HermesAdapter.session_id` attribute is removed. Since
+  Hermes's SessionDB is per user, two Hermes servers that see the same
+  `context_id` now share that conversation's history and its Hermes
+  task-scoped resources
 
 ## [0.2.15] - 2026-11-01
 
