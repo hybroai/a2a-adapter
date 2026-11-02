@@ -358,3 +358,46 @@ async def test_streaming_adapter_routes_to_stream():
                 await executor.execute(ctx, queue)
                 mock_stream.assert_awaited_once()
                 mock_invoke.assert_not_awaited()
+
+
+# ──── Test: invoke() drops empty Parts ────
+
+
+@pytest.mark.asyncio
+async def test_execute_invoke_filters_empty_parts():
+    """Parts with no content set must not reach the artifact (they serialize to {})."""
+    from a2a.types import Part
+
+    adapter = InvokeOnlyAdapter(
+        [Part(text="hello"), Part(), Part(text=""), Part(url="http://x/f.pdf")]
+    )
+    executor = AdapterAgentExecutor(adapter)
+
+    with patch("a2a_adapter.executor.TaskUpdater") as MockUpdater:
+        updater_instance = AsyncMock(spec=TaskUpdater)
+        MockUpdater.return_value = updater_instance
+
+        await executor.execute(make_mock_context(), make_mock_event_queue())
+
+        parts = updater_instance.add_artifact.call_args[0][0]
+        assert [p.WhichOneof("content") for p in parts] == ["text", "url"]
+        updater_instance.complete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_invoke_all_empty_parts_skips_artifact():
+    """Like the streaming path, an all-empty result emits no artifact but completes."""
+    from a2a.types import Part
+
+    adapter = InvokeOnlyAdapter([Part(), Part(text="")])
+    executor = AdapterAgentExecutor(adapter)
+
+    with patch("a2a_adapter.executor.TaskUpdater") as MockUpdater:
+        updater_instance = AsyncMock(spec=TaskUpdater)
+        MockUpdater.return_value = updater_instance
+
+        await executor.execute(make_mock_context(), make_mock_event_queue())
+
+        updater_instance.add_artifact.assert_not_awaited()
+        updater_instance.complete.assert_awaited_once()
+        updater_instance.failed.assert_not_awaited()

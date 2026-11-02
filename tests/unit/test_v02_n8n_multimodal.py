@@ -248,3 +248,55 @@ class TestExtractResponse:
         parts = adapter._extract_response([{"output": "from list"}])
         assert len(parts) == 1
         assert "from list" in parts[0].text
+
+
+class TestExtractResponseMalformedRefs:
+    """File/image refs without a usable location must not become empty Parts."""
+
+    @pytest.fixture
+    def adapter(self):
+        return N8nAdapter(
+            webhook_url="http://localhost:5678/webhook/test",
+            multimodal_mode=True,
+        )
+
+    @staticmethod
+    def _assert_no_empty_parts(parts):
+        assert all(p.WhichOneof("content") is not None for p in parts)
+
+    def test_file_ref_without_location_skipped(self, adapter):
+        output = {"output": "done", "files": [{"name": "report.pdf"}], "images": [{}]}
+        parts = adapter._extract_response(output)
+        self._assert_no_empty_parts(parts)
+        assert [p.text for p in parts] == ["done"]
+
+    def test_file_ref_with_inline_data_becomes_raw_part(self, adapter):
+        output = {
+            "files": [
+                {
+                    "name": "a.txt",
+                    "mime_type": "text/plain",
+                    "data": base64.b64encode(b"inline").decode(),
+                }
+            ]
+        }
+        parts = adapter._extract_response(output)
+        assert len(parts) == 1
+        assert parts[0].raw == b"inline"
+        assert parts[0].filename == "a.txt"
+        assert parts[0].media_type == "text/plain"
+
+    def test_file_ref_with_invalid_base64_skipped(self, adapter):
+        output = {"output": "done", "files": [{"name": "a.txt", "data": "not base64!"}]}
+        parts = adapter._extract_response(output)
+        self._assert_no_empty_parts(parts)
+        assert [p.text for p in parts] == ["done"]
+
+    @pytest.mark.parametrize("value", [None, "files.pdf", {"url": "http://x/a"}, 3])
+    def test_non_list_file_field_treated_as_empty(self, adapter, value):
+        parts = adapter._extract_response({"output": "done", "files": value, "images": value})
+        assert [p.text for p in parts] == ["done"]
+
+    def test_only_malformed_refs_gives_placeholder(self, adapter):
+        parts = adapter._extract_response({"files": [{"name": "x"}], "images": None})
+        assert [p.text for p in parts] == ["[Empty response]"]

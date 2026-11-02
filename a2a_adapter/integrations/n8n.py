@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import time
@@ -573,32 +574,55 @@ class N8nAdapter(BaseA2AAdapter):
         if text:
             parts.append(Part(text=text))
 
-        if self.file_field in output:
-            for file_ref in output[self.file_field]:
-                if isinstance(file_ref, dict):
-                    parts.append(
-                        Part(
-                            url=file_ref.get("url") or file_ref.get("uri"),
-                            filename=file_ref.get("name"),
-                            media_type=file_ref.get("mime_type")
-                            or file_ref.get("mimeType"),
-                        )
-                    )
-
-        if self.image_field in output:
-            for img_ref in output[self.image_field]:
-                if isinstance(img_ref, dict):
-                    parts.append(
-                        Part(
-                            url=img_ref.get("url") or img_ref.get("uri"),
-                            filename=img_ref.get("name"),
-                            media_type=img_ref.get("mime_type")
-                            or img_ref.get("mimeType", "image/png"),
-                        )
-                    )
+        parts.extend(self._file_ref_parts(output.get(self.file_field), None))
+        parts.extend(self._file_ref_parts(output.get(self.image_field), "image/png"))
 
         if not parts:
             return [Part(text="[Empty response]")]
+        return parts
+
+    def _file_ref_parts(
+        self, refs: Any, default_media_type: str | None
+    ) -> list[Part]:
+        """Convert response file refs to Parts, skipping unusable ones.
+
+        A ref becomes a url Part when it has ``url``/``uri``, or a raw Part
+        when it has base64 ``data``. Refs with neither, invalid base64, or a
+        field that is not a list (e.g. ``null``) yield nothing, so no empty
+        Part reaches the wire.
+        """
+        if not isinstance(refs, list):
+            return []
+
+        parts: list[Part] = []
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            meta = {
+                "filename": ref.get("name"),
+                "media_type": ref.get("mime_type")
+                or ref.get("mimeType")
+                or default_media_type,
+            }
+            location = ref.get("url") or ref.get("uri")
+            data = ref.get("data")
+            if isinstance(location, str) and location:
+                parts.append(Part(url=location, **meta))
+            elif isinstance(data, str) and data:
+                try:
+                    raw = base64.b64decode(data, validate=True)
+                except (binascii.Error, ValueError):
+                    logger.warning(
+                        "Skipping n8n file ref %r with invalid base64 data",
+                        ref.get("name"),
+                    )
+                    continue
+                parts.append(Part(raw=raw, **meta))
+            else:
+                logger.warning(
+                    "Skipping n8n file ref %r with no url, uri or data",
+                    ref.get("name"),
+                )
         return parts
 
 

@@ -157,7 +157,10 @@ class AdapterAgentExecutor(AgentExecutor):
                 f"Expected str or list[Part]."
             )
 
-        await updater.add_artifact(parts, name="response")
+        # Match the streaming path: Parts with no content serialize to {}.
+        parts = [p for p in parts if not self._is_empty_chunk(p)]
+        if parts:
+            await updater.add_artifact(parts, name="response")
 
         message = updater.new_agent_message([Part(text=response_text)])
         await updater.complete(message=message)
