@@ -128,14 +128,16 @@ def test_openclaw_cli_maps_owned_options_and_forwards_native_args(tmp_path):
     adapter = serve.call_args.args[0]
     assert isinstance(adapter, OpenClawAdapter)
     assert adapter.working_directory == str(tmp_path.resolve())
-    assert adapter._build_command("hello", "session") == [
+    command = adapter._build_command("hello", "session")
+    assert command.stdin == "hello"
+    assert command.args == [
         "openclaw",
         "agent",
         "--native-option",
         "value",
         "--local",
-        "--message",
-        "hello",
+        "--message-file",
+        "-",
         "--json",
         "--session-id",
         "session",
@@ -177,6 +179,10 @@ def test_help_aliases_include_usage(argv, capsys):
         ("claude", "-print"),
         ("claude", "-color"),
         ("openclaw", "--message"),
+        ("openclaw", "--message-file"),
+        ("openclaw", "--message-file=prompt.md"),
+        ("openclaw", "-m"),
+        ("openclaw", "-mhello"),
     ],
 )
 def test_cli_rejects_adapter_managed_native_options(tmp_path, agent, managed_option):
