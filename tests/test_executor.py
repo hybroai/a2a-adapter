@@ -317,6 +317,39 @@ class TestExecuteStreaming:
         ]
         assert TaskState.TASK_STATE_FAILED in states
 
+    async def test_streaming_failure_flushes_held_chunk(self, ctx, event_queue):
+        """On failure the held-back chunk is sent once to close the artifact;
+        no earlier chunk is duplicated."""
+        adapter = FailingStreamAdapter(["A", "B", "C"])
+        executor = AdapterAgentExecutor(adapter)
+
+        await executor.execute(ctx, event_queue)
+
+        events = await _collect_events(event_queue)
+        artifact_events = [
+            e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"
+        ]
+        assert [e.artifact.parts[0].text for e in artifact_events] == ["A", "B", "C"]
+        assert [e.append for e in artifact_events] == [False, True, True]
+        assert [e.last_chunk for e in artifact_events] == [False, False, True]
+        assert len({e.artifact.artifact_id for e in artifact_events}) == 1
+
+    async def test_streaming_failure_after_single_chunk(self, ctx, event_queue):
+        """A single chunk followed by a failure is delivered as a closed
+        artifact instead of being dropped."""
+        adapter = FailingStreamAdapter(["only"])
+        executor = AdapterAgentExecutor(adapter)
+
+        await executor.execute(ctx, event_queue)
+
+        events = await _collect_events(event_queue)
+        artifact_events = [
+            e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"
+        ]
+        assert [e.artifact.parts[0].text for e in artifact_events] == ["only"]
+        assert artifact_events[0].append is False
+        assert artifact_events[0].last_chunk is True
+
     async def test_streaming_failure_no_chunks_still_fails(self, ctx, event_queue):
         """When stream() raises immediately (no chunks emitted),
         the task should enter failed state without artifact cleanup."""

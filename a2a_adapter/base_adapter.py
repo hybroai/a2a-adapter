@@ -339,6 +339,13 @@ class BaseA2AAdapter(ABC):
                 raise RuntimeError(
                     f"Command timed out after {self.timeout} seconds"
                 )
+            except asyncio.CancelledError:
+                # Task cancelled (tasks/cancel or shutdown): don't orphan the child
+                self._killed_tasks.discard(task_id)
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+                raise
         finally:
             self._active_processes.pop(task_id, None)
 

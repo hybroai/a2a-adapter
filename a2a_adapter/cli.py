@@ -63,6 +63,9 @@ _MANAGED_OPTIONS = {
     "claude": _CLAUDE_CODE_MANAGED_OPTIONS,
     "openclaw": _OPENCLAW_MANAGED_OPTIONS,
 }
+# Agents whose parsers (commander, clap) accept glued short options, so
+# "-pfoo" or "-print" reaches them as "-p". Pi matches each flag exactly.
+_GLUED_SHORT_OPTION_AGENTS = {"codex", "claude"}
 _AGENT_DISPLAY_NAMES = {
     "pi": "Pi",
     "codex": "Codex",
@@ -164,10 +167,14 @@ def _option_name(value: str) -> str:
     return value.split("=", 1)[0]
 
 
-def _managed_option(value: str, managed: set[str]) -> str | None:
+def _managed_option(
+    value: str, managed: set[str], *, glued_short: bool
+) -> str | None:
     option_name = _option_name(value)
     if option_name in managed:
         return option_name
+    if not glued_short:
+        return None
 
     for option in sorted(managed):
         if len(option) == 2 and option.startswith("-") and value.startswith(option):
@@ -182,7 +189,9 @@ def _validate_agent_args(
 ) -> None:
     managed = _MANAGED_OPTIONS[agent]
     for value in agent_args:
-        option = _managed_option(value, managed)
+        option = _managed_option(
+            value, managed, glued_short=agent in _GLUED_SHORT_OPTION_AGENTS
+        )
         if option is not None:
             parser.error(
                 f"{agent} option {option!r} is managed by a2a-adapter and cannot be passed after '--'"
