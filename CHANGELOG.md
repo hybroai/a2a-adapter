@@ -35,6 +35,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   seconds in total, and fails the request if a fetch fails instead of
   dropping the file. Private and internal addresses are not
   blocked, so enable it only for trusted clients
+- `OpenClawAdapter` now runs on the shared CLI subprocess runtime, like
+  Claude Code and Codex. It sends the prompt on stdin with
+  `--message-file -` instead of `--message <text>`, so it needs an OpenClaw
+  release with `--message-file`; OpenClaw caps the prompt at 4 MiB.
+  Requests that map to the same OpenClaw session ID now run one at a time;
+  that includes all requests without a `context_id`, which share the default
+  session. Error messages now read `Command failed with exit code ...`,
+  `Command timed out after ...` and `Command returned empty output` (no
+  `OpenClaw` prefix), a missing `working_directory` raises
+  `Working directory does not exist`, and a failed run reports the `error`
+  from OpenClaw's JSON output before stderr. The private
+  `_current_process` attribute is gone; `_build_command()` returns a
+  `CommandResult`. The CLI also rejects `-m` (including glued forms
+  such as `-mhello`) and `--message-file` in pass-through OpenClaw arguments
 
 ### Fixed
 
@@ -88,6 +102,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `invoke()` results are filtered the same way as streamed chunks, a result
   with no content emits no artifact, and an empty text result completes with
   `[Empty response]` instead of an empty text Part
+- Cancelling an `OpenClawAdapter` task now ends it as canceled; the killed
+  child's exit code used to surface as a failed task
+- Concurrent `OpenClawAdapter` tasks each track their own subprocess, so
+  `tasks/cancel` kills the right one; a single shared slot used to be
+  overwritten, so cancel could kill another task's process or none
+- `OpenClawAdapter` prompts larger than the OS argument limit (128 KiB per
+  argument on Linux) no longer fail with `Argument list too long`
+- The legacy `OpenClawAgentAdapter` async mode now kills the `openclaw`
+  process when a task times out, instead of leaving it
+  running, and its push notifications serialize the task with
+  `MessageToDict`; they used to fail on a missing `model_dump()`
 
 ## [0.2.15] - 2026-11-01
 

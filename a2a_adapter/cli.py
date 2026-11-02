@@ -52,6 +52,8 @@ _CLAUDE_CODE_MANAGED_OPTIONS = {
 _OPENCLAW_MANAGED_OPTIONS = {
     "--local",
     "--message",
+    "-m",
+    "--message-file",
     "--json",
     "--session-id",
     "--thinking",
@@ -65,7 +67,7 @@ _MANAGED_OPTIONS = {
 }
 # Agents whose parsers (commander, clap) accept glued short options, so
 # "-pfoo" or "-print" reaches them as "-p". Pi matches each flag exactly.
-_GLUED_SHORT_OPTION_AGENTS = {"codex", "claude"}
+_GLUED_SHORT_OPTION_AGENTS = {"codex", "claude", "openclaw"}
 _AGENT_DISPLAY_NAMES = {
     "pi": "Pi",
     "codex": "Codex",

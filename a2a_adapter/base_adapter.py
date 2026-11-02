@@ -409,11 +409,12 @@ class BaseA2AAdapter(ABC):
                 f"Command failed with exit code {proc.returncode}: {detail}"
             )
 
-        if not stdout_text.strip():
+        output_text = self._select_invoke_output(stdout_text, stderr_text)
+        if not output_text.strip():
             raise RuntimeError("Command returned empty output")
 
         # 8. Parse (subclass hook)
-        result = self._parse_invoke_output(stdout_text, context_key)
+        result = self._parse_invoke_output(output_text, context_key)
 
         # 9. Persist session
         if result.session_id:
@@ -690,6 +691,14 @@ class BaseA2AAdapter(ABC):
     def _handle_stream_line(self, line: str) -> StreamEvent | None:
         """Parse one stdout line for streaming. Override if supports_streaming()."""
         raise NotImplementedError("Streaming CLI adapters must implement _handle_stream_line")
+
+    def _select_invoke_output(self, stdout_text: str, stderr_text: str) -> str:
+        """Pick the text to parse from a successful run. Optional.
+
+        Defaults to stdout. Override for CLIs that sometimes write their
+        result to stderr instead.
+        """
+        return stdout_text
 
     def _extract_error(self, stdout_text: str) -> str | None:
         """Return the CLI's own error message from stdout of a failed run. Optional.

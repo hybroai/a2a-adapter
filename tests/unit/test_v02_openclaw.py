@@ -1,6 +1,7 @@
 """Tests for the v0.2 OpenClawAdapter.
 
-Covers: invoke (subprocess execution), cancel (process kill), session ID
+Covers: invoke (subprocess execution on the base runtime, prompt via stdin),
+cancel (per-task process kill, CancelledByAdapterError), timeout, session ID
 sanitization, command building, output extraction, MIME detection, metadata,
 and integration with to_a2a / build_agent_card / load_adapter.
 """
@@ -16,7 +17,10 @@ from a2a_adapter.integrations.openclaw import (
     _INVALID_SESSION_CHARS_RE,
     _SESSION_ID_MAX_LEN,
 )
+from a2a.types import TaskState
+
 from a2a_adapter.base_adapter import AdapterMetadata
+from a2a_adapter.exceptions import CancelledByAdapterError
 from a2a_adapter.server import build_agent_card, to_a2a
 from a2a_adapter.loader import load_adapter
 
@@ -94,14 +98,11 @@ def test_build_command_basic():
         openclaw_path="/usr/bin/openclaw",
         thinking="medium",
     )
-    cmd = adapter._build_command("hello world", "session-1")
+    cmd = adapter._build_command("hello world", "session-1").args
     assert cmd[0] == "/usr/bin/openclaw"
     assert "agent" in cmd
     assert "--local" in cmd
     assert "--json" in cmd
-    assert "--message" in cmd
-    idx = cmd.index("--message")
-    assert cmd[idx + 1] == "hello world"
     assert "--session-id" in cmd
     idx = cmd.index("--session-id")
     assert cmd[idx + 1] == "session-1"
@@ -110,9 +111,21 @@ def test_build_command_basic():
     assert cmd[idx + 1] == "medium"
 
 
+def test_build_command_sends_message_on_stdin():
+    """The prompt goes through stdin (--message-file -), never argv."""
+    adapter = OpenClawAdapter()
+    result = adapter._build_command("hello world", "session-1")
+    assert result.stdin == "hello world"
+    assert result.used_resume is False
+    assert "--message" not in result.args
+    assert "hello world" not in result.args
+    idx = result.args.index("--message-file")
+    assert result.args[idx + 1] == "-"
+
+
 def test_build_command_with_agent_id():
     adapter = OpenClawAdapter(agent_id="research-agent")
-    cmd = adapter._build_command("test", "session-1")
+    cmd = adapter._build_command("test", "session-1").args
     assert "--agent" in cmd
     idx = cmd.index("--agent")
     assert cmd[idx + 1] == "research-agent"
@@ -120,7 +133,7 @@ def test_build_command_with_agent_id():
 
 def test_build_command_no_agent_id():
     adapter = OpenClawAdapter(agent_id=None)
-    cmd = adapter._build_command("test", "session-1")
+    cmd = adapter._build_command("test", "session-1").args
     assert "--agent" not in cmd
 
 
@@ -198,27 +211,115 @@ def test_mime_type_case_insensitive():
 
 # ──── Test: Invoke with mocked subprocess ────
 
+_SPAWN = "a2a_adapter.base_adapter.create_subprocess_exec"
+
+
+def _ok_output(text: str) -> bytes:
+    return json.dumps({"payloads": [{"text": text}], "meta": {}}).encode()
+
+
+class FakeProcess:
+    """Stand-in for an asyncio subprocess.
+
+    ``communicate`` blocks until ``finish()`` or ``kill()`` is called, so a
+    test can observe the process while it is running.
+    """
+
+    def __init__(self, stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0):
+        self._stdout = stdout
+        self._stderr = stderr
+        self._exit_code = returncode
+        self.returncode: int | None = None
+        self.stdin_data: bytes | None = None
+        self.killed = False
+        self.started = asyncio.Event()
+        self._done = asyncio.Event()
+
+    def finish(self) -> None:
+        self.returncode = self._exit_code
+        self._done.set()
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+        self._stdout = b""
+        self._done.set()
+
+    async def wait(self) -> int:
+        await self._done.wait()
+        return self.returncode
+
+    async def communicate(self, input: bytes | None = None):
+        self.stdin_data = input
+        self.started.set()
+        await self._done.wait()
+        return self._stdout, self._stderr
+
+
+def _finished(stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0) -> FakeProcess:
+    proc = FakeProcess(stdout, stderr, returncode)
+    proc.finish()
+    return proc
+
+
+def _ctx(task_id: str) -> MagicMock:
+    ctx = MagicMock()
+    ctx.task_id = task_id
+    return ctx
+
 
 @pytest.mark.asyncio
 async def test_invoke_success():
     """Test invoke with a mocked subprocess that returns valid JSON."""
     adapter = OpenClawAdapter(session_id="test")
+    proc = _finished(_ok_output("mocked response"))
 
-    mock_output = json.dumps({
-        "payloads": [{"text": "mocked response"}],
-        "meta": {},
-    })
-
-    mock_proc = AsyncMock()
-    mock_proc.communicate = AsyncMock(
-        return_value=(mock_output.encode(), b"")
-    )
-    mock_proc.returncode = 0
-
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch(_SPAWN, AsyncMock(return_value=proc)):
         result = await adapter.invoke("test message")
 
     assert result == "mocked response"
+
+
+@pytest.mark.asyncio
+async def test_invoke_writes_prompt_to_stdin():
+    adapter = OpenClawAdapter(session_id="test")
+    proc = _finished(_ok_output("ok"))
+    spawn = AsyncMock(return_value=proc)
+
+    with patch(_SPAWN, spawn):
+        await adapter.invoke("héllo there")
+
+    assert proc.stdin_data == "héllo there".encode("utf-8")
+    args = spawn.call_args.args
+    assert "héllo there" not in args
+    assert args[args.index("--message-file") + 1] == "-"
+
+
+@pytest.mark.asyncio
+async def test_invoke_large_prompt_stays_out_of_argv():
+    """Prompts beyond the OS argv limit (~128 KiB) must not go on the command line."""
+    adapter = OpenClawAdapter(session_id="test")
+    big = "x" * (512 * 1024)
+    proc = _finished(_ok_output("ok"))
+    spawn = AsyncMock(return_value=proc)
+
+    with patch(_SPAWN, spawn):
+        assert await adapter.invoke(big) == "ok"
+
+    assert max(len(a) for a in spawn.call_args.args) < 1024
+    assert proc.stdin_data == big.encode()
+
+
+@pytest.mark.asyncio
+async def test_invoke_uses_context_session_id():
+    adapter = OpenClawAdapter(session_id="base")
+    spawn = AsyncMock(return_value=_finished(_ok_output("ok")))
+
+    with patch(_SPAWN, spawn):
+        await adapter.invoke("hi", context_id="Ctx-1")
+
+    args = spawn.call_args.args
+    assert args[args.index("--session-id") + 1] == "base-ctx-1"
 
 
 @pytest.mark.asyncio
@@ -226,14 +327,18 @@ async def test_invoke_nonzero_exit():
     """Test invoke raises on non-zero exit code."""
     adapter = OpenClawAdapter(session_id="test")
 
-    mock_proc = AsyncMock()
-    mock_proc.communicate = AsyncMock(
-        return_value=(b"", b"error details")
-    )
-    mock_proc.returncode = 1
+    with patch(_SPAWN, AsyncMock(return_value=_finished(b"", b"error details", 1))):
+        with pytest.raises(RuntimeError, match="exit code 1: error details"):
+            await adapter.invoke("test")
 
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(RuntimeError, match="exit code 1"):
+
+@pytest.mark.asyncio
+async def test_invoke_nonzero_exit_prefers_json_error():
+    adapter = OpenClawAdapter(session_id="test")
+    stdout = json.dumps({"error": "model quota exceeded"}).encode()
+
+    with patch(_SPAWN, AsyncMock(return_value=_finished(stdout, b"warn: noise", 1))):
+        with pytest.raises(RuntimeError, match="model quota exceeded"):
             await adapter.invoke("test")
 
 
@@ -242,13 +347,7 @@ async def test_invoke_empty_output():
     """Test invoke raises on empty stdout and stderr."""
     adapter = OpenClawAdapter(session_id="test")
 
-    mock_proc = AsyncMock()
-    mock_proc.communicate = AsyncMock(
-        return_value=(b"", b"")  # Both stdout and stderr empty
-    )
-    mock_proc.returncode = 0
-
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch(_SPAWN, AsyncMock(return_value=_finished(b"", b""))):
         with pytest.raises(RuntimeError, match="empty output"):
             await adapter.invoke("test")
 
@@ -258,18 +357,7 @@ async def test_invoke_uses_stderr_when_stdout_empty():
     """Test invoke uses stderr when stdout is empty (OpenClaw stderr output bug)."""
     adapter = OpenClawAdapter(session_id="test")
 
-    mock_output = json.dumps({
-        "payloads": [{"text": "response from stderr"}],
-        "meta": {},
-    })
-
-    mock_proc = AsyncMock()
-    mock_proc.communicate = AsyncMock(
-        return_value=(b"", mock_output.encode())  # stdout empty, stderr has JSON
-    )
-    mock_proc.returncode = 0
-
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch(_SPAWN, AsyncMock(return_value=_finished(b"", _ok_output("response from stderr")))):
         result = await adapter.invoke("test message")
 
     assert result == "response from stderr"
@@ -280,13 +368,7 @@ async def test_invoke_invalid_json():
     """Test invoke raises on invalid JSON output."""
     adapter = OpenClawAdapter(session_id="test")
 
-    mock_proc = AsyncMock()
-    mock_proc.communicate = AsyncMock(
-        return_value=(b"not json", b"")
-    )
-    mock_proc.returncode = 0
-
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch(_SPAWN, AsyncMock(return_value=_finished(b"not json"))):
         with pytest.raises(RuntimeError, match="does not contain JSON object"):
             await adapter.invoke("test")
 
@@ -296,68 +378,193 @@ async def test_invoke_binary_not_found():
     """Test invoke raises FileNotFoundError when binary missing."""
     adapter = OpenClawAdapter(openclaw_path="/nonexistent/openclaw")
 
-    with patch(
-        "asyncio.create_subprocess_exec",
-        side_effect=FileNotFoundError("not found"),
-    ):
-        with pytest.raises(FileNotFoundError, match="not found"):
+    with patch(_SPAWN, AsyncMock(side_effect=FileNotFoundError("not found"))):
+        with pytest.raises(FileNotFoundError, match="/nonexistent/openclaw"):
             await adapter.invoke("test")
+
+
+@pytest.mark.asyncio
+async def test_invoke_runs_in_working_directory(tmp_path):
+    adapter = OpenClawAdapter(working_directory=str(tmp_path))
+    spawn = AsyncMock(return_value=_finished(_ok_output("ok")))
+
+    with patch(_SPAWN, spawn):
+        await adapter.invoke("hi")
+
+    assert spawn.call_args.kwargs["cwd"] == str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_invoke_passes_env_vars():
+    adapter = OpenClawAdapter(env_vars={"OPENCLAW_TEST_VAR": "1"})
+    spawn = AsyncMock(return_value=_finished(_ok_output("ok")))
+
+    with patch(_SPAWN, spawn):
+        await adapter.invoke("hi")
+
+    assert spawn.call_args.kwargs["env"]["OPENCLAW_TEST_VAR"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_timeout_kills_child():
+    adapter = OpenClawAdapter(timeout=0.05)
+    proc = FakeProcess(_ok_output("late"))
+
+    with patch(_SPAWN, AsyncMock(return_value=proc)):
+        with pytest.raises(RuntimeError, match="timed out"):
+            await asyncio.wait_for(adapter.invoke("hi", context=_ctx("t-timeout")), 2)
+
+    assert proc.killed
+    assert "t-timeout" not in adapter._active_processes
 
 
 # ──── Test: Cancel ────
 
 
 @pytest.mark.asyncio
-async def test_cancel_kills_process():
-    """Cancel should kill the tracked subprocess."""
+async def test_cancel_running_task_raises_cancelled_by_adapter():
+    """Cancel kills the child and invoke raises CancelledByAdapterError (not RuntimeError)."""
     adapter = OpenClawAdapter()
+    proc = FakeProcess(_ok_output("never"))
 
-    mock_proc = MagicMock()
-    mock_proc.returncode = None  # Still running
-    mock_proc.kill = MagicMock()
-    mock_proc.wait = AsyncMock()
+    with patch(_SPAWN, AsyncMock(return_value=proc)):
+        run = asyncio.create_task(adapter.invoke("hi", context=_ctx("t-1")))
+        await asyncio.wait_for(proc.started.wait(), 2)
+        await adapter.cancel(context=_ctx("t-1"))
+        with pytest.raises(CancelledByAdapterError, match="killed by cancel"):
+            await asyncio.wait_for(run, 2)
 
-    adapter._current_process = mock_proc
-    await adapter.cancel()
-    mock_proc.kill.assert_called_once()
-    mock_proc.wait.assert_called_once()
+    assert proc.killed
 
 
 @pytest.mark.asyncio
-async def test_cancel_no_process():
-    """Cancel is a no-op when no process is running."""
+async def test_cancel_through_executor_reports_canceled_not_failed():
+    """End to end through AdapterAgentExecutor: tasks/cancel yields a canceled task."""
+    from a2a_adapter.executor import AdapterAgentExecutor
+
+    adapter = OpenClawAdapter()
+    executor = AdapterAgentExecutor(adapter)
+    proc = FakeProcess(_ok_output("never"))
+    ctx = MagicMock()
+    ctx.task_id = "t-exec"
+    ctx.context_id = "c-exec"
+    ctx.current_task = None
+    ctx.get_user_input.return_value = "hi"
+    queue = AsyncMock()
+
+    with patch(_SPAWN, AsyncMock(return_value=proc)):
+        run = asyncio.create_task(executor.execute(ctx, queue))
+        await asyncio.wait_for(proc.started.wait(), 2)
+        await executor.cancel(ctx, queue)
+        await asyncio.wait_for(run, 2)
+
+    states = [
+        call.args[0].status.state
+        for call in queue.enqueue_event.call_args_list
+        if hasattr(call.args[0], "status")
+    ]
+    assert TaskState.TASK_STATE_CANCELED in states
+    assert TaskState.TASK_STATE_FAILED not in states
+
+
+@pytest.mark.asyncio
+async def test_concurrent_invokes_track_independent_processes():
+    """Two in-flight tasks keep their own process handle; cancel hits only its own."""
+    adapter = OpenClawAdapter()
+    proc_a = FakeProcess(_ok_output("from a"))
+    proc_b = FakeProcess(_ok_output("from b"))
+
+    with patch(_SPAWN, AsyncMock(side_effect=[proc_a, proc_b])):
+        run_a = asyncio.create_task(
+            adapter.invoke("a", context_id="ctx-a", context=_ctx("task-a"))
+        )
+        await asyncio.wait_for(proc_a.started.wait(), 2)
+        run_b = asyncio.create_task(
+            adapter.invoke("b", context_id="ctx-b", context=_ctx("task-b"))
+        )
+        await asyncio.wait_for(proc_b.started.wait(), 2)
+
+        assert adapter._active_processes["task-a"] is proc_a
+        assert adapter._active_processes["task-b"] is proc_b
+
+        await adapter.cancel(context=_ctx("task-a"))
+        assert proc_a.killed
+        assert not proc_b.killed
+
+        proc_b.finish()
+        assert await asyncio.wait_for(run_b, 2) == "from b"
+        with pytest.raises(CancelledByAdapterError):
+            await asyncio.wait_for(run_a, 2)
+
+
+@pytest.mark.asyncio
+async def test_same_session_runs_one_at_a_time():
+    """Two invokes for one OpenClaw session must not overlap."""
+    adapter = OpenClawAdapter()
+    proc_a = FakeProcess(_ok_output("first"))
+    proc_b = _finished(_ok_output("second"))
+    spawn = AsyncMock(side_effect=[proc_a, proc_b])
+
+    with patch(_SPAWN, spawn):
+        run_a = asyncio.create_task(
+            adapter.invoke("a", context_id="same", context=_ctx("task-a"))
+        )
+        await asyncio.wait_for(proc_a.started.wait(), 2)
+        run_b = asyncio.create_task(
+            adapter.invoke("b", context_id="same", context=_ctx("task-b"))
+        )
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert spawn.call_count == 1
+
+        proc_a.finish()
+        assert await asyncio.wait_for(run_a, 2) == "first"
+        assert await asyncio.wait_for(run_b, 2) == "second"
+
+    assert spawn.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cancel_queued_task_before_start():
+    adapter = OpenClawAdapter()
+    await adapter.cancel(context=_ctx("t-q"))
+    spawn = AsyncMock()
+
+    with patch(_SPAWN, spawn):
+        with pytest.raises(CancelledByAdapterError, match="before execution"):
+            await adapter.invoke("hi", context=_ctx("t-q"))
+
+    spawn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_context_is_noop():
     adapter = OpenClawAdapter()
     await adapter.cancel()  # Should not raise
 
 
 @pytest.mark.asyncio
 async def test_cancel_already_finished():
-    """Cancel is a no-op when process already finished."""
+    """Cancel does not kill a process that already exited."""
     adapter = OpenClawAdapter()
-
-    mock_proc = MagicMock()
-    mock_proc.returncode = 0  # Already finished
-    mock_proc.kill = MagicMock()
-
-    adapter._current_process = mock_proc
-    await adapter.cancel()
-    mock_proc.kill.assert_not_called()
+    proc = _finished()
+    proc.kill = MagicMock()
+    adapter._active_processes["t-done"] = proc
+    await adapter.cancel(context=_ctx("t-done"))
+    proc.kill.assert_not_called()
 
 
 # ──── Test: Close ────
 
 
 @pytest.mark.asyncio
-async def test_close_kills_process():
+async def test_close_kills_running_processes():
     adapter = OpenClawAdapter()
-    mock_proc = MagicMock()
-    mock_proc.returncode = None
-    mock_proc.kill = MagicMock()
-    mock_proc.wait = AsyncMock()
-    adapter._current_process = mock_proc
+    proc = FakeProcess()
+    adapter._active_processes["t-close"] = proc
     await adapter.close()
-    mock_proc.kill.assert_called_once()
-    mock_proc.wait.assert_called_once()
+    assert proc.killed
+    assert adapter._active_processes == {}
 
 
 # ──── Test: Streaming NOT supported ────
