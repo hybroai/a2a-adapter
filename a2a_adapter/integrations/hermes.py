@@ -22,6 +22,7 @@ import asyncio
 import logging
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from typing import AsyncIterator
 
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter
@@ -236,8 +237,11 @@ class HermesAdapter(BaseA2AAdapter):
         in a thread, and lets the agent persist updates internally.
         """
         session_id = self._session_key(context_id)
+        # A one-off session (no context_id) is never shared, so it needs no
+        # lock, and skipping it keeps _session_locks from growing per call.
+        lock = self._session_lock(session_id) if context_id else nullcontext()
 
-        async with self._session_lock(session_id):
+        async with lock:
             db = self._ensure_session_db()
             history = db.get_messages_as_conversation(session_id) or []
 
@@ -272,8 +276,11 @@ class HermesAdapter(BaseA2AAdapter):
         async iterator for the bridge layer.
         """
         session_id = self._session_key(context_id)
+        # A one-off session (no context_id) is never shared, so it needs no
+        # lock, and skipping it keeps _session_locks from growing per call.
+        lock = self._session_lock(session_id) if context_id else nullcontext()
 
-        async with self._session_lock(session_id):
+        async with lock:
             db = self._ensure_session_db()
             history = db.get_messages_as_conversation(session_id) or []
 

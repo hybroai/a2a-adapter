@@ -134,10 +134,15 @@ Codex's `--json`; those flags cannot be overridden after `--`.
 Claude Code, Codex and Pi keep their session state per user, outside the
 project: under `$XDG_STATE_HOME/a2a-adapter/<agent>/<hash of --cwd>/`, or
 `~/.local/state/a2a-adapter/...` when `XDG_STATE_HOME` is unset. Each working
-directory gets its own store, and an A2A conversation (`contextId`) picks up
-the same agent session after the server restarts. Versions up to 0.2.15 wrote it to
-`<cwd>/.a2a-adapter/` instead; that folder is no longer used and can be
-deleted.
+directory gets its own store. With Claude Code and Codex, each A2A
+conversation (`contextId`) resumes the same agent session after the server
+restarts; requests without a `contextId` all share one saved session. Pi keeps
+its single session (`--session-id`) for the working directory.
+
+Versions up to 0.2.15 kept this state in `<cwd>/.a2a-adapter/`, which is no
+longer read. To keep existing Codex or Pi sessions, move
+`<cwd>/.a2a-adapter/<agent>/` contents to the new location; otherwise delete
+the folder. Old Claude Code entries were never reused and can just be deleted.
 
 ### Configuring the Agent
 

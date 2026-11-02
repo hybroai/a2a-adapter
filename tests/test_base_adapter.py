@@ -251,6 +251,22 @@ class TestSessionStore:
         assert sorted(p.name for p in tmp_path.iterdir()) == ["sessions.json"]
 
 
+    def test_save_fsyncs_before_replacing(self, tmp_path, monkeypatch):
+        calls = []
+        real_fsync, real_replace = os.fsync, os.replace
+        monkeypatch.setattr(
+            "a2a_adapter.base_adapter.os.fsync",
+            lambda fd: (calls.append("fsync"), real_fsync(fd))[1],
+        )
+        monkeypatch.setattr(
+            "a2a_adapter.base_adapter.os.replace",
+            lambda a, b: (calls.append("replace"), real_replace(a, b))[1],
+        )
+        adapter = SleepingCliAdapter(tmp_path)
+        adapter._sessions = {"ctx-1": "sess-A"}
+        adapter._save_sessions()
+        assert calls == ["fsync", "replace"]
+
 class TestDefaultStateDir:
     def test_outside_working_dir_and_per_project(self, tmp_path, monkeypatch):
         state = tmp_path / "state"

@@ -35,7 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Claude Code conversations now resume after a server restart. Sessions were
   keyed by a random per-process prefix, so saved `--resume` ids were never
   matched again and the store filled with dead entries; they are now keyed by
-  the A2A `context_id` (`_default` without one), as Codex already did. The
+  the A2A `context_id` (`_default` without one, shared by every such request
+  and now kept across restarts), as Codex already did. The
   `ClaudeCodeAdapter.session_id` attribute is removed. Entries saved by older
   versions use the old keys and are never matched, so the old
   `claude-code/sessions.json` is not worth moving
@@ -43,7 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   session id is `a2a-<context_id>` instead of a random per-process prefix
   plus the context id. A call without a `context_id` gets a fresh one-off
   session; it used to share one session with every other such call in the
-  same process. The `HermesAdapter.session_id` attribute is removed
+  same process. The `HermesAdapter.session_id` attribute is removed. Since
+  Hermes's SessionDB is per user, two Hermes servers that see the same
+  `context_id` now share that conversation's history
 
 ## [0.2.15] - 2026-11-01
 

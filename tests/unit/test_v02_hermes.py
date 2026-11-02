@@ -193,6 +193,8 @@ class TestInvoke:
         assert first.startswith("a2a-") and second.startswith("a2a-")
         assert len(first) == 16  # "a2a-" + 12 hex chars
         assert first != second
+        # One-off sessions must not leave a lock behind per call
+        assert adapter._session_locks == {}
 
     @pytest.mark.asyncio
     async def test_invoke_empty_response(self, adapter):

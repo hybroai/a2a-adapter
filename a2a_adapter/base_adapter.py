@@ -662,6 +662,8 @@ class BaseA2AAdapter(ABC):
             )
             with os.fdopen(fd, "w") as f:
                 json.dump(self._sessions, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp_path, self._session_store_path)
             tmp_path = None
             logger.debug(
