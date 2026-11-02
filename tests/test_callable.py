@@ -224,3 +224,16 @@ class TestCallableAdapterSyncAndTimeout:
         adapter = CallableAdapter(func=gen, streaming=True, timeout=0.1)
         with pytest.raises(TimeoutError, match="callable timed out after 0.1 seconds"):
             _ = [c async for c in adapter.stream("x")]
+
+
+async def test_dict_response_with_non_json_values():
+    import json
+    from datetime import datetime
+
+    when = datetime(2026, 1, 2, 3, 4, 5)
+
+    async def agent(inputs):
+        return {"when": when}
+
+    result = await CallableAdapter(func=agent).invoke("q")
+    assert json.loads(result) == {"when": str(when)}

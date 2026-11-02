@@ -196,7 +196,7 @@ class CrewAIAdapter(BaseA2AAdapter):
             for key in ("output", "result", "response", "answer", "text"):
                 if key in output:
                     return str(output[key])
-            return json.dumps(output, indent=2)
+            return json.dumps(output, indent=2, default=str)
 
         return str(output)
 

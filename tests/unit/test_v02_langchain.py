@@ -510,3 +510,17 @@ def test_streaming_flag_disables_streaming():
 def test_streaming_flag_default_auto_detects():
     assert LangChainAdapter(runnable=MockRunnable()).supports_streaming() is True
     assert LangChainAdapter(runnable=MockRunnableNoStream()).supports_streaming() is False
+
+
+@pytest.mark.asyncio
+async def test_output_dict_with_non_json_values():
+    from datetime import datetime
+
+    when = datetime(2026, 1, 2, 3, 4, 5)
+
+    class DictRunnable:
+        async def ainvoke(self, inputs):
+            return {"when": when, "msg": MockAIMessage("hi")}
+
+    result = await LangChainAdapter(runnable=DictRunnable()).invoke("test")
+    assert json.loads(result)["when"] == str(when)

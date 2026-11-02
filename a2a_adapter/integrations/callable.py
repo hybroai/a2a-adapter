@@ -168,7 +168,7 @@ class CallableAdapter(BaseA2AAdapter):
             for key in ("response", "output", "result", "answer", "text", "message"):
                 if key in output:
                     return str(output[key])
-            return json.dumps(output, indent=2)
+            return json.dumps(output, indent=2, default=str)
         return str(output)
 
 

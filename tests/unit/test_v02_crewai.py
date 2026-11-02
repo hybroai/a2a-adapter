@@ -359,3 +359,17 @@ async def test_invoke_timeout_has_clear_message():
     adapter = CrewAIAdapter(crew=SlowCrew(), timeout=0.05)
     with pytest.raises(TimeoutError, match="CrewAI crew timed out after 0.05 seconds"):
         await adapter.invoke("x")
+
+
+@pytest.mark.asyncio
+async def test_output_dict_with_non_json_values():
+    from datetime import datetime
+
+    when = datetime(2026, 1, 2, 3, 4, 5)
+
+    class Crew:
+        async def kickoff_async(self, inputs=None):
+            return {"when": when}
+
+    result = await CrewAIAdapter(crew=Crew()).invoke("test")
+    assert json.loads(result) == {"when": str(when)}
