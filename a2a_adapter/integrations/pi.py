@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import suppress
 from typing import Any
 
-from ..base_adapter import AdapterMetadata, BaseA2AAdapter
+from ..base_adapter import AdapterMetadata, BaseA2AAdapter, default_state_dir
 from ..exceptions import CancelledByAdapterError
 
 
@@ -485,7 +485,7 @@ class PiAdapter(BaseA2AAdapter):
         self.cli_args = list(cli_args or [])
         self.session_id = session_id
         self.session_dir = session_dir or os.path.join(
-            working_dir, ".a2a-adapter", "pi", "sessions"
+            default_state_dir("pi", working_dir), "sessions"
         )
         self.timeout = timeout
         self.startup_timeout = startup_timeout

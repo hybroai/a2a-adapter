@@ -131,6 +131,26 @@ Run `a2a-adapter -help` for the supported agents, or
 The adapter owns protocol and session flags such as Pi's `--mode rpc` and
 Codex's `--json`; those flags cannot be overridden after `--`.
 
+Claude Code, Codex and Pi keep their session state per user, outside the
+project: under `$XDG_STATE_HOME/a2a-adapter/<agent>/<hash of --cwd>/`, or
+`~/.local/state/a2a-adapter/...` when `XDG_STATE_HOME` is unset. Each working
+directory gets its own store. With Claude Code and Codex, each A2A
+conversation (`contextId`) resumes the same agent session after the server
+restarts; requests without a `contextId` all share one saved session. Pi keeps
+its single session (`--session-id`) for the working directory.
+
+Versions up to 0.2.15 kept this state in `<cwd>/.a2a-adapter/`, which is no
+longer read. To keep existing Codex or Pi sessions, move the contents of
+`<cwd>/.a2a-adapter/<agent>/` into the new directory, which this prints
+(run it in the agent's working directory; agent is `codex` or `pi`):
+
+```bash
+python -c "from a2a_adapter.base_adapter import default_state_dir; print(default_state_dir('codex', '.'))"
+```
+
+Otherwise delete the old folder. Old Claude Code entries were never reused and
+can just be deleted.
+
 ### Configuring the Agent
 
 The adapter runs the agent non-interactively (for example `claude -p` or

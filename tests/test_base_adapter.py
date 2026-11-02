@@ -1,6 +1,8 @@
 """Tests for BaseA2AAdapter contract and AdapterMetadata."""
 
 import asyncio
+import logging
+import os
 from types import SimpleNamespace
 from typing import AsyncIterator
 
@@ -12,6 +14,7 @@ from a2a_adapter.base_adapter import (
     BaseA2AAdapter,
     CommandResult,
     ParseResult,
+    default_state_dir,
 )
 
 
@@ -190,3 +193,119 @@ class TestRunSubprocessCancellation:
 
         assert proc.returncode is not None
         assert "t2" not in adapter._killed_tasks
+
+
+# ── Subprocess runtime: session store ────────────────────────
+
+
+class TestSessionStore:
+    def test_save_then_load_round_trips(self, tmp_path):
+        a1 = SleepingCliAdapter(tmp_path)
+        a1._sessions = {"ctx-1": "sess-A", "ctx-2": "sess-B"}
+        a1._save_sessions()
+
+        a2 = SleepingCliAdapter(tmp_path)
+        assert a2._sessions == {"ctx-1": "sess-A", "ctx-2": "sess-B"}
+
+    def test_malformed_store_loads_empty_with_warning(self, tmp_path, caplog):
+        (tmp_path / "sessions.json").write_text('{"ctx-1": "sess-')
+        with caplog.at_level(logging.WARNING, logger="a2a_adapter.base_adapter"):
+            adapter = SleepingCliAdapter(tmp_path)
+        assert adapter._sessions == {}
+        assert any(
+            r.levelno == logging.WARNING and "sessions.json" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_non_dict_store_loads_empty_with_warning(self, tmp_path, caplog):
+        (tmp_path / "sessions.json").write_text("[1, 2, 3]")
+        with caplog.at_level(logging.WARNING, logger="a2a_adapter.base_adapter"):
+            adapter = SleepingCliAdapter(tmp_path)
+        assert adapter._sessions == {}
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_missing_store_does_not_warn(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING, logger="a2a_adapter.base_adapter"):
+            adapter = SleepingCliAdapter(tmp_path)
+        assert adapter._sessions == {}
+        assert not caplog.records
+
+    def test_failed_save_leaves_previous_store_intact(self, tmp_path, monkeypatch):
+        """A crash while writing must not truncate or corrupt the existing
+        store: the write goes to a temp file that replaces it atomically."""
+        store = tmp_path / "sessions.json"
+        adapter = SleepingCliAdapter(tmp_path)
+        adapter._sessions = {"ctx-1": "sess-A"}
+        adapter._save_sessions()
+        before = store.read_text()
+
+        def partial_dump(obj, fp, **kwargs):
+            fp.write('{"ctx-1": "se')
+            raise OSError("disk full")
+
+        monkeypatch.setattr("a2a_adapter.base_adapter.json.dump", partial_dump)
+        adapter._sessions = {"ctx-1": "sess-B"}
+        adapter._save_sessions()
+
+        assert store.read_text() == before
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["sessions.json"]
+
+
+    def test_save_fsyncs_before_replacing(self, tmp_path, monkeypatch):
+        calls = []
+        real_fsync, real_replace = os.fsync, os.replace
+        monkeypatch.setattr(
+            "a2a_adapter.base_adapter.os.fsync",
+            lambda fd: (calls.append("fsync"), real_fsync(fd))[1],
+        )
+        monkeypatch.setattr(
+            "a2a_adapter.base_adapter.os.replace",
+            lambda a, b: (calls.append("replace"), real_replace(a, b))[1],
+        )
+        adapter = SleepingCliAdapter(tmp_path)
+        adapter._sessions = {"ctx-1": "sess-A"}
+        adapter._save_sessions()
+        assert calls == ["fsync", "replace"]
+
+class TestDefaultStateDir:
+    def test_outside_working_dir_and_per_project(self, tmp_path, monkeypatch):
+        state = tmp_path / "state"
+        monkeypatch.setenv("XDG_STATE_HOME", str(state))
+        proj_a = tmp_path / "proj-a"
+        proj_b = tmp_path / "proj-b"
+
+        dir_a = default_state_dir("claude-code", str(proj_a))
+        dir_b = default_state_dir("claude-code", str(proj_b))
+
+        assert dir_a != dir_b
+        for d, proj in ((dir_a, proj_a), (dir_b, proj_b)):
+            assert os.path.commonpath([d, str(proj)]) != str(proj)
+            assert os.path.dirname(d) == str(state / "a2a-adapter" / "claude-code")
+
+    def test_same_working_dir_is_stable(self, tmp_path):
+        assert default_state_dir("codex", str(tmp_path)) == default_state_dir(
+            "codex", str(tmp_path) + os.sep
+        )
+
+    def test_relative_working_dir_resolves_to_absolute(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert default_state_dir("codex", ".") == default_state_dir(
+            "codex", str(tmp_path)
+        )
+
+    def test_agents_do_not_share_a_dir(self, tmp_path):
+        assert default_state_dir("codex", str(tmp_path)) != default_state_dir(
+            "claude-code", str(tmp_path)
+        )
+
+    @pytest.mark.parametrize("xdg", [None, "", "relative/state"])
+    def test_falls_back_to_home_local_state(self, tmp_path, monkeypatch, xdg):
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        if xdg is None:
+            monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        else:
+            monkeypatch.setenv("XDG_STATE_HOME", xdg)
+        d = default_state_dir("pi", str(tmp_path / "proj"))
+        assert d.startswith(
+            os.path.join(str(tmp_path / "home"), ".local", "state", "a2a-adapter", "pi") + os.sep
+        )

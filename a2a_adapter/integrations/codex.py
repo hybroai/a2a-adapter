@@ -17,6 +17,7 @@ from ..base_adapter import (
     BaseA2AAdapter,
     CommandResult,
     ParseResult,
+    default_state_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,9 +68,7 @@ class CodexAdapter(BaseA2AAdapter):
             timeout=timeout,
             env_vars=env_vars,
             session_store_path=session_store_path
-            or os.path.join(
-                working_dir, ".a2a-adapter", "codex", "sessions.json"
-            ),
+            or os.path.join(default_state_dir("codex", working_dir), "sessions.json"),
         )
         self.codex_path = codex_path
         self.cli_args = list(cli_args or [])
