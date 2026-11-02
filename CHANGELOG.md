@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `ClaudeCodeAdapter.session_id` attribute is removed. Entries saved by older
   versions use the old keys and are never matched, so the old
   `claude-code/sessions.json` is not worth moving
+- Hermes conversation history now survives a server restart: the SessionDB
+  session id is `a2a-<context_id>` instead of a random per-process prefix
+  plus the context id. A call without a `context_id` gets a fresh one-off
+  session; it used to share one session with every other such call in the
+  same process. The `HermesAdapter.session_id` attribute is removed
 
 ## [0.2.15] - 2026-11-01
 

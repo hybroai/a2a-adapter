@@ -153,24 +153,46 @@ class TestInvoke:
         call_kwargs = mock_agent.run_conversation.call_args[1]
         assert call_kwargs["user_message"] == "New msg"
         assert call_kwargs["conversation_history"] == history
-        assert call_kwargs["task_id"] == f"{adapter.session_id}-sess-1"
+        assert call_kwargs["task_id"] == "a2a-sess-1"
 
     @pytest.mark.asyncio
     async def test_invoke_uses_context_id_as_session_id(self, adapter):
         mock_agent = _make_mock_agent()
         with patch.object(adapter, "_make_agent", return_value=mock_agent) as mock_make:
             await adapter.invoke("Hi", context_id="my-session")
-        mock_make.assert_called_once_with(f"{adapter.session_id}-my-session")
-        adapter._session_db.get_messages_as_conversation.assert_called_with(f"{adapter.session_id}-my-session")
+        mock_make.assert_called_once_with("a2a-my-session")
+        adapter._session_db.get_messages_as_conversation.assert_called_with("a2a-my-session")
+
+    @pytest.mark.asyncio
+    async def test_session_id_is_stable_across_restarts(self, adapter):
+        """A new adapter (a restarted server) reads the same SessionDB
+        session for the same context_id, so history carries over."""
+        restarted = HermesAdapter(model="test-model")
+        restarted._session_db = _make_mock_session_db()
+        for a in (adapter, restarted):
+            with patch.object(a, "_make_agent", return_value=_make_mock_agent()):
+                await a.invoke("Hi", context_id="conv-1")
+        adapter._session_db.get_messages_as_conversation.assert_called_with("a2a-conv-1")
+        restarted._session_db.get_messages_as_conversation.assert_called_with("a2a-conv-1")
+
+    @pytest.mark.asyncio
+    async def test_stream_uses_same_session_id_as_invoke(self, adapter):
+        with patch.object(adapter, "_make_agent", return_value=_make_mock_agent()) as mock_make:
+            async for _ in adapter.stream("Hi", context_id="conv-1"):
+                pass
+        mock_make.assert_called_once_with("a2a-conv-1")
 
     @pytest.mark.asyncio
     async def test_invoke_generates_session_id_when_none(self, adapter):
         mock_agent = _make_mock_agent()
         with patch.object(adapter, "_make_agent", return_value=mock_agent) as mock_make:
             await adapter.invoke("Hi", context_id=None)
-        session_id = mock_make.call_args[0][0]
-        assert session_id.startswith("a2a-")
-        assert len(session_id) == 16  # "a2a-" + 12 hex chars
+            await adapter.invoke("Hi again", context_id=None)
+        first, second = (c[0][0] for c in mock_make.call_args_list)
+        # No context_id: a fresh one-off session per call, never shared
+        assert first.startswith("a2a-") and second.startswith("a2a-")
+        assert len(first) == 16  # "a2a-" + 12 hex chars
+        assert first != second
 
     @pytest.mark.asyncio
     async def test_invoke_empty_response(self, adapter):
