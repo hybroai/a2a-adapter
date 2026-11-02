@@ -679,3 +679,30 @@ async def test_stream_string_node_write():
     """Functional API entrypoints can write a plain string."""
     graph = UpdatesGraph([{"workflow": "answer"}])
     assert await _collect(LangGraphAdapter(graph=graph)) == ["answer"]
+
+
+@pytest.mark.asyncio
+async def test_stream_reads_same_output_keys_as_invoke():
+    for key in ("result", "answer"):
+        graph = UpdatesGraph([{"solve": {key: "42"}}])
+        assert await _collect(LangGraphAdapter(graph=graph)) == ["42"]
+
+
+class RoleMessage:
+    """LangChain ChatMessage: type "chat", speaker in .role."""
+
+    def __init__(self, content, role):
+        self.content = content
+        self.type = "chat"
+        self.role = role
+
+
+@pytest.mark.asyncio
+async def test_stream_skips_non_ai_chunks_and_chat_messages():
+    graph = UpdatesGraph([
+        {"agent": {"messages": [TypedMessage("reply"), TypedMessage("raw", type="ToolMessageChunk")]}},
+        {"agent": {"messages": [TypedMessage("more", type="AIMessageChunk"), RoleMessage("q", "user")]}},
+        {"agent": {"messages": [RoleMessage("chat reply", "assistant")]}},
+    ])
+    chunks = await _collect(LangGraphAdapter(graph=graph))
+    assert "".join(chunks) == "reply\n\nmore\n\nchat reply"

@@ -319,7 +319,8 @@ class LangGraphAdapter(BaseA2AAdapter):
                     return self._extract_message_content(message)
             return ""
 
-        for key in ("output", "response", "text", "content"):
+        # Same keys as _extract_output (invoke)
+        for key in ("output", "response", "result", "answer", "text", "content"):
             if key in state:
                 return self._extract_value_text(state[key])
 
@@ -341,6 +342,10 @@ class LangGraphAdapter(BaseA2AAdapter):
             kind = message.get("role") or message.get("type")
         else:
             kind = getattr(message, "type", None)
+            if kind == "chat":  # ChatMessage keeps the speaker in .role
+                kind = getattr(message, "role", None)
+        if isinstance(kind, str) and kind.endswith("MessageChunk"):
+            kind = kind[: -len("MessageChunk")].lower()  # e.g. ToolMessageChunk
         return kind not in _NON_AI_MESSAGE_TYPES
 
     @staticmethod
