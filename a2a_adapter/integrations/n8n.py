@@ -106,6 +106,15 @@ class N8nAdapter(BaseA2AAdapter):
     client may override; ``payload_template`` keys are fixed by the operator.
     For plain-text messages the text goes in ``message_field``.
 
+    File URLs (multimodal_mode): a client-supplied file URL is passed to the
+    webhook as ``uri`` and not fetched. With ``fetch_file_urls=True`` the
+    adapter downloads it and embeds the bytes; only ``http``/``https`` URLs
+    are allowed, redirects are not followed, bodies over ``max_file_bytes``
+    are rejected, and any fetch failure fails the request. Private or
+    internal addresses are NOT blocked, so enabling this lets clients make
+    the server request any host it can reach; enable it only for trusted
+    clients or behind an egress proxy.
+
     Example::
 
         from a2a_adapter import N8nAdapter, serve_agent
@@ -140,6 +149,8 @@ class N8nAdapter(BaseA2AAdapter):
         file_field: str = "files",
         image_field: str = "images",
         encode_files_base64: bool = True,
+        fetch_file_urls: bool = False,
+        max_file_bytes: int = 10 * 1024 * 1024,
         supported_input_types: list[str] | None = None,
         supported_output_types: list[str] | None = None,
         name: str = "",
@@ -172,6 +183,11 @@ class N8nAdapter(BaseA2AAdapter):
             file_field: JSON field name for file attachments (default: "files").
             image_field: JSON field name for image attachments (default: "images").
             encode_files_base64: Encode files as base64 in JSON (default: True).
+            fetch_file_urls: Download client-supplied file URLs and embed the
+                content instead of passing the URL through (default: False).
+                See the class docstring for the limits and the SSRF caveat.
+            max_file_bytes: Maximum size of one fetched file when
+                fetch_file_urls is enabled (default: 10 MiB).
             supported_input_types: MIME types the workflow accepts (default: common types).
             supported_output_types: MIME types the workflow produces (default: common types).
             name: Optional agent name for AgentCard generation.
@@ -196,6 +212,8 @@ class N8nAdapter(BaseA2AAdapter):
         self.file_field = file_field
         self.image_field = image_field
         self.encode_files_base64 = encode_files_base64
+        self.fetch_file_urls = fetch_file_urls
+        self.max_file_bytes = int(max_file_bytes)
         self._supported_input_types = supported_input_types
         self._supported_output_types = supported_output_types
         self._name = name
@@ -343,38 +361,39 @@ class N8nAdapter(BaseA2AAdapter):
         context_id: str | None,
         context: RequestContext,
     ) -> Dict[str, Any]:
-        """Build webhook payload with files/images from context.message.parts."""
+        """Build webhook payload with files/images from context.message.parts.
+
+        URL parts are passed through as ``uri`` unless fetch_file_urls is set;
+        a failed fetch raises instead of dropping the file.
+        """
         payload = self._build_payload(user_input, context_id)
 
         files = []
         images = []
 
         for part in context.message.parts:
-            if part.HasField("url") or part.HasField("raw"):
-                try:
-                    file_data = await self._fetch_file_content(part)
-                    file_entry: Dict[str, Any] = {
-                        "name": part.filename or "file",
-                        "mime_type": part.media_type,
-                    }
+            if not (part.HasField("url") or part.HasField("raw")):
+                continue
 
-                    if self.encode_files_base64:
-                        file_entry["data"] = base64.b64encode(file_data).decode("utf-8")
-                    else:
-                        file_entry["data"] = file_data
+            file_entry: Dict[str, Any] = {
+                "name": part.filename or "file",
+                "mime_type": part.media_type,
+            }
 
-                    if part.HasField("url"):
-                        file_entry["uri"] = part.url
+            if part.HasField("raw") or self.fetch_file_urls:
+                file_data = await self._fetch_file_content(part)
+                if self.encode_files_base64:
+                    file_entry["data"] = base64.b64encode(file_data).decode("utf-8")
+                else:
+                    file_entry["data"] = file_data
 
-                    if part.media_type and part.media_type.startswith("image/"):
-                        images.append(file_entry)
-                    else:
-                        files.append(file_entry)
+            if part.HasField("url"):
+                file_entry["uri"] = part.url
 
-                except Exception as e:
-                    logger.warning(
-                        "Failed to fetch file %s: %s", part.filename or "unknown", e
-                    )
+            if part.media_type and part.media_type.startswith("image/"):
+                images.append(file_entry)
+            else:
+                files.append(file_entry)
 
         if files:
             payload[self.file_field] = files
@@ -391,16 +410,46 @@ class N8nAdapter(BaseA2AAdapter):
 
         Returns:
             File content as bytes.
+
+        Raises:
+            ValueError: The URL is not http/https, the body exceeds
+                max_file_bytes, or the fetch failed (including any redirect).
         """
         if part.HasField("url"):
-            client = await self._get_client()
-            resp = await client.get(part.url)
-            resp.raise_for_status()
-            return resp.content
+            return await self._fetch_url(part.url)
         elif part.HasField("raw"):
             return part.raw
         else:
             raise ValueError(f"Part has no url or raw data: {part}")
+
+    async def _fetch_url(self, url: str) -> bytes:
+        """Download a client-supplied URL, capped at max_file_bytes."""
+        scheme = httpx.URL(url).scheme
+        if scheme not in ("http", "https"):
+            raise ValueError(f"File URL scheme {scheme!r} not allowed: {url}")
+
+        client = await self._get_client()
+        limit = self.max_file_bytes
+        try:
+            async with client.stream("GET", url, follow_redirects=False) as resp:
+                resp.raise_for_status()
+                declared = resp.headers.get("Content-Length")
+                if declared and declared.isdigit() and int(declared) > limit:
+                    raise ValueError(
+                        f"File at {url} exceeds max_file_bytes ({declared} > {limit})"
+                    )
+                chunks: list[bytes] = []
+                size = 0
+                async for chunk in resp.aiter_bytes():
+                    size += len(chunk)
+                    if size > limit:
+                        raise ValueError(
+                            f"File at {url} exceeds max_file_bytes ({limit})"
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks)
+        except httpx.HTTPError as e:
+            raise ValueError(f"Failed to fetch file {url}: {e}") from e
 
     # ──── Internal: HTTP POST with Retry ────
 
