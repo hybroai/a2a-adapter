@@ -1,6 +1,6 @@
 """Tests for the v0.2 LangGraphAdapter.
 
-Covers: invoke, stream (delta-based), input building (including "messages"
+Covers: invoke, stream (node updates as deltas), input building (including "messages"
 key with HumanMessage fallback), output extraction from graph state,
 metadata, and integration with to_a2a / build_agent_card / load_adapter.
 """
@@ -30,9 +30,9 @@ class MockGraph:
 
     async def astream(self, inputs, config=None, stream_mode=None):
         self.last_input = inputs
-        # Simulate intermediate states building up
-        yield {"output": "partial"}
-        yield self._final_state
+        # stream_mode="updates": one {node: update} item per node
+        yield {"draft": {"output": "partial"}}
+        yield {"final": self._final_state}
 
 
 class MockGraphMessages:
@@ -48,8 +48,7 @@ class MockGraphMessages:
 
     async def astream(self, inputs, config=None, stream_mode=None):
         self.last_input = inputs
-        yield {"messages": self._messages[:1]}
-        yield {"messages": self._messages}
+        yield {"agent": {"messages": self._messages}}
 
 
 class MockGraphNoStream:
@@ -78,7 +77,7 @@ class MockGraphWithLCMessages:
 
     async def astream(self, inputs, config=None, stream_mode=None):
         self.last_input = inputs
-        yield {"messages": [MockMessageObject("lc streaming")]}
+        yield {"agent": {"messages": [MockMessageObject("lc streaming")]}}
 
 
 # ──── Test: Invoke ────
@@ -205,11 +204,8 @@ async def test_stream_basic():
     chunks = []
     async for chunk in adapter.stream("test"):
         chunks.append(chunk)
-    # First state has "partial", second has "final result" — delta logic
-    assert "partial" in chunks
-    # Final text should contain "final result" delta
-    full = "".join(chunks)
-    assert "partial" in full
+    # Each node's output is emitted once, separated by a blank line
+    assert chunks == ["partial", "\n\nfinal result"]
 
 
 @pytest.mark.asyncio
@@ -239,16 +235,15 @@ async def test_stream_with_state_key():
         async def ainvoke(self, inputs):
             return {"custom_field": "done"}
 
-        async def astream(self, inputs):
-            yield {"custom_field": "step1"}
-            yield {"custom_field": "step2"}
+        async def astream(self, inputs, config=None, stream_mode=None):
+            yield {"n1": {"custom_field": "step1"}}
+            yield {"n2": {"custom_field": "step2"}}
 
     adapter = LangGraphAdapter(graph=CustomStateGraph(), state_key="custom_field")
     chunks = []
     async for chunk in adapter.stream("test"):
         chunks.append(chunk)
-    assert "step1" in chunks
-    assert "step2" in chunks
+    assert chunks == ["step1", "\n\nstep2"]
 
 
 # ──── Test: Streaming Support Detection ────
@@ -479,3 +474,85 @@ async def test_invoke_dict_message_content_blocks():
     graph = MockGraph(final_state={"messages": [{"role": "assistant", "content": BLOCKS}]})
     adapter = LangGraphAdapter(graph=graph)
     assert await adapter.invoke("test") == "Hello world"
+
+
+# ──── Test: Streaming node updates as deltas ────
+
+
+class TypedMessage:
+    """LangChain-style message with .type ("ai", "human", "tool", ...)."""
+
+    def __init__(self, content, type="ai"):
+        self.content = content
+        self.type = type
+
+
+class UpdatesGraph:
+    """Graph whose astream yields {node: update} dicts, like a compiled
+    StateGraph with stream_mode="updates"."""
+
+    def __init__(self, updates):
+        self._updates = updates
+        self.stream_kwargs = None
+
+    async def ainvoke(self, inputs, config=None):
+        return {}
+
+    async def astream(self, inputs, config=None, stream_mode=None):
+        self.stream_kwargs = {"config": config, "stream_mode": stream_mode}
+        for update in self._updates:
+            yield update
+
+
+async def _collect(adapter, text="hi"):
+    return [c async for c in adapter.stream(text)]
+
+
+@pytest.mark.asyncio
+async def test_stream_requests_updates_mode():
+    graph = UpdatesGraph([{"agent": {"output": "x"}}])
+    await _collect(LangGraphAdapter(graph=graph))
+    assert graph.stream_kwargs["stream_mode"] == "updates"
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_each_ai_message_once():
+    """A tool-using agent: AI messages stream once each, tool output and
+    the user's input are not echoed as the reply."""
+    graph = UpdatesGraph([
+        {"agent": {"messages": [TypedMessage("Let me check.")]}},
+        {"tools": {"messages": [TypedMessage("42", type="tool")]}},
+        {"agent": {"messages": [TypedMessage("The answer is 42.")]}},
+    ])
+    chunks = await _collect(LangGraphAdapter(graph=graph))
+    assert "".join(chunks) == "Let me check.\n\nThe answer is 42."
+
+
+@pytest.mark.asyncio
+async def test_stream_skips_human_and_empty_ai_messages():
+    graph = UpdatesGraph([
+        {"intake": {"messages": [TypedMessage("hi", type="human")]}},
+        {"agent": {"messages": [TypedMessage("")]}},  # tool-call-only message
+        {"agent": {"messages": [{"role": "assistant", "content": "done"}]}},
+    ])
+    assert await _collect(LangGraphAdapter(graph=graph)) == ["done"]
+
+
+@pytest.mark.asyncio
+async def test_stream_skips_interrupts_and_empty_updates():
+    graph = UpdatesGraph([
+        {"noop": None},
+        {"__interrupt__": ("waiting",)},
+        {"writer": {"output": "draft"}},
+    ])
+    assert await _collect(LangGraphAdapter(graph=graph)) == ["draft"]
+
+
+@pytest.mark.asyncio
+async def test_stream_state_key_on_node_updates():
+    graph = UpdatesGraph([
+        {"a": {"report": "part one", "output": "ignored"}},
+        {"b": {"report": "part two"}},
+    ])
+    chunks = await _collect(LangGraphAdapter(graph=graph, state_key="report"))
+    assert "".join(chunks) == "part one\n\npart two"

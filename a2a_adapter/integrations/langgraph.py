@@ -59,6 +59,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Message types/roles that are not the agent's reply.
+_NON_AI_MESSAGE_TYPES = frozenset(
+    {"human", "user", "system", "developer", "tool", "function", "remove"}
+)
+
 
 # ═══════════════════════════════════════════════════════════════
 # v0.2 Adapter (new, recommended)
@@ -69,8 +74,8 @@ class LangGraphAdapter(BaseA2AAdapter):
     """Adapter for LangGraph compiled state graphs.
 
     Supports both streaming (via ``astream()``) and non-streaming
-    (via ``ainvoke()``) execution. Streaming yields state deltas
-    as they're produced by the graph.
+    (via ``ainvoke()``) execution. Streaming yields each node's output
+    as the node finishes (``stream_mode="updates"``).
 
     Example::
 
@@ -153,16 +158,22 @@ class LangGraphAdapter(BaseA2AAdapter):
         return self._extract_output(result)
 
     async def stream(self, user_input: str, context_id: str | None = None, **kwargs) -> AsyncIterator[str]:
-        """Stream state deltas from the graph via astream()."""
+        """Stream each node's new output via astream(stream_mode="updates").
+
+        Every update holds only what one node just wrote, so its text is a
+        true delta: AI messages and output keys are emitted once each, and
+        the user's input and tool results are not echoed. Outputs from
+        successive nodes are separated by a blank line.
+        """
         inputs = self._build_inputs(user_input, context_id)
-        last_text = ""
-        async for state in self.graph.astream(inputs, **self._config_kwargs(context_id)):
-            text = self._extract_streaming_text(state)
-            if text and text != last_text:
-                delta = text[len(last_text):] if text.startswith(last_text) else text
-                last_text = text
-                if delta:
-                    yield delta
+        emitted = False
+        async for update in self.graph.astream(
+            inputs, stream_mode="updates", **self._config_kwargs(context_id),
+        ):
+            text = self._extract_update_text(update)
+            if text:
+                yield f"\n\n{text}" if emitted else text
+                emitted = True
 
     def supports_streaming(self) -> bool:
         """Auto-detect streaming support from the graph."""
@@ -256,24 +267,50 @@ class LangGraphAdapter(BaseA2AAdapter):
         clean = {k: v for k, v in state.items() if not k.startswith("_")}
         return json.dumps(clean, indent=2, default=str)
 
-    def _extract_streaming_text(self, state: Any) -> str:
-        """Extract text from intermediate streaming state."""
-        if not isinstance(state, dict):
-            return str(state)
+    def _extract_update_text(self, update: Any) -> str:
+        """Extract text from one ``{node_name: node_update}`` stream item."""
+        if not isinstance(update, dict):
+            return str(update)
+        texts = []
+        for node, node_update in update.items():
+            # "__interrupt__" and similar entries are not node output.
+            if node.startswith("__") or not isinstance(node_update, dict):
+                continue
+            text = self._extract_streaming_text(node_update)
+            if text:
+                texts.append(text)
+        return "\n\n".join(texts)
 
+    def _extract_streaming_text(self, state: Dict[str, Any]) -> str:
+        """Extract text from the state keys one node wrote."""
         if self.state_key and self.state_key in state:
             return self._extract_value_text(state[self.state_key])
 
         if "messages" in state:
             messages = state["messages"]
-            if messages:
-                return self._extract_message_content(messages[-1])
+            if not isinstance(messages, list):
+                messages = [messages]
+            texts = [
+                self._extract_message_content(m)
+                for m in messages if self._is_ai_message(m)
+            ]
+            return "\n\n".join(t for t in texts if t)
 
         for key in ("output", "response", "text", "content"):
             if key in state:
                 return self._extract_value_text(state[key])
 
         return ""
+
+    @staticmethod
+    def _is_ai_message(message: Any) -> bool:
+        """True unless the message is known to come from someone else
+        (user input, tool results, system prompts)."""
+        if isinstance(message, dict):
+            kind = message.get("role") or message.get("type")
+        else:
+            kind = getattr(message, "type", None)
+        return kind not in _NON_AI_MESSAGE_TYPES
 
     @staticmethod
     def _extract_value_text(value: Any) -> str:
