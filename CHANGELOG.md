@@ -14,8 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `~/.local/state/a2a-adapter/...`), instead of `<working_dir>/.a2a-adapter/`,
   which left an untracked folder in the agent's project. Explicit
   `session_store_path` / `session_dir` arguments still win. Existing state is
-  not migrated: move `<working_dir>/.a2a-adapter/<agent>/` to the new location
-  to keep it, or delete it
+  not migrated: to keep it, move the contents of
+  `<working_dir>/.a2a-adapter/<agent>/` into the directory
+  `a2a_adapter.base_adapter.default_state_dir(<agent>, <working_dir>)` returns
+  (see the README), or delete the old folder
 
 ### Fixed
 
@@ -46,7 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   session; it used to share one session with every other such call in the
   same process. The `HermesAdapter.session_id` attribute is removed. Since
   Hermes's SessionDB is per user, two Hermes servers that see the same
-  `context_id` now share that conversation's history
+  `context_id` now share that conversation's history and its Hermes
+  task-scoped resources
 
 ## [0.2.15] - 2026-11-01
 

@@ -140,9 +140,16 @@ restarts; requests without a `contextId` all share one saved session. Pi keeps
 its single session (`--session-id`) for the working directory.
 
 Versions up to 0.2.15 kept this state in `<cwd>/.a2a-adapter/`, which is no
-longer read. To keep existing Codex or Pi sessions, move
-`<cwd>/.a2a-adapter/<agent>/` contents to the new location; otherwise delete
-the folder. Old Claude Code entries were never reused and can just be deleted.
+longer read. To keep existing Codex or Pi sessions, move the contents of
+`<cwd>/.a2a-adapter/<agent>/` into the new directory, which this prints
+(run it in the agent's working directory; agent is `codex` or `pi`):
+
+```bash
+python -c "from a2a_adapter.base_adapter import default_state_dir; print(default_state_dir('codex', '.'))"
+```
+
+Otherwise delete the old folder. Old Claude Code entries were never reused and
+can just be deleted.
 
 ### Configuring the Agent
 
