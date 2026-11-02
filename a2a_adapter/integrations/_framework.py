@@ -4,10 +4,13 @@ CrewAI, callable)."""
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping
 from typing import Any, AsyncIterable, AsyncIterator, Awaitable, Callable, Dict, TypeVar
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 
 async def run_with_timeout(
@@ -47,16 +50,26 @@ async def iter_with_timeout(
                 async with scope:
                     item = await anext(iterator)
             except StopAsyncIteration:
-                return
+                break
             except TimeoutError as e:
                 if scope.expired():
                     raise TimeoutError(f"{what} timed out after {timeout} seconds") from e
                 raise
             yield item
-    finally:
-        aclose = getattr(iterator, "aclose", None)
-        if aclose is not None:
-            await aclose()
+    except BaseException:
+        # Keep the original error (or GeneratorExit) over a cleanup failure.
+        try:
+            await _aclose(iterator)
+        except Exception:
+            logger.warning("Error closing %s stream", what, exc_info=True)
+        raise
+    await _aclose(iterator)
+
+
+async def _aclose(iterator: Any) -> None:
+    aclose = getattr(iterator, "aclose", None)
+    if aclose is not None:
+        await aclose()
 
 
 def apply_input_mapper(
