@@ -237,3 +237,14 @@ async def test_dict_response_with_non_json_values():
 
     result = await CallableAdapter(func=agent).invoke("q")
     assert json.loads(result) == {"when": str(when)}
+
+
+async def test_sync_in_thread_false_calls_on_the_loop():
+    """A sync wrapper that needs the running loop can opt out of the thread."""
+    async def agent(inputs):
+        return "from task"
+
+    adapter = CallableAdapter(
+        func=lambda inputs: asyncio.ensure_future(agent(inputs)), sync_in_thread=False,
+    )
+    assert await adapter.invoke("x") == "from task"

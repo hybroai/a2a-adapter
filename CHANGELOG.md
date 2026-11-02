@@ -62,8 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   keys once, separated by a blank line. Compiled graphs stream updates by
   default, which the adapter used to read as empty; with whole-state
   streams it echoed the user's message as the reply. Tool results and
-  human messages are no longer emitted. Graphs passed to the adapter must
-  accept `stream_mode` (all LangGraph versions do)
+  human messages are no longer emitted; fan-out (`Send`) writes grouped in a
+  list are all emitted. Graphs passed to the adapter must accept
+  `stream_mode`, and `config` unless `thread_id_key=None` (LangGraph
+  compiled graphs accept both)
 - `LangGraphAdapter`, `LangChainAdapter` and `CrewAIAdapter` fail the
   request when `input_mapper` raises (`input_mapper failed: <type>:
   <message>`) or returns something other than a dict; they used to log a
@@ -76,7 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `astream`) to turn streaming off explicitly
 - `CallableAdapter` runs sync functions in a worker thread (they used to fail
   with `object str can't be used in 'await' expression`) and has a new
-  `timeout` option (default `None`, no limit) covering calls and streams
+  `timeout` option (default `None`, no limit) covering calls and streams.
+  A sync wrapper that needs the running event loop (for example one returning
+  `asyncio.ensure_future(...)`) now fails in the thread; pass
+  `sync_in_thread=False` to call it on the loop as before
 - The default `HermesAdapter` agent card name is now `Hermes` instead of
   `HermesAdapter`, matching the other CLI adapters' product names
 

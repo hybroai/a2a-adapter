@@ -91,6 +91,7 @@ class CallableAdapter(BaseA2AAdapter):
         documentation_url: str | None = None,
         icon_url: str | None = None,
         timeout: float | None = None,
+        sync_in_thread: bool = True,
     ) -> None:
         """Initialize the callable adapter.
 
@@ -108,10 +109,15 @@ class CallableAdapter(BaseA2AAdapter):
             timeout: Seconds allowed for a call or a whole stream (default:
                 None, no limit). A timed-out sync function keeps running in
                 its thread; only the request fails.
+            sync_in_thread: Run sync functions in a worker thread (default:
+                True). Set False for a sync wrapper that needs the running
+                event loop, e.g. one returning ``asyncio.ensure_future(...)``;
+                it is then called on the loop and its result awaited.
         """
         self.func = func
         self._streaming = streaming
         self.timeout = timeout
+        self.sync_in_thread = sync_in_thread
         self._name = name
         self._description = description
         self._skills = skills or []
@@ -148,12 +154,15 @@ class CallableAdapter(BaseA2AAdapter):
         )
 
     async def _call(self, inputs: Dict[str, Any]) -> Any:
-        """Await async functions; run sync ones in a thread."""
+        """Await async functions; run sync ones in a thread unless disabled."""
         if inspect.iscoroutinefunction(self.func) or inspect.iscoroutinefunction(
             getattr(self.func, "__call__", None)
         ):
             return await self.func(inputs)
-        result = await asyncio.to_thread(self.func, inputs)
+        if self.sync_in_thread:
+            result = await asyncio.to_thread(self.func, inputs)
+        else:
+            result = self.func(inputs)
         # e.g. a lambda or partial wrapping an async function
         if inspect.isawaitable(result):
             result = await result
