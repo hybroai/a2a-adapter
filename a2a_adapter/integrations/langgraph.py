@@ -209,8 +209,10 @@ class LangGraphAdapter(BaseA2AAdapter):
     def _config_kwargs(self, context_id: str | None) -> Dict[str, Any]:
         """Build the ``config`` kwarg, mapping context_id to the thread key.
 
-        Returns an empty dict when there is no config, so graphs whose
-        ``ainvoke``/``astream`` take no ``config`` argument keep working.
+        Returns an empty dict when there is nothing to pass. The server
+        always supplies a context_id, so a graph-like object whose
+        ``ainvoke``/``astream`` take no ``config`` argument needs
+        ``thread_id_key=None`` (and no ``config``).
         """
         config = dict(self.config)
         if self.thread_id_key and context_id:
@@ -285,11 +287,15 @@ class LangGraphAdapter(BaseA2AAdapter):
         texts = []
         for node, node_update in update.items():
             # "__interrupt__" and similar entries are not node output.
-            if node.startswith("__") or not isinstance(node_update, dict):
+            if node.startswith("__"):
                 continue
-            text = self._extract_streaming_text(node_update)
-            if text:
-                texts.append(text)
+            # Fan-out (Send) groups same-named node writes in a list.
+            writes = node_update if isinstance(node_update, list) else [node_update]
+            for write in writes:
+                if isinstance(write, dict):
+                    text = self._extract_streaming_text(write)
+                    if text:
+                        texts.append(text)
         return "\n\n".join(texts)
 
     def _extract_streaming_text(self, state: Dict[str, Any]) -> str:

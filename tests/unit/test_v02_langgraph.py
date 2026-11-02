@@ -639,3 +639,12 @@ def test_streaming_flag_disables_streaming():
 def test_streaming_flag_default_auto_detects():
     assert LangGraphAdapter(graph=MockGraph()).supports_streaming() is True
     assert LangGraphAdapter(graph=MockGraphNoStream()).supports_streaming() is False
+
+
+@pytest.mark.asyncio
+async def test_stream_fan_out_list_updates():
+    """Send/map-reduce fan-out groups same-named node writes in a list."""
+    graph = UpdatesGraph([
+        {"worker": [{"output": "a"}, {"output": "b"}]},
+    ])
+    assert "".join(await _collect(LangGraphAdapter(graph=graph))) == "a\n\nb"
