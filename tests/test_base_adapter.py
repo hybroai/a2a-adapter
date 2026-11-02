@@ -1,11 +1,18 @@
 """Tests for BaseA2AAdapter contract and AdapterMetadata."""
 
+import asyncio
+from types import SimpleNamespace
 from typing import AsyncIterator
 
 import pytest
 from a2a.types import Part
 
-from a2a_adapter.base_adapter import AdapterMetadata, BaseA2AAdapter
+from a2a_adapter.base_adapter import (
+    AdapterMetadata,
+    BaseA2AAdapter,
+    CommandResult,
+    ParseResult,
+)
 
 
 # ── AdapterMetadata defaults ─────────────────────────────────
@@ -117,3 +124,69 @@ class TestMultimodalInvoke:
         assert isinstance(result, list)
         assert len(result) == 1
         assert result[0].text == "multi"
+
+
+# ── Subprocess runtime: cancellation ─────────────────────────
+
+
+class SleepingCliAdapter(BaseA2AAdapter):
+    """CLI adapter whose command runs long enough to be cancelled mid-run."""
+
+    def __init__(self, tmp_path):
+        super().__init__(
+            working_dir=str(tmp_path),
+            session_store_path=str(tmp_path / "sessions.json"),
+        )
+
+    async def invoke(self, user_input, context_id=None, **kwargs):
+        return await self._run_subprocess(
+            context_id or "ctx", kwargs.get("task_id", "task"), user_input=user_input
+        )
+
+    def _build_command(self, message: str, context_key: str) -> CommandResult:
+        return CommandResult(args=["sleep", "30"], used_resume=False)
+
+    def _parse_invoke_output(self, stdout_text: str, context_key: str) -> ParseResult:
+        return ParseResult(text=stdout_text)
+
+
+class TestRunSubprocessCancellation:
+    async def test_cancelled_task_kills_subprocess(self, tmp_path):
+        """Cancelling the asyncio task running _run_subprocess must kill the
+        child process instead of leaving it orphaned."""
+        adapter = SleepingCliAdapter(tmp_path)
+        task = asyncio.create_task(adapter.invoke("hi", "ctx", task_id="t1"))
+
+        for _ in range(200):
+            if "t1" in adapter._active_processes:
+                break
+            await asyncio.sleep(0.01)
+        proc = adapter._active_processes["t1"]
+        assert proc.returncode is None
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert proc.returncode is not None
+        assert "t1" not in adapter._active_processes
+
+    async def test_cancel_then_task_cancel_clears_killed_marker(self, tmp_path):
+        """tasks/cancel calls adapter.cancel() and then cancels the task; the
+        killed-task marker must not outlive the cancelled run."""
+        adapter = SleepingCliAdapter(tmp_path)
+        task = asyncio.create_task(adapter.invoke("hi", "ctx", task_id="t2"))
+
+        for _ in range(200):
+            if "t2" in adapter._active_processes:
+                break
+            await asyncio.sleep(0.01)
+        proc = adapter._active_processes["t2"]
+
+        await adapter.cancel(context=SimpleNamespace(task_id="t2"))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert proc.returncode is not None
+        assert "t2" not in adapter._killed_tasks
