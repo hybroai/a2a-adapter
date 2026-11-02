@@ -45,7 +45,7 @@ except ImportError:
 
 from ..adapter import BaseAgentAdapter
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter
-from ._framework import run_with_timeout
+from ._framework import apply_input_mapper, run_with_timeout
 
 # Lazy import for TaskStore to avoid hard dependency
 try:
@@ -108,7 +108,8 @@ class CrewAIAdapter(BaseA2AAdapter):
             inputs_key: Key for passing text inputs to the crew (default: "inputs").
             timeout: Execution timeout in seconds (default: 300).
             parse_json_input: Auto-parse JSON input (default: True).
-            input_mapper: Custom function for input transformation.
+            input_mapper: Custom function for input transformation. If it
+                raises, the request fails; there is no fallback.
             default_inputs: Default values to merge with parsed inputs.
             name: Optional agent name for AgentCard generation.
             description: Optional agent description for AgentCard generation.
@@ -162,11 +163,8 @@ class CrewAIAdapter(BaseA2AAdapter):
         """Build crew inputs with 3-priority pipeline."""
         # Priority 1: Custom input_mapper
         if self.input_mapper is not None:
-            try:
-                mapped = self.input_mapper(user_input, context_id)
-                return {**self.default_inputs, **mapped}
-            except Exception as e:
-                logger.warning("input_mapper failed: %s, falling back", e)
+            mapped = apply_input_mapper(self.input_mapper, user_input, context_id)
+            return {**self.default_inputs, **mapped}
 
         # Priority 2: Auto JSON parsing
         if self.parse_json_input and user_input.strip().startswith("{"):

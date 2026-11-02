@@ -173,15 +173,26 @@ async def test_input_mapper():
 
 
 @pytest.mark.asyncio
-async def test_input_mapper_fallback():
+async def test_input_mapper_error_fails_the_task():
+    """A bug in input_mapper must surface, not silently fall back."""
     graph = MockGraph()
 
     def bad_mapper(raw_input, context_id):
         raise ValueError("broken")
 
-    adapter = LangGraphAdapter(graph=graph, input_key="query", input_mapper=bad_mapper)
-    await adapter.invoke("fallback test")
-    assert graph.last_input == {"query": "fallback test"}
+    adapter = LangGraphAdapter(graph=graph, input_mapper=bad_mapper)
+    with pytest.raises(RuntimeError, match="input_mapper failed: ValueError: broken") as exc:
+        await adapter.invoke("hello")
+    assert isinstance(exc.value.__cause__, ValueError)
+    assert graph.last_input is None
+
+
+@pytest.mark.asyncio
+async def test_input_mapper_must_return_a_dict():
+    graph = MockGraph()
+    adapter = LangGraphAdapter(graph=graph, input_mapper=lambda raw, ctx: ["not", "a", "dict"])
+    with pytest.raises(TypeError, match="input_mapper must return a dict, got list"):
+        await adapter.invoke("hello")
 
 
 @pytest.mark.asyncio

@@ -163,16 +163,26 @@ async def test_input_mapper():
 
 
 @pytest.mark.asyncio
-async def test_input_mapper_fallback_on_error():
+async def test_input_mapper_error_fails_the_task():
+    """A bug in input_mapper must surface, not silently fall back."""
     runnable = MockRunnable()
 
     def bad_mapper(raw_input, context_id):
-        raise RuntimeError("mapper failed")
+        raise ValueError("broken")
 
     adapter = LangChainAdapter(runnable=runnable, input_mapper=bad_mapper)
-    await adapter.invoke("hello")
-    # Falls back to input_key
-    assert runnable.last_input == {"input": "hello"}
+    with pytest.raises(RuntimeError, match="input_mapper failed: ValueError: broken") as exc:
+        await adapter.invoke("hello")
+    assert isinstance(exc.value.__cause__, ValueError)
+    assert runnable.last_input is None
+
+
+@pytest.mark.asyncio
+async def test_input_mapper_must_return_a_dict():
+    runnable = MockRunnable()
+    adapter = LangChainAdapter(runnable=runnable, input_mapper=lambda raw, ctx: ["not", "a", "dict"])
+    with pytest.raises(TypeError, match="input_mapper must return a dict, got list"):
+        await adapter.invoke("hello")
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,8 @@ CrewAI, callable)."""
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterable, AsyncIterator, Awaitable, TypeVar
+from collections.abc import Mapping
+from typing import Any, AsyncIterable, AsyncIterator, Awaitable, Callable, Dict, TypeVar
 
 T = TypeVar("T")
 
@@ -56,6 +57,25 @@ async def iter_with_timeout(
         aclose = getattr(iterator, "aclose", None)
         if aclose is not None:
             await aclose()
+
+
+def apply_input_mapper(
+    mapper: Callable[[str, str | None], Any],
+    user_input: str,
+    context_id: str | None,
+) -> Dict[str, Any]:
+    """Call a user ``input_mapper``; its errors fail the request.
+
+    Raises ``RuntimeError("input_mapper failed: <type>: <message>")`` chained
+    to the original exception, or ``TypeError`` if it returns a non-mapping.
+    """
+    try:
+        mapped = mapper(user_input, context_id)
+    except Exception as e:
+        raise RuntimeError(f"input_mapper failed: {type(e).__name__}: {e}") from e
+    if not isinstance(mapped, Mapping):
+        raise TypeError(f"input_mapper must return a dict, got {type(mapped).__name__}")
+    return dict(mapped)
 
 
 def content_to_text(content: Any, sep: str = " ") -> str:
