@@ -416,3 +416,5 @@ async def test_execute_invoke_empty_string_skips_artifact():
 
         updater_instance.add_artifact.assert_not_awaited()
         updater_instance.complete.assert_awaited_once()
+        message_parts = updater_instance.new_agent_message.call_args[0][0]
+        assert [p.text for p in message_parts] == ["[Empty response]"]

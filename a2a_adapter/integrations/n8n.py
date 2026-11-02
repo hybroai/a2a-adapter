@@ -105,7 +105,9 @@ class N8nAdapter(BaseA2AAdapter):
     the context fields the adapter sets (``metadata.context_id``, or
     ``context_id`` when a template is used). ``default_inputs`` are defaults a
     client may override; ``payload_template`` keys are fixed by the operator.
-    For plain-text messages the text goes in ``message_field``.
+    For plain-text messages the text goes in ``message_field``. Context fields
+    are added for JSON and plain-text messages, not to ``input_mapper``
+    output, which the operator's mapper controls.
 
     File URLs (multimodal_mode): a client-supplied file URL is passed to the
     webhook as ``uri`` and not fetched. With ``fetch_file_urls=True`` the
@@ -186,6 +188,7 @@ class N8nAdapter(BaseA2AAdapter):
             encode_files_base64: Encode files as base64 in JSON (default: True).
             fetch_file_urls: Download client-supplied file URLs and embed the
                 content instead of passing the URL through (default: False).
+                Each download must finish within ``timeout`` seconds.
                 See the class docstring for the limits and the SSRF caveat.
             max_file_bytes: Maximum size of one fetched file when
                 fetch_file_urls is enabled (default: 10 MiB).
@@ -309,7 +312,8 @@ class N8nAdapter(BaseA2AAdapter):
             3. message_field (fallback for plain text)
 
         In every branch payload_template keys override client-derived fields;
-        see the class docstring for the full precedence.
+        the JSON and plain-text branches then set the context fields. See the
+        class docstring for the full precedence.
         """
         # Priority 1: Custom input_mapper
         if self.input_mapper is not None:
@@ -345,23 +349,31 @@ class N8nAdapter(BaseA2AAdapter):
         """Set the context fields so client input cannot replace them.
 
         Without a payload_template the id goes in ``metadata.context_id``
-        (other client metadata keys are kept); with one it goes in
-        ``context_id`` unless the template sets that key itself.
+        (other client metadata keys are kept; a non-dict client ``metadata``
+        is replaced). With one it goes in ``context_id`` unless the template
+        sets that key itself, and a client ``metadata.context_id`` is
+        overwritten unless the template sets ``metadata``.
         """
+        metadata = payload.get("metadata")
         if not self.payload_template:
-            metadata = payload.get("metadata")
+            if metadata is not None and not isinstance(metadata, dict):
+                logger.warning(
+                    "Replacing non-object client 'metadata' (%s) with context metadata",
+                    type(metadata).__name__,
+                )
             if not isinstance(metadata, dict):
                 metadata = {}
             payload["metadata"] = {**metadata, "context_id": context_id}
-        elif "context_id" not in self.payload_template:
+            return
+
+        if "context_id" not in self.payload_template:
             payload["context_id"] = context_id
-            metadata = payload.get("metadata")
-            if (
-                "metadata" not in self.payload_template
-                and isinstance(metadata, dict)
-                and "context_id" in metadata
-            ):
-                payload["metadata"] = {**metadata, "context_id": context_id}
+        if (
+            "metadata" not in self.payload_template
+            and isinstance(metadata, dict)
+            and "context_id" in metadata
+        ):
+            payload["metadata"] = {**metadata, "context_id": context_id}
 
     async def _build_multimodal_payload(
         self,
@@ -421,7 +433,8 @@ class N8nAdapter(BaseA2AAdapter):
 
         Raises:
             ValueError: The URL is not http/https, the body exceeds
-                max_file_bytes, or the fetch failed (including any redirect).
+                max_file_bytes, the fetch took longer than ``timeout`` in
+                total, or it failed (including any redirect).
         """
         if part.HasField("url"):
             return await self._fetch_url(part.url)
@@ -431,7 +444,15 @@ class N8nAdapter(BaseA2AAdapter):
             raise ValueError(f"Part has no url or raw data: {part}")
 
     async def _fetch_url(self, url: str) -> bytes:
-        """Download a client-supplied URL, capped at max_file_bytes."""
+        """Download a client-supplied URL, capped at max_file_bytes and timeout."""
+        try:
+            return await asyncio.wait_for(self._download(url), self.timeout)
+        except asyncio.TimeoutError as e:
+            raise ValueError(
+                f"Fetching file {url} timed out after {self.timeout}s"
+            ) from e
+
+    async def _download(self, url: str) -> bytes:
         try:
             scheme = httpx.URL(url).scheme
         except httpx.InvalidURL as e:

@@ -221,6 +221,35 @@ class TestPayloadPrecedence:
         assert payload["context_id"] == "ctx-1"
         assert payload["metadata"] == {"context_id": "ctx-1", "tag": "x"}
 
+    def test_client_metadata_context_id_overwritten_with_template_context_id(self):
+        adapter = N8nAdapter(
+            webhook_url=WEBHOOK, payload_template={"context_id": "fixed"}
+        )
+        payload = adapter._build_payload(
+            '{"metadata": {"context_id": "forged"}}', "ctx-1"
+        )
+        assert payload["metadata"] == {"context_id": "ctx-1"}
+
+    def test_template_metadata_wins_over_client_metadata(self):
+        adapter = N8nAdapter(
+            webhook_url=WEBHOOK, payload_template={"metadata": {"source": "op"}}
+        )
+        payload = adapter._build_payload(
+            '{"metadata": {"context_id": "forged"}}', "ctx-1"
+        )
+        assert payload["metadata"] == {"source": "op"}
+        assert payload["context_id"] == "ctx-1"
+
+    def test_template_wins_over_default_inputs_for_plain_text(self):
+        adapter = N8nAdapter(
+            webhook_url=WEBHOOK,
+            payload_template={"lang": "en"},
+            default_inputs={"lang": "fr", "n": 1},
+        )
+        payload = adapter._build_payload("hello", "ctx-1")
+        assert payload["lang"] == "en"
+        assert payload["n"] == 1
+
     def test_template_context_id_still_wins(self):
         adapter = N8nAdapter(
             webhook_url=WEBHOOK, payload_template={"context_id": "fixed"}

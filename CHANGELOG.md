@@ -20,8 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (see the README), or delete the old folder
 - `N8nAdapter` no longer retries a webhook call that may have reached n8n: a
   5xx response, a read timeout or a reset or dropped connection now fails at
-  once,
-  because the workflow may already have run (a workflow that sends an email
+  once, because the workflow may already have run (a workflow that sends an email
   used to send it up to `max_retries + 1` times). Only failures before the
   request is sent (connect error, connect timeout, pool timeout) are retried.
   Set `retry_on_server_error=True` to retry the others too, if the webhook is
@@ -32,8 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   URLs: the URL is passed to the webhook as `uri` without a `data` field.
   Set `fetch_file_urls=True` to download and embed the file as before; it now
   accepts only `http`/`https`, does not follow redirects, rejects files over
-  `max_file_bytes` (default 10 MiB), and fails the request if a fetch fails
-  instead of dropping the file. Private and internal addresses are not
+  `max_file_bytes` (default 10 MiB) or downloads slower than `timeout`
+  seconds in total, and fails the request if a fetch fails instead of
+  dropping the file. Private and internal addresses are not
   blocked, so enable it only for trusted clients
 
 ### Fixed
@@ -75,16 +75,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   client JSON (or `input_mapper` output) < `payload_template` < context
   fields. `default_inputs` stay overridable. JSON messages now also carry the
   context id (`metadata.context_id`, or `context_id` with a template), merged
-  into any client `metadata` object; a client `metadata.context_id` is
-  overwritten with the real one either way. And `payload_template` keys now win over
-  `default_inputs` for plain-text messages too
+  into any client `metadata` object (a non-object client `metadata` is
+  replaced, with a warning). A client `metadata.context_id` is overwritten
+  with the real one unless the template sets `metadata`, and
+  `payload_template` keys now win over `default_inputs` for plain-text
+  messages too
 - `N8nAdapter` multimodal responses skip file and image refs with no `url`,
   `uri` or base64 `data` (refs with `data` become inline file Parts) and
   treat a `null` or non-list `files`/`images` field as empty; these used to
   produce empty `{}` Parts or raise `TypeError`
-- Non-streaming adapters no longer put empty Parts in the response artifact:
-  `invoke()` results are filtered the same way as streamed chunks, and a
-  result with no content emits no artifact
+- Non-streaming adapters no longer put empty `{}` Parts on the wire:
+  `invoke()` results are filtered the same way as streamed chunks, a result
+  with no content emits no artifact, and an empty text result completes with
+  `[Empty response]` instead of an empty text Part
 
 ## [0.2.15] - 2026-11-01
 

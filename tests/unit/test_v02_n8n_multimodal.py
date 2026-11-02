@@ -10,8 +10,8 @@ from a2a.types import Part
 from a2a_adapter.integrations.n8n import N8nAdapter
 
 
-def _client_for(handler) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+def _client_for(handler, **kwargs) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), **kwargs)
 
 
 def _fail_if_called(request: httpx.Request) -> httpx.Response:
@@ -155,13 +155,31 @@ class TestFetchFileUrls:
                 return httpx.Response(302, headers={"Location": "http://10.0.0.1/"})
             return httpx.Response(200, content=b"internal")
 
-        adapter._client = _client_for(handler)
+        # The client follows redirects; only the per-request override stops it.
+        adapter._client = _client_for(handler, follow_redirects=True)
 
         with pytest.raises(ValueError, match="Failed to fetch"):
             await adapter._build_multimodal_payload(
                 "check this", "ctx-1", self._ctx("http://example.com/doc.pdf")
             )
         assert seen == ["http://example.com/doc.pdf"]
+
+    async def test_slow_drip_body_hits_total_deadline(self, adapter):
+        """timeout bounds the whole fetch, not just each read."""
+        import asyncio
+
+        async def body():
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                yield b""
+
+        adapter.timeout = 0.1
+        adapter._client = _client_for(lambda req: httpx.Response(200, content=body()))
+
+        with pytest.raises(ValueError, match="timed out"):
+            await adapter._build_multimodal_payload(
+                "check this", "ctx-1", self._ctx("http://example.com/doc.pdf")
+            )
 
     async def test_invalid_url_raises_value_error(self, adapter):
         adapter._client = _client_for(_fail_if_called)
