@@ -15,6 +15,7 @@ import asyncio
 from asyncio.subprocess import PIPE, Process as AsyncProcess
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -59,7 +60,12 @@ except ImportError:
     MessageSendParams = None  # type: ignore
 
 from ..adapter import BaseAgentAdapter
-from ..base_adapter import AdapterMetadata, BaseA2AAdapter
+from ..base_adapter import (
+    AdapterMetadata,
+    BaseA2AAdapter,
+    CommandResult,
+    ParseResult,
+)
 
 # Lazy import for TaskStore to avoid hard dependency
 try:
@@ -166,9 +172,15 @@ _SESSION_ID_MAX_LEN = 64
 class OpenClawAdapter(BaseA2AAdapter):
     """Adapter for OpenClaw agents via the CLI.
 
-    Wraps the ``openclaw agent --local --json`` command as a subprocess,
-    parses the JSON output, and returns the response text. Supports
-    ``cancel()`` to kill a running subprocess.
+    Wraps the ``openclaw agent --local --json`` command as a subprocess on
+    BaseA2AAdapter's subprocess runtime, parses the JSON output, and returns
+    the response text. The runtime tracks one process per task, so
+    ``cancel()`` kills only that task's child and the task ends as canceled.
+
+    The prompt is written to the child's stdin (``--message-file -``) rather
+    than passed in argv, so prompts larger than the OS argument limit work.
+    This needs an OpenClaw release that supports ``--message-file``; OpenClaw
+    rejects prompts over 4 MiB.
 
     Example::
 
@@ -208,7 +220,9 @@ class OpenClawAdapter(BaseA2AAdapter):
             thinking: Thinking level (off/minimal/low/medium/high/xhigh).
             timeout: Command timeout in seconds (default: 600).
             openclaw_path: Path to the openclaw binary (default: "openclaw").
+            cli_args: Extra arguments inserted after ``openclaw agent``.
             working_directory: Working directory for the subprocess.
+                Defaults to the current directory at construction time.
             env_vars: Additional environment variables for the subprocess.
             name: Optional agent name for AgentCard generation.
             description: Optional agent description for AgentCard generation.
@@ -226,14 +240,19 @@ class OpenClawAdapter(BaseA2AAdapter):
         if isinstance(cli_args, str):
             raise TypeError("cli_args must be a sequence of arguments, not a string")
 
+        # OpenClaw keeps its own sessions keyed by --session-id, which is
+        # derived from the context ID, so no adapter session store is needed.
+        super().__init__(
+            working_dir=working_directory or os.getcwd(),
+            timeout=timeout,
+            env_vars=env_vars,
+        )
         self.session_id = session_id or f"a2a-{uuid.uuid4().hex[:12]}"
         self.agent_id = agent_id
         self.thinking = thinking
-        self.timeout = timeout
         self.openclaw_path = openclaw_path
         self.cli_args = list(cli_args or [])
         self.working_directory = working_directory
-        self.env_vars = dict(env_vars) if env_vars else {}
         self._name = name
         self._description = description
         self._skills = skills or []
@@ -241,83 +260,13 @@ class OpenClawAdapter(BaseA2AAdapter):
         self._documentation_url = documentation_url
         self._icon_url = icon_url
 
-        # Track current subprocess for cancel support
-        self._current_process: AsyncProcess | None = None
-
     async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         """Execute the OpenClaw CLI and return the response text."""
-        import os
-
-        session_id = self._context_id_to_session_id(context_id)
-        cmd = self._build_command(user_input, session_id)
-        logger.debug("Executing OpenClaw command: %s", " ".join(cmd))
-
-        env = os.environ.copy()
-        env.update(self.env_vars)
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=PIPE,
-                stderr=PIPE,
-                cwd=self.working_directory,
-                env=env,
-            )
-            self._current_process = proc
-
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=self.timeout,
-                )
-            finally:
-                self._current_process = None
-
-        except FileNotFoundError:
-            raise FileNotFoundError(
-                f"OpenClaw binary not found at '{self.openclaw_path}'. "
-                "Ensure OpenClaw is installed and in PATH."
-            )
-        except asyncio.TimeoutError:
-            if proc.returncode is None:
-                proc.kill()
-                await proc.wait()
-            raise RuntimeError(
-                f"OpenClaw command timed out after {self.timeout} seconds"
-            )
-
-        if proc.returncode != 0:
-            stderr_text = stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(
-                f"OpenClaw command failed with exit code {proc.returncode}: {stderr_text}"
-            )
-
-        stdout_text = stdout.decode("utf-8", errors="replace").strip()
-        stderr_text = stderr.decode("utf-8", errors="replace").strip()
-        
-        # OpenClaw may output JSON to stderr instead of stdout in some configurations
-        # Try stderr if stdout is empty
-        output_text = stdout_text or stderr_text
-        
-        if not output_text:
-            raise RuntimeError(
-                "OpenClaw command returned empty output (both stdout and stderr empty)"
-            )
-
-        parsed = _extract_json_from_output(output_text)
-
-        return self._extract_response_text(parsed)
-
-    async def cancel(self, **kwargs) -> None:
-        """Kill the running OpenClaw subprocess."""
-        proc = self._current_process
-        if proc and proc.returncode is None:
-            logger.debug("Killing OpenClaw subprocess")
-            proc.kill()
-            await proc.wait()
-
-    async def close(self) -> None:
-        """Ensure subprocess is cleaned up."""
-        await self.cancel()
+        context = kwargs.get("context")
+        key = self._context_id_to_session_id(context_id)
+        task_id = context.task_id if context else key
+        async with self._get_context_lock(key):
+            return await self._run_subprocess(key, task_id, user_input=user_input)
 
     def get_metadata(self) -> AdapterMetadata:
         """Return adapter metadata for AgentCard generation."""
@@ -331,23 +280,49 @@ class OpenClawAdapter(BaseA2AAdapter):
             icon_url=self._icon_url,
         )
 
-    # ──── Internal: Command Building ────
+    # ──── Hooks ────
 
-    def _build_command(self, message: str, session_id: str) -> list[str]:
-        """Build the OpenClaw CLI command."""
+    def _build_command(self, message: str, context_key: str) -> CommandResult:
+        """Build the OpenClaw CLI command. ``context_key`` is the session ID."""
         cmd = [
             self.openclaw_path,
             "agent",
             *self.cli_args,
             "--local",
-            "--message", message,
+            # The prompt goes through stdin (see CommandResult.stdin).
+            "--message-file", "-",
             "--json",
-            "--session-id", session_id,
+            "--session-id", context_key,
             "--thinking", self.thinking,
         ]
         if self.agent_id:
             cmd.extend(["--agent", self.agent_id])
-        return cmd
+        return CommandResult(args=cmd, used_resume=False, stdin=message)
+
+    def _select_invoke_output(self, stdout_text: str, stderr_text: str) -> str:
+        # Some OpenClaw configurations write the JSON result to stderr.
+        return stdout_text if stdout_text.strip() else stderr_text
+
+    def _parse_invoke_output(self, stdout_text: str, context_key: str) -> ParseResult:
+        parsed = _extract_json_from_output(stdout_text.strip())
+        return ParseResult(text=self._extract_response_text(parsed))
+
+    def _extract_error(self, stdout_text: str) -> str | None:
+        try:
+            parsed = _extract_json_from_output(stdout_text.strip())
+        except RuntimeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        return _extract_openclaw_failure_message(parsed)
+
+    def _binary_not_found_message(self) -> str:
+        return (
+            f"OpenClaw binary not found at '{self.openclaw_path}'. "
+            "Ensure OpenClaw is installed and in PATH."
+        )
+
+    # ──── Internal: Session IDs ────
 
     def _context_id_to_session_id(self, context_id: str | None) -> str:
         """Convert A2A context_id to a valid OpenClaw session_id.
@@ -364,7 +339,7 @@ class OpenClawAdapter(BaseA2AAdapter):
 
         prefix = getattr(self, "session_id", "a2a")
         max_suffix_len = _SESSION_ID_MAX_LEN - len(prefix) - 1
-        
+
         if max_suffix_len > 0:
             sanitized = sanitized[:max_suffix_len]
             return f"{prefix}-{sanitized}"
