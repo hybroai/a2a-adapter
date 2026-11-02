@@ -101,3 +101,9 @@ def request_context():
     ctx.context_id = "test-ctx-001"
     ctx.get_user_input.return_value = "hi"
     return ctx
+
+
+@pytest.fixture(autouse=True)
+def _isolated_state_home(tmp_path_factory, monkeypatch):
+    """Keep CLI adapter session stores out of the real ~/.local/state."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("state")))

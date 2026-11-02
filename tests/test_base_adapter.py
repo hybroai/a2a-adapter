@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from types import SimpleNamespace
 from typing import AsyncIterator
 
@@ -13,6 +14,7 @@ from a2a_adapter.base_adapter import (
     BaseA2AAdapter,
     CommandResult,
     ParseResult,
+    default_state_dir,
 )
 
 
@@ -247,3 +249,47 @@ class TestSessionStore:
 
         assert store.read_text() == before
         assert sorted(p.name for p in tmp_path.iterdir()) == ["sessions.json"]
+
+
+class TestDefaultStateDir:
+    def test_outside_working_dir_and_per_project(self, tmp_path, monkeypatch):
+        state = tmp_path / "state"
+        monkeypatch.setenv("XDG_STATE_HOME", str(state))
+        proj_a = tmp_path / "proj-a"
+        proj_b = tmp_path / "proj-b"
+
+        dir_a = default_state_dir("claude-code", str(proj_a))
+        dir_b = default_state_dir("claude-code", str(proj_b))
+
+        assert dir_a != dir_b
+        for d, proj in ((dir_a, proj_a), (dir_b, proj_b)):
+            assert os.path.commonpath([d, str(proj)]) != str(proj)
+            assert os.path.dirname(d) == str(state / "a2a-adapter" / "claude-code")
+
+    def test_same_working_dir_is_stable(self, tmp_path):
+        assert default_state_dir("codex", str(tmp_path)) == default_state_dir(
+            "codex", str(tmp_path) + os.sep
+        )
+
+    def test_relative_working_dir_resolves_to_absolute(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert default_state_dir("codex", ".") == default_state_dir(
+            "codex", str(tmp_path)
+        )
+
+    def test_agents_do_not_share_a_dir(self, tmp_path):
+        assert default_state_dir("codex", str(tmp_path)) != default_state_dir(
+            "claude-code", str(tmp_path)
+        )
+
+    @pytest.mark.parametrize("xdg", [None, "", "relative/state"])
+    def test_falls_back_to_home_local_state(self, tmp_path, monkeypatch, xdg):
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        if xdg is None:
+            monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        else:
+            monkeypatch.setenv("XDG_STATE_HOME", xdg)
+        d = default_state_dir("pi", str(tmp_path / "proj"))
+        assert d.startswith(
+            os.path.join(str(tmp_path / "home"), ".local", "state", "a2a-adapter", "pi") + os.sep
+        )

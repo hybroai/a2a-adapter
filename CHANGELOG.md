@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Claude Code, Codex and Pi session state now defaults to a per-user location,
+  `$XDG_STATE_HOME/a2a-adapter/<agent>/<hash of working dir>/` (or
+  `~/.local/state/a2a-adapter/...`), instead of `<working_dir>/.a2a-adapter/`,
+  which left an untracked folder in the agent's project. Explicit
+  `session_store_path` / `session_dir` arguments still win. Existing state is
+  not migrated: move `<working_dir>/.a2a-adapter/<agent>/` to the new location
+  to keep it, or delete it
+
 ### Fixed
 
 - A stream that fails mid-flight now closes its artifact with the last chunk it

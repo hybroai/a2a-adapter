@@ -14,6 +14,7 @@ Design philosophy:
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -29,6 +30,23 @@ from a2a.types import Part
 from .exceptions import CancelledByAdapterError
 
 logger = logging.getLogger(__name__)
+
+
+def default_state_dir(agent: str, working_dir: str) -> str:
+    """Per-user state directory for one agent working in one project.
+
+    Returns ``$XDG_STATE_HOME/a2a-adapter/<agent>/<hash>`` (falling back to
+    ``~/.local/state`` when ``XDG_STATE_HOME`` is unset or not absolute),
+    where ``<hash>`` is a short digest of the resolved working directory.
+    Keeps adapter state out of the agent's project while giving each
+    project its own store.
+    """
+    state_home = os.environ.get("XDG_STATE_HOME", "")
+    if not os.path.isabs(state_home):
+        state_home = os.path.join(os.path.expanduser("~"), ".local", "state")
+    resolved = os.path.realpath(working_dir or ".")
+    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:16]
+    return os.path.join(state_home, "a2a-adapter", agent, digest)
 
 
 @dataclass

@@ -18,6 +18,7 @@ from ..base_adapter import (
     CommandResult,
     ParseResult,
     StreamEvent,
+    default_state_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,9 +66,7 @@ class ClaudeCodeAdapter(BaseA2AAdapter):
             timeout=timeout,
             env_vars=env_vars,
             session_store_path=session_store_path
-            or os.path.join(
-                working_dir, ".a2a-adapter", "claude-code", "sessions.json"
-            ),
+            or os.path.join(default_state_dir("claude-code", working_dir), "sessions.json"),
         )
         self.session_id = f"a2a-{uuid.uuid4().hex[:12]}"
         self.claude_path = claude_path
