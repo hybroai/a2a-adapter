@@ -648,3 +648,34 @@ async def test_stream_fan_out_list_updates():
         {"worker": [{"output": "a"}, {"output": "b"}]},
     ])
     assert "".join(await _collect(LangGraphAdapter(graph=graph))) == "a\n\nb"
+
+
+@pytest.mark.asyncio
+async def test_stream_no_reducer_full_history_emits_only_latest_reply():
+    """Without a reducer a node returns the whole message list; only its
+    latest AI message is the new reply (as invoke() reads messages[-1])."""
+    history = [
+        TypedMessage("turn 1", type="human"),
+        TypedMessage("reply 1"),
+        TypedMessage("turn 2", type="human"),
+        TypedMessage("reply 2"),
+    ]
+    graph = UpdatesGraph([{"agent": {"messages": history}}])
+    assert await _collect(LangGraphAdapter(graph=graph)) == ["reply 2"]
+
+
+@pytest.mark.asyncio
+async def test_stream_message_tuples_and_strings():
+    """add_messages accepts (role, content) tuples and bare strings (human)."""
+    graph = UpdatesGraph([
+        {"intake": {"messages": [("user", "question"), "also human"]}},
+        {"agent": {"messages": [("assistant", "hi")]}},
+    ])
+    assert await _collect(LangGraphAdapter(graph=graph)) == ["hi"]
+
+
+@pytest.mark.asyncio
+async def test_stream_string_node_write():
+    """Functional API entrypoints can write a plain string."""
+    graph = UpdatesGraph([{"workflow": "answer"}])
+    assert await _collect(LangGraphAdapter(graph=graph)) == ["answer"]

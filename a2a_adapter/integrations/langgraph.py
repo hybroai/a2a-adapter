@@ -294,8 +294,12 @@ class LangGraphAdapter(BaseA2AAdapter):
             for write in writes:
                 if isinstance(write, dict):
                     text = self._extract_streaming_text(write)
-                    if text:
-                        texts.append(text)
+                elif isinstance(write, str):
+                    text = write  # e.g. a Functional API entrypoint's return
+                else:
+                    continue
+                if text:
+                    texts.append(text)
         return "\n\n".join(texts)
 
     def _extract_streaming_text(self, state: Dict[str, Any]) -> str:
@@ -307,11 +311,13 @@ class LangGraphAdapter(BaseA2AAdapter):
             messages = state["messages"]
             if not isinstance(messages, list):
                 messages = [messages]
-            texts = [
-                self._extract_message_content(m)
-                for m in messages if self._is_ai_message(m)
-            ]
-            return "\n\n".join(t for t in texts if t)
+            # Only the node's latest AI message, as invoke() reads
+            # messages[-1]: a channel without a reducer makes the node
+            # write the whole history, earlier replies included.
+            for message in reversed(messages):
+                if self._is_ai_message(message):
+                    return self._extract_message_content(message)
+            return ""
 
         for key in ("output", "response", "text", "content"):
             if key in state:
@@ -322,8 +328,16 @@ class LangGraphAdapter(BaseA2AAdapter):
     @staticmethod
     def _is_ai_message(message: Any) -> bool:
         """True unless the message is known to come from someone else
-        (user input, tool results, system prompts)."""
-        if isinstance(message, dict):
+        (user input, tool results, system prompts).
+
+        Node updates are read before ``add_messages`` coerces them, so
+        ``(role, content)`` tuples and bare strings (human) count too.
+        """
+        if isinstance(message, str):
+            return False
+        if isinstance(message, tuple) and len(message) == 2:
+            kind = message[0]
+        elif isinstance(message, dict):
             kind = message.get("role") or message.get("type")
         else:
             kind = getattr(message, "type", None)
@@ -355,6 +369,9 @@ class LangGraphAdapter(BaseA2AAdapter):
             for key in ("content", "text"):
                 if key in message:
                     return content_to_text(message[key])
+
+        if isinstance(message, tuple) and len(message) == 2:
+            return content_to_text(message[1])
 
         return str(message)
 

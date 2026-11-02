@@ -58,8 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   options. The client chooses the `context_id`, so on a server shared by
   clients that must not read each other's threads, set `thread_id_key=None`
 - `LangGraphAdapter.stream()` now runs the graph with
-  `stream_mode="updates"` and emits each node's new AI messages or output
-  keys once, separated by a blank line. Compiled graphs stream updates by
+  `stream_mode="updates"` and emits each node's latest AI message (or its
+  output key) once, separated by a blank line. Compiled graphs stream updates by
   default, which the adapter used to read as empty; with whole-state
   streams it echoed the user's message as the reply. Tool results and
   human messages are no longer emitted; fan-out (`Send`) writes grouped in a
