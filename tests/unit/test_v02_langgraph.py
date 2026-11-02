@@ -5,6 +5,7 @@ key with HumanMessage fallback), output extraction from graph state,
 metadata, and integration with to_a2a / build_agent_card / load_adapter.
 """
 
+import asyncio
 import json
 import pytest
 
@@ -556,3 +557,74 @@ async def test_stream_state_key_on_node_updates():
     ])
     chunks = await _collect(LangGraphAdapter(graph=graph, state_key="report"))
     assert "".join(chunks) == "part one\n\npart two"
+
+
+# ──── Test: Timeouts and explicit streaming flag ────
+
+
+class SlowFramework:
+    """ainvoke sleeps; astream yields every 30ms and records closing."""
+
+    def __init__(self, items=10, raise_inside=None):
+        self.items = items
+        self.raise_inside = raise_inside
+        self.closed = False
+
+    async def ainvoke(self, inputs, config=None):
+        await asyncio.sleep(1)
+        return "late"
+
+    async def astream(self, inputs, config=None, stream_mode=None):
+        try:
+            if self.raise_inside is not None:
+                raise self.raise_inside
+            for i in range(self.items):
+                await asyncio.sleep(0.03)
+                yield {"n": {"output": f"c{i}"}} if "langgraph" == "langgraph" else f"c{i}"
+        finally:
+            self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_invoke_timeout_has_clear_message():
+    adapter = LangGraphAdapter(graph=SlowFramework(), timeout=0.05)
+    with pytest.raises(TimeoutError, match="timed out after 0.05 seconds"):
+        await adapter.invoke("x")
+
+
+@pytest.mark.asyncio
+async def test_stream_timeout_bounds_whole_stream():
+    """The timeout bounds the whole stream, not each chunk."""
+    framework = SlowFramework(items=10)
+    adapter = LangGraphAdapter(graph=framework, timeout=0.1)
+    chunks = []
+    with pytest.raises(TimeoutError, match="timed out after 0.1 seconds"):
+        async for chunk in adapter.stream("x"):
+            chunks.append(chunk)
+    assert 0 < len(chunks) < 10
+    assert framework.closed
+
+
+@pytest.mark.asyncio
+async def test_stream_completes_within_timeout():
+    adapter = LangGraphAdapter(graph=SlowFramework(items=2), timeout=5)
+    assert len([c async for c in adapter.stream("x")]) == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_inner_timeout_error_not_relabelled():
+    framework = SlowFramework(raise_inside=TimeoutError("upstream API"))
+    adapter = LangGraphAdapter(graph=framework, timeout=5)
+    with pytest.raises(TimeoutError, match="^upstream API$"):
+        _ = [c async for c in adapter.stream("x")]
+
+
+def test_streaming_flag_disables_streaming():
+    adapter = LangGraphAdapter(graph=MockGraph(), streaming=False)
+    assert adapter.supports_streaming() is False
+    assert adapter.get_metadata().streaming is False
+
+
+def test_streaming_flag_default_auto_detects():
+    assert LangGraphAdapter(graph=MockGraph()).supports_streaming() is True
+    assert LangGraphAdapter(graph=MockGraphNoStream()).supports_streaming() is False

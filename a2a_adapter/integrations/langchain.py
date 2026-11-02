@@ -41,7 +41,7 @@ except ImportError:
 
 from ..adapter import BaseAgentAdapter
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter
-from ._framework import content_to_text
+from ._framework import content_to_text, iter_with_timeout, run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +88,7 @@ class LangChainAdapter(BaseA2AAdapter):
         provider: dict | None = None,
         documentation_url: str | None = None,
         icon_url: str | None = None,
+        streaming: bool | None = None,
     ) -> None:
         """Initialize the LangChain adapter.
 
@@ -105,6 +106,8 @@ class LangChainAdapter(BaseA2AAdapter):
             provider: Optional dict with 'organization' and 'url' keys.
             documentation_url: Optional URL to the agent's documentation.
             icon_url: Optional URL to an icon for the agent.
+            streaming: Whether to serve ``message/stream`` via ``astream()``.
+                ``None`` (default) enables it when the runnable has ``astream``.
         """
         self.runnable = runnable
         self.input_key = input_key
@@ -119,25 +122,29 @@ class LangChainAdapter(BaseA2AAdapter):
         self._provider = provider
         self._documentation_url = documentation_url
         self._icon_url = icon_url
+        self._streaming = streaming
 
     async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         """Invoke the runnable and return a text response."""
         inputs = self._build_inputs(user_input, context_id)
-        result = await asyncio.wait_for(
-            self.runnable.ainvoke(inputs), timeout=self.timeout,
+        result = await run_with_timeout(
+            self.runnable.ainvoke(inputs), self.timeout, "LangChain runnable",
         )
         return self._extract_output(result)
 
     async def stream(self, user_input: str, context_id: str | None = None, **kwargs) -> AsyncIterator[str]:
         """Stream tokens from the runnable via astream()."""
         inputs = self._build_inputs(user_input, context_id)
-        async for chunk in self.runnable.astream(inputs):
+        chunks = self.runnable.astream(inputs)
+        async for chunk in iter_with_timeout(chunks, self.timeout, "LangChain runnable"):
             text = self._extract_chunk_text(chunk)
             if text:
                 yield text
 
     def supports_streaming(self) -> bool:
-        """Auto-detect streaming support from the runnable."""
+        """Use the ``streaming`` flag, else detect ``astream`` on the runnable."""
+        if self._streaming is not None:
+            return self._streaming
         return hasattr(self.runnable, "astream")
 
     def get_metadata(self) -> AdapterMetadata:

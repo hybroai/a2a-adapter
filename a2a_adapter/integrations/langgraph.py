@@ -45,7 +45,7 @@ except ImportError:
 
 from ..adapter import BaseAgentAdapter
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter
-from ._framework import content_to_text
+from ._framework import content_to_text, iter_with_timeout, run_with_timeout
 
 # Lazy import for TaskStore to avoid hard dependency
 try:
@@ -104,6 +104,7 @@ class LangGraphAdapter(BaseA2AAdapter):
         provider: dict | None = None,
         documentation_url: str | None = None,
         icon_url: str | None = None,
+        streaming: bool | None = None,
         config: Dict[str, Any] | None = None,
         thread_id_key: str | None = "thread_id",
     ) -> None:
@@ -124,6 +125,8 @@ class LangGraphAdapter(BaseA2AAdapter):
             provider: Optional dict with 'organization' and 'url' keys.
             documentation_url: Optional URL to the agent's documentation.
             icon_url: Optional URL to an icon for the agent.
+            streaming: Whether to serve ``message/stream`` via ``astream()``.
+                ``None`` (default) enables it when the graph has ``astream``.
             config: Base RunnableConfig passed to every ``ainvoke``/``astream``
                 call (e.g. ``recursion_limit`` or extra ``configurable`` keys).
             thread_id_key: ``configurable`` key that receives the A2A
@@ -145,15 +148,16 @@ class LangGraphAdapter(BaseA2AAdapter):
         self._provider = provider
         self._documentation_url = documentation_url
         self._icon_url = icon_url
+        self._streaming = streaming
         self.config = config or {}
         self.thread_id_key = thread_id_key
 
     async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         """Invoke the graph and return a text response."""
         inputs = self._build_inputs(user_input, context_id)
-        result = await asyncio.wait_for(
+        result = await run_with_timeout(
             self.graph.ainvoke(inputs, **self._config_kwargs(context_id)),
-            timeout=self.timeout,
+            self.timeout, "LangGraph graph",
         )
         return self._extract_output(result)
 
@@ -167,16 +171,19 @@ class LangGraphAdapter(BaseA2AAdapter):
         """
         inputs = self._build_inputs(user_input, context_id)
         emitted = False
-        async for update in self.graph.astream(
+        updates = self.graph.astream(
             inputs, stream_mode="updates", **self._config_kwargs(context_id),
-        ):
+        )
+        async for update in iter_with_timeout(updates, self.timeout, "LangGraph graph"):
             text = self._extract_update_text(update)
             if text:
                 yield f"\n\n{text}" if emitted else text
                 emitted = True
 
     def supports_streaming(self) -> bool:
-        """Auto-detect streaming support from the graph."""
+        """Use the ``streaming`` flag, else detect ``astream`` on the graph."""
+        if self._streaming is not None:
+            return self._streaming
         return hasattr(self.graph, "astream")
 
     def get_metadata(self) -> AdapterMetadata:
