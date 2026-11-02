@@ -11,6 +11,8 @@ Contains:
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
 import uuid
@@ -35,6 +37,7 @@ except ImportError:
 
 from ..adapter import BaseAgentAdapter
 from ..base_adapter import BaseA2AAdapter, AdapterMetadata
+from ._framework import iter_with_timeout, run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +48,14 @@ logger = logging.getLogger(__name__)
 
 
 class CallableAdapter(BaseA2AAdapter):
-    """Adapter for any async Python function.
+    """Adapter for any Python function.
 
-    The simplest adapter — wraps any async callable as an A2A agent.
+    The simplest adapter — wraps any callable as an A2A agent.
 
     For non-streaming functions:
         The function should accept a dict and return a string (or anything
-        that can be converted to a string).
+        that can be converted to a string). Async functions run on the event
+        loop; sync functions run in a worker thread so they do not block it.
 
     For streaming functions:
         The function should be an async generator that yields string chunks.
@@ -86,12 +90,14 @@ class CallableAdapter(BaseA2AAdapter):
         provider: dict | None = None,
         documentation_url: str | None = None,
         icon_url: str | None = None,
+        timeout: float | None = None,
+        sync_in_thread: bool = True,
     ) -> None:
         """Initialize the callable adapter.
 
         Args:
-            func: An async callable that processes agent logic.
-                For non-streaming: accepts dict, returns str.
+            func: A callable that processes agent logic.
+                For non-streaming: accepts dict, returns str (sync or async).
                 For streaming: async generator yielding str chunks.
             streaming: Whether the function supports streaming.
             name: Optional agent name for AgentCard generation.
@@ -100,9 +106,18 @@ class CallableAdapter(BaseA2AAdapter):
             provider: Optional dict with 'organization' and 'url' keys.
             documentation_url: Optional URL to the agent's documentation.
             icon_url: Optional URL to an icon for the agent.
+            timeout: Seconds allowed for a call or a whole stream (default:
+                None, no limit). A timed-out sync function keeps running in
+                its thread; only the request fails.
+            sync_in_thread: Run sync functions in a worker thread (default:
+                True). Set False for a sync wrapper that needs the running
+                event loop, e.g. one returning ``asyncio.ensure_future(...)``;
+                it is then called on the loop and its result awaited.
         """
         self.func = func
         self._streaming = streaming
+        self.timeout = timeout
+        self.sync_in_thread = sync_in_thread
         self._name = name
         self._description = description
         self._skills = skills or []
@@ -113,13 +128,13 @@ class CallableAdapter(BaseA2AAdapter):
     async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         """Call the function and return a text response."""
         inputs = {"message": user_input, "context_id": context_id}
-        result = await self.func(inputs)
+        result = await run_with_timeout(self._call(inputs), self.timeout, "callable")
         return self._extract_text(result)
 
     async def stream(self, user_input: str, context_id: str | None = None, **kwargs) -> AsyncIterator[str]:
         """Stream chunks from an async generator function."""
         inputs = {"message": user_input, "context_id": context_id}
-        async for chunk in self.func(inputs):
+        async for chunk in iter_with_timeout(self.func(inputs), self.timeout, "callable"):
             yield str(chunk) if not isinstance(chunk, str) else chunk
 
     def supports_streaming(self) -> bool:
@@ -138,6 +153,21 @@ class CallableAdapter(BaseA2AAdapter):
             icon_url=self._icon_url,
         )
 
+    async def _call(self, inputs: Dict[str, Any]) -> Any:
+        """Await async functions; run sync ones in a thread unless disabled."""
+        if inspect.iscoroutinefunction(self.func) or inspect.iscoroutinefunction(
+            getattr(self.func, "__call__", None)
+        ):
+            return await self.func(inputs)
+        if self.sync_in_thread:
+            result = await asyncio.to_thread(self.func, inputs)
+        else:
+            result = self.func(inputs)
+        # e.g. a lambda or partial wrapping an async function
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
     @staticmethod
     def _extract_text(output: Any) -> str:
         """Extract text from function output."""
@@ -147,7 +177,7 @@ class CallableAdapter(BaseA2AAdapter):
             for key in ("response", "output", "result", "answer", "text", "message"):
                 if key in output:
                     return str(output[key])
-            return json.dumps(output, indent=2)
+            return json.dumps(output, indent=2, default=str)
         return str(output)
 
 

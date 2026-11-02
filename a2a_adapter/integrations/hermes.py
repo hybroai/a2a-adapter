@@ -339,7 +339,7 @@ class HermesAdapter(BaseA2AAdapter):
 
     def get_metadata(self) -> AdapterMetadata:
         return AdapterMetadata(
-            name=self._name or "HermesAdapter",
+            name=self._name or "Hermes",
             description=self._description or (
                 "Hermes AI Agent \u2014 multi-purpose assistant with tool use, "
                 "persistent memory, and subagent delegation."

@@ -45,6 +45,7 @@ except ImportError:
 
 from ..adapter import BaseAgentAdapter
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter
+from ._framework import apply_input_mapper, run_with_timeout
 
 # Lazy import for TaskStore to avoid hard dependency
 try:
@@ -67,7 +68,8 @@ logger = logging.getLogger(__name__)
 class CrewAIAdapter(BaseA2AAdapter):
     """Adapter for CrewAI crews.
 
-    Executes a CrewAI Crew via ``kickoff_async()`` (with sync fallback)
+    Executes a CrewAI Crew via ``kickoff_async()`` (or ``kickoff()`` in a
+    thread when the crew has no ``kickoff_async``)
     and returns the crew result as text. CrewAI does not support streaming,
     so only ``invoke()`` is implemented.
 
@@ -106,7 +108,8 @@ class CrewAIAdapter(BaseA2AAdapter):
             inputs_key: Key for passing text inputs to the crew (default: "inputs").
             timeout: Execution timeout in seconds (default: 300).
             parse_json_input: Auto-parse JSON input (default: True).
-            input_mapper: Custom function for input transformation.
+            input_mapper: Custom function for input transformation. If it
+                raises, the request fails; there is no fallback.
             default_inputs: Default values to merge with parsed inputs.
             name: Optional agent name for AgentCard generation.
             description: Optional agent description for AgentCard generation.
@@ -131,19 +134,15 @@ class CrewAIAdapter(BaseA2AAdapter):
     async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         """Execute the crew and return the result as text."""
         inputs = self._build_inputs(user_input, context_id)
-        try:
-            result = await asyncio.wait_for(
-                self.crew.kickoff_async(inputs=inputs),
-                timeout=self.timeout,
-            )
-        except AttributeError:
-            # Fallback for older CrewAI versions without async support
+        # Check up front: catching AttributeError would also catch one raised
+        # inside the crew and run it a second time via the fallback.
+        if hasattr(self.crew, "kickoff_async"):
+            run = self.crew.kickoff_async(inputs=inputs)
+        else:
+            # Older CrewAI versions without async support
             logger.warning("CrewAI kickoff_async not available, using sync fallback")
-            loop = asyncio.get_event_loop()
-            result = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: self.crew.kickoff(inputs=inputs)),
-                timeout=self.timeout,
-            )
+            run = asyncio.to_thread(self.crew.kickoff, inputs=inputs)
+        result = await run_with_timeout(run, self.timeout, "CrewAI crew")
         return self._extract_output(result)
 
     def get_metadata(self) -> AdapterMetadata:
@@ -164,11 +163,8 @@ class CrewAIAdapter(BaseA2AAdapter):
         """Build crew inputs with 3-priority pipeline."""
         # Priority 1: Custom input_mapper
         if self.input_mapper is not None:
-            try:
-                mapped = self.input_mapper(user_input, context_id)
-                return {**self.default_inputs, **mapped}
-            except Exception as e:
-                logger.warning("input_mapper failed: %s, falling back", e)
+            mapped = apply_input_mapper(self.input_mapper, user_input, context_id)
+            return {**self.default_inputs, **mapped}
 
         # Priority 2: Auto JSON parsing
         if self.parse_json_input and user_input.strip().startswith("{"):
@@ -200,7 +196,7 @@ class CrewAIAdapter(BaseA2AAdapter):
             for key in ("output", "result", "response", "answer", "text"):
                 if key in output:
                     return str(output[key])
-            return json.dumps(output, indent=2)
+            return json.dumps(output, indent=2, default=str)
 
         return str(output)
 
@@ -603,26 +599,21 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
         logger.debug("Executing CrewAI crew with inputs: %s", framework_input)
 
         try:
-            # CrewAI supports async execution via kickoff_async
-            try:
+            # Check up front: catching AttributeError would also catch one
+            # raised inside the crew and run it a second time.
+            if hasattr(self.crew, "kickoff_async"):
                 result = await asyncio.wait_for(
                     self.crew.kickoff_async(inputs=framework_input),
                     timeout=self.timeout,
                 )
                 logger.debug("CrewAI crew returned: %s", type(result).__name__)
                 return result
-            except AttributeError:
-                # Fallback for older CrewAI versions without async support
-                # Note: This will block the event loop
-                logger.warning("CrewAI kickoff_async not available, using sync fallback")
-                loop = asyncio.get_event_loop()
-                result = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None, lambda: self.crew.kickoff(inputs=framework_input)
-                    ),
-                    timeout=self.timeout,
-                )
-                return result
+            # Fallback for older CrewAI versions without async support
+            logger.warning("CrewAI kickoff_async not available, using sync fallback")
+            return await asyncio.wait_for(
+                asyncio.to_thread(self.crew.kickoff, inputs=framework_input),
+                timeout=self.timeout,
+            )
         except asyncio.TimeoutError as e:
             logger.error("CrewAI crew timed out after %s seconds", self.timeout)
             raise RuntimeError(f"Crew timed out after {self.timeout} seconds") from e

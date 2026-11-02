@@ -41,6 +41,7 @@ except ImportError:
 
 from ..adapter import BaseAgentAdapter
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter
+from ._framework import apply_input_mapper, content_to_text, iter_with_timeout, run_with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ class LangChainAdapter(BaseA2AAdapter):
         provider: dict | None = None,
         documentation_url: str | None = None,
         icon_url: str | None = None,
+        streaming: bool | None = None,
     ) -> None:
         """Initialize the LangChain adapter.
 
@@ -96,7 +98,8 @@ class LangChainAdapter(BaseA2AAdapter):
             output_key: Optional key to extract from runnable output.
             timeout: Execution timeout in seconds (default: 60).
             parse_json_input: Auto-parse JSON input (default: True).
-            input_mapper: Custom function for input transformation.
+            input_mapper: Custom function for input transformation. If it
+                raises, the request fails; there is no fallback.
             default_inputs: Default values to merge with parsed inputs.
             name: Optional agent name for AgentCard generation.
             description: Optional agent description for AgentCard generation.
@@ -104,6 +107,8 @@ class LangChainAdapter(BaseA2AAdapter):
             provider: Optional dict with 'organization' and 'url' keys.
             documentation_url: Optional URL to the agent's documentation.
             icon_url: Optional URL to an icon for the agent.
+            streaming: Whether to serve ``message/stream`` via ``astream()``.
+                ``None`` (default) enables it when the runnable has ``astream``.
         """
         self.runnable = runnable
         self.input_key = input_key
@@ -118,25 +123,29 @@ class LangChainAdapter(BaseA2AAdapter):
         self._provider = provider
         self._documentation_url = documentation_url
         self._icon_url = icon_url
+        self._streaming = streaming
 
     async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         """Invoke the runnable and return a text response."""
         inputs = self._build_inputs(user_input, context_id)
-        result = await asyncio.wait_for(
-            self.runnable.ainvoke(inputs), timeout=self.timeout,
+        result = await run_with_timeout(
+            self.runnable.ainvoke(inputs), self.timeout, "LangChain runnable",
         )
         return self._extract_output(result)
 
     async def stream(self, user_input: str, context_id: str | None = None, **kwargs) -> AsyncIterator[str]:
         """Stream tokens from the runnable via astream()."""
         inputs = self._build_inputs(user_input, context_id)
-        async for chunk in self.runnable.astream(inputs):
+        chunks = self.runnable.astream(inputs)
+        async for chunk in iter_with_timeout(chunks, self.timeout, "LangChain runnable"):
             text = self._extract_chunk_text(chunk)
             if text:
                 yield text
 
     def supports_streaming(self) -> bool:
-        """Auto-detect streaming support from the runnable."""
+        """Use the ``streaming`` flag, else detect ``astream`` on the runnable."""
+        if self._streaming is not None:
+            return self._streaming
         return hasattr(self.runnable, "astream")
 
     def get_metadata(self) -> AdapterMetadata:
@@ -157,10 +166,8 @@ class LangChainAdapter(BaseA2AAdapter):
         """Build runnable inputs with 3-priority pipeline."""
         # Priority 1: Custom input_mapper
         if self.input_mapper is not None:
-            try:
-                return {**self.default_inputs, **self.input_mapper(user_input, context_id)}
-            except Exception as e:
-                logger.warning("input_mapper failed: %s, falling back", e)
+            mapped = apply_input_mapper(self.input_mapper, user_input, context_id)
+            return {**self.default_inputs, **mapped}
 
         # Priority 2: Auto JSON parsing
         if self.parse_json_input and user_input.strip().startswith("{"):
@@ -181,20 +188,7 @@ class LangChainAdapter(BaseA2AAdapter):
         """Extract text from runnable output (AIMessage, dict, str)."""
         # AIMessage or similar with content attribute
         if hasattr(output, "content"):
-            content = output.content
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                parts = []
-                for item in content:
-                    if isinstance(item, str):
-                        parts.append(item)
-                    elif hasattr(item, "text"):
-                        parts.append(item.text)
-                    elif isinstance(item, dict) and "text" in item:
-                        parts.append(item["text"])
-                return " ".join(parts)
-            return str(content)
+            return content_to_text(output.content)
 
         # Dictionary output
         if isinstance(output, dict):
@@ -203,7 +197,7 @@ class LangChainAdapter(BaseA2AAdapter):
             for key in ("output", "result", "answer", "response", "text"):
                 if key in output:
                     return str(output[key])
-            return json.dumps(output, indent=2)
+            return json.dumps(output, indent=2, default=str)
 
         return str(output)
 
@@ -211,16 +205,7 @@ class LangChainAdapter(BaseA2AAdapter):
         """Extract text from a streaming chunk."""
         # AIMessageChunk or similar
         if hasattr(chunk, "content"):
-            content = chunk.content
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                return "".join(
-                    item if isinstance(item, str)
-                    else getattr(item, "text", "")
-                    for item in content
-                )
-            return str(content) if content else ""
+            return content_to_text(chunk.content, sep="")
 
         # Dictionary chunk
         if isinstance(chunk, dict):

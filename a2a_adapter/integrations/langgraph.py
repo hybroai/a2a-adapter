@@ -45,6 +45,7 @@ except ImportError:
 
 from ..adapter import BaseAgentAdapter
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter
+from ._framework import apply_input_mapper, content_to_text, iter_with_timeout, run_with_timeout
 
 # Lazy import for TaskStore to avoid hard dependency
 try:
@@ -58,6 +59,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Message types/roles that are not the agent's reply.
+_NON_AI_MESSAGE_TYPES = frozenset(
+    {"human", "user", "system", "developer", "tool", "function", "remove"}
+)
+
 
 # ═══════════════════════════════════════════════════════════════
 # v0.2 Adapter (new, recommended)
@@ -68,8 +74,8 @@ class LangGraphAdapter(BaseA2AAdapter):
     """Adapter for LangGraph compiled state graphs.
 
     Supports both streaming (via ``astream()``) and non-streaming
-    (via ``ainvoke()``) execution. Streaming yields state deltas
-    as they're produced by the graph.
+    (via ``ainvoke()``) execution. Streaming yields each node's output
+    as the node finishes (``stream_mode="updates"``).
 
     Example::
 
@@ -98,6 +104,9 @@ class LangGraphAdapter(BaseA2AAdapter):
         provider: dict | None = None,
         documentation_url: str | None = None,
         icon_url: str | None = None,
+        streaming: bool | None = None,
+        config: Dict[str, Any] | None = None,
+        thread_id_key: str | None = "thread_id",
     ) -> None:
         """Initialize the LangGraph adapter.
 
@@ -108,7 +117,8 @@ class LangGraphAdapter(BaseA2AAdapter):
             state_key: Optional key for extracting streaming state text.
             timeout: Execution timeout in seconds (default: 60).
             parse_json_input: Auto-parse JSON input (default: True).
-            input_mapper: Custom function for input transformation.
+            input_mapper: Custom function for input transformation. If it
+                raises, the request fails; there is no fallback.
             default_inputs: Default values to merge with parsed inputs.
             name: Optional agent name for AgentCard generation.
             description: Optional agent description for AgentCard generation.
@@ -116,6 +126,19 @@ class LangGraphAdapter(BaseA2AAdapter):
             provider: Optional dict with 'organization' and 'url' keys.
             documentation_url: Optional URL to the agent's documentation.
             icon_url: Optional URL to an icon for the agent.
+            streaming: Whether to serve ``message/stream`` via ``astream()``.
+                ``None`` (default) enables it when the graph has ``astream``.
+            config: Base RunnableConfig passed to every ``ainvoke``/``astream``
+                call (e.g. ``recursion_limit`` or extra ``configurable`` keys).
+            thread_id_key: ``configurable`` key that receives the A2A
+                ``context_id``, so a graph compiled with a checkpointer keeps
+                conversation memory per context (default: "thread_id").
+                A value already set in ``config`` wins. ``None`` disables it.
+                The client chooses the ``context_id``, so any client that
+                knows a context's id can continue that thread. When one
+                server is shared by clients that must not see each other's
+                conversations, set this to ``None`` (or authenticate
+                callers and keep context ids secret).
         """
         self.graph = graph
         self.input_key = input_key
@@ -131,29 +154,42 @@ class LangGraphAdapter(BaseA2AAdapter):
         self._provider = provider
         self._documentation_url = documentation_url
         self._icon_url = icon_url
+        self._streaming = streaming
+        self.config = config or {}
+        self.thread_id_key = thread_id_key
 
     async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         """Invoke the graph and return a text response."""
         inputs = self._build_inputs(user_input, context_id)
-        result = await asyncio.wait_for(
-            self.graph.ainvoke(inputs), timeout=self.timeout,
+        result = await run_with_timeout(
+            self.graph.ainvoke(inputs, **self._config_kwargs(context_id)),
+            self.timeout, "LangGraph graph",
         )
         return self._extract_output(result)
 
     async def stream(self, user_input: str, context_id: str | None = None, **kwargs) -> AsyncIterator[str]:
-        """Stream state deltas from the graph via astream()."""
+        """Stream each node's new output via astream(stream_mode="updates").
+
+        Every update holds only what one node just wrote, so its text is a
+        true delta: AI messages and output keys are emitted once each, and
+        the user's input and tool results are not echoed. Outputs from
+        successive nodes are separated by a blank line.
+        """
         inputs = self._build_inputs(user_input, context_id)
-        last_text = ""
-        async for state in self.graph.astream(inputs):
-            text = self._extract_streaming_text(state)
-            if text and text != last_text:
-                delta = text[len(last_text):] if text.startswith(last_text) else text
-                last_text = text
-                if delta:
-                    yield delta
+        emitted = False
+        updates = self.graph.astream(
+            inputs, stream_mode="updates", **self._config_kwargs(context_id),
+        )
+        async for update in iter_with_timeout(updates, self.timeout, "LangGraph graph"):
+            text = self._extract_update_text(update)
+            if text:
+                yield f"\n\n{text}" if emitted else text
+                emitted = True
 
     def supports_streaming(self) -> bool:
-        """Auto-detect streaming support from the graph."""
+        """Use the ``streaming`` flag, else detect ``astream`` on the graph."""
+        if self._streaming is not None:
+            return self._streaming
         return hasattr(self.graph, "astream")
 
     def get_metadata(self) -> AdapterMetadata:
@@ -170,14 +206,27 @@ class LangGraphAdapter(BaseA2AAdapter):
 
     # ──── Internal: Input Building ────
 
+    def _config_kwargs(self, context_id: str | None) -> Dict[str, Any]:
+        """Build the ``config`` kwarg, mapping context_id to the thread key.
+
+        Returns an empty dict when there is nothing to pass. The server
+        always supplies a context_id, so a graph-like object whose
+        ``ainvoke``/``astream`` take no ``config`` argument needs
+        ``thread_id_key=None`` (and no ``config``).
+        """
+        config = dict(self.config)
+        if self.thread_id_key and context_id:
+            configurable = dict(config.get("configurable") or {})
+            configurable.setdefault(self.thread_id_key, context_id)
+            config["configurable"] = configurable
+        return {"config": config} if config else {}
+
     def _build_inputs(self, user_input: str, context_id: str | None) -> Dict[str, Any]:
         """Build graph inputs with 3-priority pipeline."""
         # Priority 1: Custom input_mapper
         if self.input_mapper is not None:
-            try:
-                return {**self.default_inputs, **self.input_mapper(user_input, context_id)}
-            except Exception as e:
-                logger.warning("input_mapper failed: %s, falling back", e)
+            mapped = apply_input_mapper(self.input_mapper, user_input, context_id)
+            return {**self.default_inputs, **mapped}
 
         # Priority 2: Auto JSON parsing
         if self.parse_json_input and user_input.strip().startswith("{"):
@@ -231,24 +280,73 @@ class LangGraphAdapter(BaseA2AAdapter):
         clean = {k: v for k, v in state.items() if not k.startswith("_")}
         return json.dumps(clean, indent=2, default=str)
 
-    def _extract_streaming_text(self, state: Any) -> str:
-        """Extract text from intermediate streaming state."""
-        if not isinstance(state, dict):
-            return str(state)
+    def _extract_update_text(self, update: Any) -> str:
+        """Extract text from one ``{node_name: node_update}`` stream item."""
+        if not isinstance(update, dict):
+            return str(update)
+        texts = []
+        for node, node_update in update.items():
+            # "__interrupt__" and similar entries are not node output.
+            if node.startswith("__"):
+                continue
+            # Fan-out (Send) groups same-named node writes in a list.
+            writes = node_update if isinstance(node_update, list) else [node_update]
+            for write in writes:
+                if isinstance(write, dict):
+                    text = self._extract_streaming_text(write)
+                elif isinstance(write, str):
+                    text = write  # e.g. a Functional API entrypoint's return
+                else:
+                    continue
+                if text:
+                    texts.append(text)
+        return "\n\n".join(texts)
 
+    def _extract_streaming_text(self, state: Dict[str, Any]) -> str:
+        """Extract text from the state keys one node wrote."""
         if self.state_key and self.state_key in state:
             return self._extract_value_text(state[self.state_key])
 
         if "messages" in state:
             messages = state["messages"]
-            if messages:
-                return self._extract_message_content(messages[-1])
+            if not isinstance(messages, list):
+                messages = [messages]
+            # Only the node's latest AI message, as invoke() reads
+            # messages[-1]: a channel without a reducer makes the node
+            # write the whole history, earlier replies included.
+            for message in reversed(messages):
+                if self._is_ai_message(message):
+                    return self._extract_message_content(message)
+            return ""
 
-        for key in ("output", "response", "text", "content"):
+        # Same keys as _extract_output (invoke)
+        for key in ("output", "response", "result", "answer", "text", "content"):
             if key in state:
                 return self._extract_value_text(state[key])
 
         return ""
+
+    @staticmethod
+    def _is_ai_message(message: Any) -> bool:
+        """True unless the message is known to come from someone else
+        (user input, tool results, system prompts).
+
+        Node updates are read before ``add_messages`` coerces them, so
+        ``(role, content)`` tuples and bare strings (human) count too.
+        """
+        if isinstance(message, str):
+            return False
+        if isinstance(message, tuple) and len(message) == 2:
+            kind = message[0]
+        elif isinstance(message, dict):
+            kind = message.get("role") or message.get("type")
+        else:
+            kind = getattr(message, "type", None)
+            if kind == "chat":  # ChatMessage keeps the speaker in .role
+                kind = getattr(message, "role", None)
+        if isinstance(kind, str) and kind.endswith("MessageChunk"):
+            kind = kind[: -len("MessageChunk")].lower()  # e.g. ToolMessageChunk
+        return kind not in _NON_AI_MESSAGE_TYPES
 
     @staticmethod
     def _extract_value_text(value: Any) -> str:
@@ -270,23 +368,15 @@ class LangGraphAdapter(BaseA2AAdapter):
     def _extract_message_content(message: Any) -> str:
         """Extract content from a message object (LangChain or dict)."""
         if hasattr(message, "content"):
-            content = message.content
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                parts = []
-                for item in content:
-                    if isinstance(item, str):
-                        parts.append(item)
-                    elif hasattr(item, "text"):
-                        parts.append(item.text)
-                return " ".join(parts)
-            return str(content)
+            return content_to_text(message.content)
 
         if isinstance(message, dict):
             for key in ("content", "text"):
                 if key in message:
-                    return str(message[key])
+                    return content_to_text(message[key])
+
+        if isinstance(message, tuple) and len(message) == 2:
+            return content_to_text(message[1])
 
         return str(message)
 
