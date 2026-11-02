@@ -99,6 +99,13 @@ class N8nAdapter(BaseA2AAdapter):
     which is only safe when the webhook is idempotent. 4xx responses are
     never retried.
 
+    Payload precedence (later wins): ``default_inputs`` < client fields
+    (parsed JSON message or ``input_mapper`` output) < ``payload_template`` <
+    the context fields the adapter sets (``metadata.context_id``, or
+    ``context_id`` when a template is used). ``default_inputs`` are defaults a
+    client may override; ``payload_template`` keys are fixed by the operator.
+    For plain-text messages the text goes in ``message_field``.
+
     Example::
 
         from a2a_adapter import N8nAdapter, serve_agent
@@ -154,11 +161,13 @@ class N8nAdapter(BaseA2AAdapter):
                 dropped connections, which can re-run a workflow that already
                 started. Enable only for idempotent webhooks (default: False).
             payload_template: Optional base payload dict to merge with message.
+                Its keys always win over client-supplied JSON.
             message_field: Field name for user message in payload (default: "message").
             parse_json_input: Auto-parse JSON input (default: True).
             input_mapper: Custom function for input transformation.
                 Signature: (raw_input: str, context_id: str | None) -> dict.
-            default_inputs: Default values to merge into payload.
+            default_inputs: Default values to merge into payload. Client JSON
+                may override them.
             multimodal_mode: Enable multimodal support for files/images (default: False).
             file_field: JSON field name for file attachments (default: "files").
             image_field: JSON field name for image attachments (default: "images").
@@ -279,12 +288,15 @@ class N8nAdapter(BaseA2AAdapter):
             1. input_mapper (custom function) — highest priority
             2. parse_json_input (auto JSON parsing)
             3. message_field (fallback for plain text)
+
+        In every branch payload_template keys override client-derived fields;
+        see the class docstring for the full precedence.
         """
         # Priority 1: Custom input_mapper
         if self.input_mapper is not None:
             try:
                 mapped = self.input_mapper(user_input, context_id)
-                return {**self.payload_template, **self.default_inputs, **mapped}
+                return {**self.default_inputs, **mapped, **self.payload_template}
             except Exception as e:
                 logger.warning("input_mapper failed: %s, falling back", e)
 
@@ -293,21 +305,37 @@ class N8nAdapter(BaseA2AAdapter):
             try:
                 parsed = json.loads(user_input)
                 if isinstance(parsed, dict):
-                    return {**self.payload_template, **self.default_inputs, **parsed}
+                    payload = {
+                        **self.default_inputs, **parsed, **self.payload_template,
+                    }
+                    self._set_context(payload, context_id)
+                    return payload
             except json.JSONDecodeError:
                 pass
 
         # Priority 3: Fallback to message_field
-        payload: Dict[str, Any] = {
-            **self.payload_template,
+        payload = {
             **self.default_inputs,
+            **self.payload_template,
             self.message_field: user_input,
         }
-        if not self.payload_template:
-            payload["metadata"] = {"context_id": context_id}
-        elif "context_id" not in payload:
-            payload["context_id"] = context_id
+        self._set_context(payload, context_id)
         return payload
+
+    def _set_context(self, payload: Dict[str, Any], context_id: str | None) -> None:
+        """Set the context fields so client input cannot replace them.
+
+        Without a payload_template the id goes in ``metadata.context_id``
+        (other client metadata keys are kept); with one it goes in
+        ``context_id`` unless the template sets that key itself.
+        """
+        if not self.payload_template:
+            metadata = payload.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            payload["metadata"] = {**metadata, "context_id": context_id}
+        elif "context_id" not in self.payload_template:
+            payload["context_id"] = context_id
 
     async def _build_multimodal_payload(
         self,

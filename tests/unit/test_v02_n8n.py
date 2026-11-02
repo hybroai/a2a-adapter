@@ -131,3 +131,64 @@ class TestRetryPolicy:
         with pytest.raises(ValueError, match="422"):
             await adapter._post_with_retry({"message": "hi"})
         assert len(calls) == 1
+
+
+class TestPayloadPrecedence:
+    """default_inputs < client JSON < payload_template < adapter context fields."""
+
+    def test_client_json_cannot_override_template_key(self):
+        adapter = N8nAdapter(
+            webhook_url=WEBHOOK, payload_template={"role": "agent", "tenant": "acme"}
+        )
+        payload = adapter._build_payload(
+            '{"role": "admin", "tenant": "evil", "query": "hi"}', "ctx-1"
+        )
+        assert payload["role"] == "agent"
+        assert payload["tenant"] == "acme"
+        assert payload["query"] == "hi"
+
+    def test_client_json_fills_default_inputs_key(self):
+        adapter = N8nAdapter(webhook_url=WEBHOOK, default_inputs={"lang": "en", "n": 1})
+        payload = adapter._build_payload('{"lang": "fr"}', "ctx-1")
+        assert payload["lang"] == "fr"
+        assert payload["n"] == 1
+
+    def test_client_json_cannot_forge_context_metadata(self):
+        adapter = N8nAdapter(webhook_url=WEBHOOK)
+        payload = adapter._build_payload(
+            '{"query": "hi", "metadata": {"context_id": "forged", "tag": "x"}}',
+            "ctx-1",
+        )
+        assert payload["metadata"]["context_id"] == "ctx-1"
+        assert payload["metadata"]["tag"] == "x"
+
+    def test_client_json_cannot_forge_context_id_with_template(self):
+        adapter = N8nAdapter(webhook_url=WEBHOOK, payload_template={"name": "bot"})
+        payload = adapter._build_payload('{"context_id": "forged"}', "ctx-1")
+        assert payload["context_id"] == "ctx-1"
+
+    def test_template_context_id_still_wins(self):
+        adapter = N8nAdapter(
+            webhook_url=WEBHOOK, payload_template={"context_id": "fixed"}
+        )
+        payload = adapter._build_payload('{"context_id": "forged"}', "ctx-1")
+        assert payload["context_id"] == "fixed"
+
+    def test_input_mapper_cannot_override_template_key(self):
+        adapter = N8nAdapter(
+            webhook_url=WEBHOOK,
+            payload_template={"role": "agent"},
+            default_inputs={"lang": "en"},
+            input_mapper=lambda raw, ctx: {"role": raw, "lang": "fr"},
+        )
+        payload = adapter._build_payload("admin", "ctx-1")
+        assert payload["role"] == "agent"
+        assert payload["lang"] == "fr"
+
+    def test_plain_text_payload_unchanged(self):
+        adapter = N8nAdapter(webhook_url=WEBHOOK, default_inputs={"lang": "en"})
+        assert adapter._build_payload("hello", "ctx-1") == {
+            "lang": "en",
+            "message": "hello",
+            "metadata": {"context_id": "ctx-1"},
+        }
