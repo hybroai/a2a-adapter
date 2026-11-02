@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   managed `-p` / `-c`; Pi matches flags exactly. Claude Code still rejects
   them, since its parser reads glued short flags (`-print` is `-p`), and Codex
   still rejects glued forms of its managed flags such as `-opath` or `-C/tmp`
+- CLI adapter session stores are written atomically (temp file, then rename),
+  so a crash mid-write no longer corrupts `sessions.json` and drops every
+  saved session. A corrupt or unreadable store is now logged as a warning
+  instead of being reset silently
 
 ## [0.2.15] - 2026-11-01
 

@@ -1,6 +1,7 @@
 """Tests for BaseA2AAdapter contract and AdapterMetadata."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import AsyncIterator
 
@@ -190,3 +191,59 @@ class TestRunSubprocessCancellation:
 
         assert proc.returncode is not None
         assert "t2" not in adapter._killed_tasks
+
+
+# ── Subprocess runtime: session store ────────────────────────
+
+
+class TestSessionStore:
+    def test_save_then_load_round_trips(self, tmp_path):
+        a1 = SleepingCliAdapter(tmp_path)
+        a1._sessions = {"ctx-1": "sess-A", "ctx-2": "sess-B"}
+        a1._save_sessions()
+
+        a2 = SleepingCliAdapter(tmp_path)
+        assert a2._sessions == {"ctx-1": "sess-A", "ctx-2": "sess-B"}
+
+    def test_malformed_store_loads_empty_with_warning(self, tmp_path, caplog):
+        (tmp_path / "sessions.json").write_text('{"ctx-1": "sess-')
+        with caplog.at_level(logging.WARNING, logger="a2a_adapter.base_adapter"):
+            adapter = SleepingCliAdapter(tmp_path)
+        assert adapter._sessions == {}
+        assert any(
+            r.levelno == logging.WARNING and "sessions.json" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_non_dict_store_loads_empty_with_warning(self, tmp_path, caplog):
+        (tmp_path / "sessions.json").write_text("[1, 2, 3]")
+        with caplog.at_level(logging.WARNING, logger="a2a_adapter.base_adapter"):
+            adapter = SleepingCliAdapter(tmp_path)
+        assert adapter._sessions == {}
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_missing_store_does_not_warn(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING, logger="a2a_adapter.base_adapter"):
+            adapter = SleepingCliAdapter(tmp_path)
+        assert adapter._sessions == {}
+        assert not caplog.records
+
+    def test_failed_save_leaves_previous_store_intact(self, tmp_path, monkeypatch):
+        """A crash while writing must not truncate or corrupt the existing
+        store: the write goes to a temp file that replaces it atomically."""
+        store = tmp_path / "sessions.json"
+        adapter = SleepingCliAdapter(tmp_path)
+        adapter._sessions = {"ctx-1": "sess-A"}
+        adapter._save_sessions()
+        before = store.read_text()
+
+        def partial_dump(obj, fp, **kwargs):
+            fp.write('{"ctx-1": "se')
+            raise OSError("disk full")
+
+        monkeypatch.setattr("a2a_adapter.base_adapter.json.dump", partial_dump)
+        adapter._sessions = {"ctx-1": "sess-B"}
+        adapter._save_sessions()
+
+        assert store.read_text() == before
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["sessions.json"]

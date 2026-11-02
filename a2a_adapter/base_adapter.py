@@ -13,9 +13,11 @@ Design philosophy:
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import tempfile
 from abc import ABC, abstractmethod
 from asyncio import wait_for
 from asyncio.subprocess import DEVNULL, PIPE, Process, create_subprocess_exec
@@ -601,32 +603,59 @@ class BaseA2AAdapter(ABC):
         try:
             with open(self._session_store_path, "r") as f:
                 data = json.load(f)
-            if isinstance(data, dict):
-                self._sessions = {str(k): str(v) for k, v in data.items()}
-                logger.debug(
-                    "Loaded %d session(s) from %s",
-                    len(self._sessions), self._session_store_path,
-                )
-            else:
-                self._sessions = {}
-        except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
-            logger.debug("Could not load sessions from %s: %s", self._session_store_path, e)
+        except FileNotFoundError:
+            self._sessions = {}
+            return
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+            logger.warning(
+                "Could not load sessions from %s, starting with none: %s",
+                self._session_store_path, e,
+            )
+            self._sessions = {}
+            return
+        if isinstance(data, dict):
+            self._sessions = {str(k): str(v) for k, v in data.items()}
+            logger.debug(
+                "Loaded %d session(s) from %s",
+                len(self._sessions), self._session_store_path,
+            )
+        else:
+            logger.warning(
+                "Session store %s is not a JSON object, starting with none",
+                self._session_store_path,
+            )
             self._sessions = {}
 
     def _save_sessions(self) -> None:
-        """Persist session mapping to disk. Creates parent dirs."""
+        """Persist session mapping to disk atomically. Creates parent dirs.
+
+        Writes to a temp file in the same directory and replaces the store
+        with it, so a crash mid-write never leaves a truncated store.
+        """
+        tmp_path = None
         try:
             parent_dir = os.path.dirname(self._session_store_path)
             if parent_dir:
                 os.makedirs(parent_dir, exist_ok=True)
-            with open(self._session_store_path, "w") as f:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=parent_dir or ".",
+                prefix=f".{os.path.basename(self._session_store_path)}.",
+                suffix=".tmp",
+            )
+            with os.fdopen(fd, "w") as f:
                 json.dump(self._sessions, f, indent=2)
+            os.replace(tmp_path, self._session_store_path)
+            tmp_path = None
             logger.debug(
                 "Saved %d session(s) to %s",
                 len(self._sessions), self._session_store_path,
             )
         except OSError as e:
             logger.warning("Could not save sessions to %s: %s", self._session_store_path, e)
+        finally:
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
 
     # ──── Hooks (subclasses override) ────
 
