@@ -49,6 +49,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `_current_process` attribute is gone; `_build_command()` returns a
   `CommandResult`. The CLI also rejects `-m` (including glued forms
   such as `-mhello`) and `--message-file` in pass-through OpenClaw arguments
+- `LangGraphAdapter` now passes the A2A `context_id` as
+  `config["configurable"]["thread_id"]`, so a graph compiled with a
+  checkpointer keeps memory per conversation; such graphs used to fail with
+  `Checkpointer requires one or more of the following 'configurable' keys`.
+  New `config` (base config for every call; a `thread_id` set there wins)
+  and `thread_id_key` (rename the key, or `None` to turn the mapping off)
+  options. The client chooses the `context_id`, so on a server shared by
+  clients that must not read each other's threads, set `thread_id_key=None`
+- `LangGraphAdapter.stream()` now runs the graph with
+  `stream_mode="updates"` and emits each node's new AI messages or output
+  keys once, separated by a blank line. Compiled graphs stream updates by
+  default, which the adapter used to read as empty; with whole-state
+  streams it echoed the user's message as the reply. Tool results and
+  human messages are no longer emitted. Graphs passed to the adapter must
+  accept `stream_mode` (all LangGraph versions do)
+- `LangGraphAdapter`, `LangChainAdapter` and `CrewAIAdapter` fail the
+  request when `input_mapper` raises (`input_mapper failed: <type>:
+  <message>`) or returns something other than a dict; they used to log a
+  warning and silently fall back to the default input
+- `LangGraphAdapter` and `LangChainAdapter` streams are now bounded by
+  `timeout` for the whole stream, like `invoke()`. Timeouts in these
+  adapters, `CrewAIAdapter` and `CallableAdapter` raise
+  `TimeoutError("<framework> timed out after N seconds")` instead of an
+  empty `TimeoutError`. New `streaming` option (default `None`: detect
+  `astream`) to turn streaming off explicitly
+- `CallableAdapter` runs sync functions in a worker thread (they used to fail
+  with `object str can't be used in 'await' expression`) and has a new
+  `timeout` option (default `None`, no limit) covering calls and streams
+- The default `HermesAdapter` agent card name is now `Hermes` instead of
+  `HermesAdapter`, matching the other CLI adapters' product names
 
 ### Fixed
 
@@ -113,6 +143,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   process when a task times out, instead of leaving it
   running, and its push notifications serialize the task with
   `MessageToDict`; they used to fail on a missing `model_dump()`
+- An `AttributeError` raised inside a CrewAI crew no longer runs the crew a
+  second time through the sync `kickoff()` fallback (`CrewAIAdapter` and
+  the legacy `CrewAIAgentAdapter`); the fallback is now chosen by checking
+  for `kickoff_async` up front, and runs `kickoff()` in a thread
+- LangChain and LangGraph message content given as a list of content blocks
+  (`{"type": "text", "text": ...}`, as newer chat models return) is now read
+  as text. LangGraph replies and LangChain stream chunks in that form used to
+  come out empty or as the list's `repr`
+- `CallableAdapter`, `LangChainAdapter` and `CrewAIAdapter` results with values
+  JSON cannot encode (datetimes, pydantic models, messages) are serialized
+  with `str()` instead of failing with `TypeError`
 
 ## [0.2.15] - 2026-11-01
 
