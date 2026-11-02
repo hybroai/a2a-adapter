@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A stream that fails mid-flight now closes its artifact with the last chunk it
+  held back; it used to re-send the previous chunk (`A`, `B`, `B` instead of
+  `A`, `B`, `C`), and a single chunk followed by an error was dropped
+- Cancelling a non-streaming CLI run (`tasks/cancel` or server shutdown) now
+  kills its subprocess instead of leaving it running
+- The CLI no longer rejects Pi arguments such as `-print` or `-color` as the
+  managed `-p` / `-c`; Pi matches flags exactly. Claude Code still rejects
+  them, since its parser reads glued short flags (`-print` is `-p`), and Codex
+  still rejects glued forms of its managed flags such as `-opath` or `-C/tmp`
+
 ## [0.2.15] - 2026-11-01
 
 ### Added

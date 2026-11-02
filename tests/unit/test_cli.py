@@ -167,18 +167,32 @@ def test_help_aliases_include_usage(argv, capsys):
     [
         ("pi", "--mode"),
         ("pi", "--session-id=other"),
-        ("pi", "-pignored"),
         ("codex", "--json"),
         ("codex", "-C/tmp"),
         ("codex", "-opath"),
         ("claude", "--output-format"),
         ("claude", "-csession-id"),
+        ("claude", "-pignored"),
+        # Commander clusters short flags: -print is -p plus -r "int".
+        ("claude", "-print"),
+        ("claude", "-color"),
         ("openclaw", "--message"),
     ],
 )
 def test_cli_rejects_adapter_managed_native_options(tmp_path, agent, managed_option):
     with pytest.raises(SystemExit, match="2"):
         main([agent, "--cwd", str(tmp_path), "--", managed_option])
+
+
+@pytest.mark.parametrize("native_option", ["-print", "-color", "-pignored"])
+def test_pi_cli_forwards_single_dash_words_that_start_with_managed_flags(
+    tmp_path, native_option
+):
+    """Pi matches flags exactly, so -print is not its managed -p."""
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        main(["pi", "--cwd", str(tmp_path), "--", native_option])
+
+    assert serve.call_args.args[0].cli_args == [native_option]
 
 
 def test_cli_rejects_missing_working_directory(tmp_path):
