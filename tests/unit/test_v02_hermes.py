@@ -330,7 +330,7 @@ class TestMetadata:
     def test_default_metadata(self):
         a = HermesAdapter()
         meta = a.get_metadata()
-        assert meta.name == "HermesAdapter"
+        assert meta.name == "Hermes"
         assert "multi-purpose" in meta.description.lower()
         assert meta.streaming is True
 
