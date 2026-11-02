@@ -702,8 +702,11 @@ class TestOpenClawAdapterAsyncExecution:
             
             proc.communicate = very_slow_communicate
             proc.kill = MagicMock()
+            proc.wait = AsyncMock()
+            created.append(proc)
             return proc
-        
+
+        created = []
         with patch("asyncio.create_subprocess_exec", mock_create_subprocess):
             params = make_message_send_params("test message")
             
@@ -720,7 +723,8 @@ class TestOpenClawAdapterAsyncExecution:
             assert timed_out_task is not None
             assert timed_out_task.status.state == TaskState.TASK_STATE_FAILED
             assert "timed out" in timed_out_task.status.message.parts[0].text.lower()
-            
+            created[0].kill.assert_called_once()
+
             await adapter.close()
 
 
@@ -1142,4 +1146,69 @@ class TestOpenClawAdapterLoader:
         assert adapter.timeout == 600
         assert adapter.openclaw_path == "openclaw"
         
+        await adapter.close()
+
+
+class TestOpenClawLegacyRegressions:
+    """Regressions for the v0.1 async path: timeout reaping and push payloads."""
+
+    @pytest.mark.asyncio
+    async def test_async_timeout_kills_subprocess(self):
+        """A timed-out background task must kill its child, not orphan it."""
+        adapter = OpenClawAgentAdapter(async_mode=True, timeout=0.1, task_ttl_seconds=None)
+        proc = MagicMock()
+        proc.returncode = None
+        released = asyncio.Event()
+
+        async def hang():
+            await released.wait()
+            return (b"", b"")
+
+        def kill():
+            proc.returncode = -9
+            released.set()
+
+        async def wait():
+            await released.wait()
+            return proc.returncode
+
+        proc.communicate = hang
+        proc.kill = MagicMock(side_effect=kill)
+        proc.wait = wait
+
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            task = await adapter.handle(make_message_send_params("hi"))
+            await asyncio.wait_for(adapter._background_tasks[task.id], timeout=2)
+
+        proc.kill.assert_called_once()
+        failed = await adapter.get_task(task.id)
+        assert failed.status.state == TaskState.TASK_STATE_FAILED
+        assert "timed out" in failed.status.message.parts[0].text
+        await adapter.close()
+
+    @pytest.mark.asyncio
+    async def test_push_notification_posts_task_json(self):
+        """_send_push_notification serializes the protobuf Task (no model_dump)."""
+        from a2a.types import TaskPushNotificationConfig, TaskStatus
+
+        adapter = OpenClawAgentAdapter(async_mode=True, task_ttl_seconds=None)
+        adapter._push_configs["t-1"] = TaskPushNotificationConfig(
+            url="https://hooks.example.test/a2a", token="secret"
+        )
+        task = Task(
+            id="t-1",
+            context_id="c-1",
+            status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED),
+        )
+        client = MagicMock()
+        client.post = AsyncMock(return_value=MagicMock(status_code=200))
+
+        with patch.object(adapter, "_get_http_client", AsyncMock(return_value=client)):
+            sent = await adapter._send_push_notification("t-1", task)
+
+        assert sent is True
+        kwargs = client.post.call_args.kwargs
+        assert kwargs["json"]["task"]["id"] == "t-1"
+        assert kwargs["json"]["task"]["status"]["state"] == "TASK_STATE_COMPLETED"
+        assert kwargs["headers"]["Authorization"] == "Bearer secret"
         await adapter.close()

@@ -109,6 +109,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   overwritten, so cancel could kill another task's process or none
 - `OpenClawAdapter` prompts larger than the OS argument limit (128 KiB per
   argument on Linux) no longer fail with `Argument list too long`
+- The legacy `OpenClawAgentAdapter` async mode now kills the `openclaw`
+  process when a task times out, instead of leaving it
+  running, and its push notifications serialize the task with
+  `MessageToDict`; they used to fail on a missing `model_dump()`
 
 ## [0.2.15] - 2026-11-01
 

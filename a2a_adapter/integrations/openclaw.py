@@ -24,6 +24,7 @@ from collections.abc import Sequence
 from typing import Any, Dict
 
 import httpx
+from google.protobuf.json_format import MessageToDict
 
 from a2a.types import (
     Artifact,
@@ -921,6 +922,14 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
 
         try:
             stdout, stderr = await proc.communicate()
+        except asyncio.CancelledError:
+            # Timeout (wait_for) or cancel_task() cancelled us. The finally
+            # below drops the tracking entry before either caller can reach
+            # the process, so kill it here or it outlives the task.
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            raise
         finally:
             # Remove from tracking
             self._background_processes.pop(task_id, None)
@@ -1350,7 +1359,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             # A2A-compliant: Send full Task wrapped in StreamResponse format
             # This ensures artifacts (with response content) are included
             payload = {
-                "task": task.model_dump(mode="json")
+                "task": MessageToDict(task)
             }
 
             # Build headers
