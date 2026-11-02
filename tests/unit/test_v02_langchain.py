@@ -390,3 +390,41 @@ def test_flat_import():
     """Verify from a2a_adapter import LangChainAdapter works."""
     from a2a_adapter import LangChainAdapter as LC
     assert LC is LangChainAdapter
+
+
+# ──── Test: Structured content blocks ────
+
+
+BLOCKS = [
+    {"type": "text", "text": "Hello"},
+    {"type": "tool_use", "id": "t1", "name": "search", "input": {}},
+    {"type": "text", "text": "world"},
+]
+
+
+@pytest.mark.asyncio
+async def test_invoke_content_blocks_text_only():
+    class BlockRunnable:
+        async def ainvoke(self, inputs):
+            return MockAIMessage(BLOCKS)
+
+    adapter = LangChainAdapter(runnable=BlockRunnable())
+    assert await adapter.invoke("test") == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_stream_content_block_chunks():
+    """Chunks whose content is a list of text blocks yield their text."""
+
+    class BlockStreamRunnable:
+        async def ainvoke(self, inputs):
+            return "done"
+
+        async def astream(self, inputs):
+            yield MockAIMessageChunk([{"type": "text", "text": "Hel", "index": 0}])
+            yield MockAIMessageChunk([{"type": "text", "text": "lo", "index": 0}])
+            yield MockAIMessageChunk([{"type": "tool_use", "id": "t1", "index": 1}])
+
+    adapter = LangChainAdapter(runnable=BlockStreamRunnable())
+    chunks = [c async for c in adapter.stream("test")]
+    assert chunks == ["Hel", "lo"]

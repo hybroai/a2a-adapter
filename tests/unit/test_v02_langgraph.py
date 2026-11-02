@@ -455,3 +455,27 @@ async def test_no_context_id_passes_user_config_only():
     adapter = LangGraphAdapter(graph=graph, input_key="query", config={"recursion_limit": 5})
     await adapter.invoke("hi")
     assert graph.configs == [{"recursion_limit": 5}]
+
+
+# ──── Test: Structured content blocks ────
+
+
+BLOCKS = [
+    {"type": "text", "text": "Hello"},
+    {"type": "tool_use", "id": "t1", "name": "search", "input": {}},
+    {"type": "text", "text": "world"},
+]
+
+
+@pytest.mark.asyncio
+async def test_invoke_message_object_content_blocks():
+    graph = MockGraph(final_state={"messages": [MockMessageObject(BLOCKS)]})
+    adapter = LangGraphAdapter(graph=graph)
+    assert await adapter.invoke("test") == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_invoke_dict_message_content_blocks():
+    graph = MockGraph(final_state={"messages": [{"role": "assistant", "content": BLOCKS}]})
+    adapter = LangGraphAdapter(graph=graph)
+    assert await adapter.invoke("test") == "Hello world"

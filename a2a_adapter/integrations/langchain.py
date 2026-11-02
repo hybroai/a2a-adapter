@@ -41,6 +41,7 @@ except ImportError:
 
 from ..adapter import BaseAgentAdapter
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter
+from ._framework import content_to_text
 
 logger = logging.getLogger(__name__)
 
@@ -181,20 +182,7 @@ class LangChainAdapter(BaseA2AAdapter):
         """Extract text from runnable output (AIMessage, dict, str)."""
         # AIMessage or similar with content attribute
         if hasattr(output, "content"):
-            content = output.content
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                parts = []
-                for item in content:
-                    if isinstance(item, str):
-                        parts.append(item)
-                    elif hasattr(item, "text"):
-                        parts.append(item.text)
-                    elif isinstance(item, dict) and "text" in item:
-                        parts.append(item["text"])
-                return " ".join(parts)
-            return str(content)
+            return content_to_text(output.content)
 
         # Dictionary output
         if isinstance(output, dict):
@@ -211,16 +199,7 @@ class LangChainAdapter(BaseA2AAdapter):
         """Extract text from a streaming chunk."""
         # AIMessageChunk or similar
         if hasattr(chunk, "content"):
-            content = chunk.content
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                return "".join(
-                    item if isinstance(item, str)
-                    else getattr(item, "text", "")
-                    for item in content
-                )
-            return str(content) if content else ""
+            return content_to_text(chunk.content, sep="")
 
         # Dictionary chunk
         if isinstance(chunk, dict):

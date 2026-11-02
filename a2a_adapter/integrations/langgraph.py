@@ -45,6 +45,7 @@ except ImportError:
 
 from ..adapter import BaseAgentAdapter
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter
+from ._framework import content_to_text
 
 # Lazy import for TaskStore to avoid hard dependency
 try:
@@ -294,23 +295,12 @@ class LangGraphAdapter(BaseA2AAdapter):
     def _extract_message_content(message: Any) -> str:
         """Extract content from a message object (LangChain or dict)."""
         if hasattr(message, "content"):
-            content = message.content
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                parts = []
-                for item in content:
-                    if isinstance(item, str):
-                        parts.append(item)
-                    elif hasattr(item, "text"):
-                        parts.append(item.text)
-                return " ".join(parts)
-            return str(content)
+            return content_to_text(message.content)
 
         if isinstance(message, dict):
             for key in ("content", "text"):
                 if key in message:
-                    return str(message[key])
+                    return content_to_text(message[key])
 
         return str(message)
 
