@@ -417,6 +417,21 @@ class TestCrewAIAdapterCallFramework:
 
         assert result == "sync result"
 
+    @pytest.mark.asyncio
+    async def test_call_framework_attribute_error_inside_crew_does_not_rerun(self):
+        """An AttributeError raised by the crew itself must not trigger the
+        sync fallback, which would run the crew a second time."""
+        mock_crew = MagicMock()
+        mock_crew.kickoff_async = AsyncMock(side_effect=AttributeError("tool bug"))
+        mock_crew.kickoff = MagicMock(return_value="second run")
+
+        adapter = CrewAIAgentAdapter(crew=mock_crew)
+        params = make_message_send_params("test")
+
+        with pytest.raises(AttributeError, match="tool bug"):
+            await adapter.call_framework({"inputs": "test"}, params)
+        mock_crew.kickoff.assert_not_called()
+
 
 class TestCrewAIAdapterHandle:
     """Tests for the complete handle flow."""

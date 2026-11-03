@@ -4,6 +4,7 @@ Covers: invoke, stream, input building, output extraction, metadata,
         and integration with to_a2a / build_agent_card / load_adapter.
 """
 
+import asyncio
 import json
 import pytest
 
@@ -162,16 +163,26 @@ async def test_input_mapper():
 
 
 @pytest.mark.asyncio
-async def test_input_mapper_fallback_on_error():
+async def test_input_mapper_error_fails_the_task():
+    """A bug in input_mapper must surface, not silently fall back."""
     runnable = MockRunnable()
 
     def bad_mapper(raw_input, context_id):
-        raise RuntimeError("mapper failed")
+        raise ValueError("broken")
 
     adapter = LangChainAdapter(runnable=runnable, input_mapper=bad_mapper)
-    await adapter.invoke("hello")
-    # Falls back to input_key
-    assert runnable.last_input == {"input": "hello"}
+    with pytest.raises(RuntimeError, match="input_mapper failed: ValueError: broken") as exc:
+        await adapter.invoke("hello")
+    assert isinstance(exc.value.__cause__, ValueError)
+    assert runnable.last_input is None
+
+
+@pytest.mark.asyncio
+async def test_input_mapper_must_return_a_dict():
+    runnable = MockRunnable()
+    adapter = LangChainAdapter(runnable=runnable, input_mapper=lambda raw, ctx: ["not", "a", "dict"])
+    with pytest.raises(TypeError, match="input_mapper must return a dict, got list"):
+        await adapter.invoke("hello")
 
 
 @pytest.mark.asyncio
@@ -390,3 +401,126 @@ def test_flat_import():
     """Verify from a2a_adapter import LangChainAdapter works."""
     from a2a_adapter import LangChainAdapter as LC
     assert LC is LangChainAdapter
+
+
+# ──── Test: Structured content blocks ────
+
+
+BLOCKS = [
+    {"type": "text", "text": "Hello"},
+    {"type": "tool_use", "id": "t1", "name": "search", "input": {}},
+    {"type": "text", "text": "world"},
+]
+
+
+@pytest.mark.asyncio
+async def test_invoke_content_blocks_text_only():
+    class BlockRunnable:
+        async def ainvoke(self, inputs):
+            return MockAIMessage(BLOCKS)
+
+    adapter = LangChainAdapter(runnable=BlockRunnable())
+    assert await adapter.invoke("test") == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_stream_content_block_chunks():
+    """Chunks whose content is a list of text blocks yield their text."""
+
+    class BlockStreamRunnable:
+        async def ainvoke(self, inputs):
+            return "done"
+
+        async def astream(self, inputs):
+            yield MockAIMessageChunk([{"type": "text", "text": "Hel", "index": 0}])
+            yield MockAIMessageChunk([{"type": "text", "text": "lo", "index": 0}])
+            yield MockAIMessageChunk([{"type": "tool_use", "id": "t1", "index": 1}])
+
+    adapter = LangChainAdapter(runnable=BlockStreamRunnable())
+    chunks = [c async for c in adapter.stream("test")]
+    assert chunks == ["Hel", "lo"]
+
+
+# ──── Test: Timeouts and explicit streaming flag ────
+
+
+class SlowFramework:
+    """ainvoke sleeps; astream yields every 30ms and records closing."""
+
+    def __init__(self, items=10, raise_inside=None):
+        self.items = items
+        self.raise_inside = raise_inside
+        self.closed = False
+
+    async def ainvoke(self, inputs):
+        await asyncio.sleep(1)
+        return "late"
+
+    async def astream(self, inputs):
+        try:
+            if self.raise_inside is not None:
+                raise self.raise_inside
+            for i in range(self.items):
+                await asyncio.sleep(0.03)
+                yield {"n": {"output": f"c{i}"}} if "langchain" == "langgraph" else f"c{i}"
+        finally:
+            self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_invoke_timeout_has_clear_message():
+    adapter = LangChainAdapter(runnable=SlowFramework(), timeout=0.05)
+    with pytest.raises(TimeoutError, match="timed out after 0.05 seconds"):
+        await adapter.invoke("x")
+
+
+@pytest.mark.asyncio
+async def test_stream_timeout_bounds_whole_stream():
+    """The timeout bounds the whole stream, not each chunk."""
+    framework = SlowFramework(items=10)
+    adapter = LangChainAdapter(runnable=framework, timeout=0.1)
+    chunks = []
+    with pytest.raises(TimeoutError, match="timed out after 0.1 seconds"):
+        async for chunk in adapter.stream("x"):
+            chunks.append(chunk)
+    assert 0 < len(chunks) < 10
+    assert framework.closed
+
+
+@pytest.mark.asyncio
+async def test_stream_completes_within_timeout():
+    adapter = LangChainAdapter(runnable=SlowFramework(items=2), timeout=5)
+    assert len([c async for c in adapter.stream("x")]) == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_inner_timeout_error_not_relabelled():
+    framework = SlowFramework(raise_inside=TimeoutError("upstream API"))
+    adapter = LangChainAdapter(runnable=framework, timeout=5)
+    with pytest.raises(TimeoutError, match="^upstream API$"):
+        _ = [c async for c in adapter.stream("x")]
+
+
+def test_streaming_flag_disables_streaming():
+    adapter = LangChainAdapter(runnable=MockRunnable(), streaming=False)
+    assert adapter.supports_streaming() is False
+    assert adapter.get_metadata().streaming is False
+
+
+def test_streaming_flag_default_auto_detects():
+    assert LangChainAdapter(runnable=MockRunnable()).supports_streaming() is True
+    assert LangChainAdapter(runnable=MockRunnableNoStream()).supports_streaming() is False
+
+
+@pytest.mark.asyncio
+async def test_output_dict_with_non_json_values():
+    from datetime import datetime
+
+    when = datetime(2026, 1, 2, 3, 4, 5)
+
+    class DictRunnable:
+        async def ainvoke(self, inputs):
+            return {"when": when, "msg": MockAIMessage("hi")}
+
+    result = await LangChainAdapter(runnable=DictRunnable()).invoke("test")
+    assert json.loads(result)["when"] == str(when)

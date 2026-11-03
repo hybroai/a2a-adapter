@@ -4,7 +4,10 @@ Covers: invoke (async + sync fallback), input building, output extraction,
         metadata, and integration with to_a2a / build_agent_card / load_adapter.
 """
 
+import asyncio
 import json
+import threading
+
 import pytest
 
 from a2a_adapter.integrations.crewai import CrewAIAdapter
@@ -151,15 +154,26 @@ async def test_input_mapper():
 
 
 @pytest.mark.asyncio
-async def test_input_mapper_fallback():
+async def test_input_mapper_error_fails_the_task():
+    """A bug in input_mapper must surface, not silently fall back."""
     crew = MockCrew()
 
     def bad_mapper(raw_input, context_id):
         raise ValueError("broken")
 
     adapter = CrewAIAdapter(crew=crew, input_mapper=bad_mapper)
-    await adapter.invoke("fallback test")
-    assert crew.last_inputs == {"inputs": "fallback test"}
+    with pytest.raises(RuntimeError, match="input_mapper failed: ValueError: broken") as exc:
+        await adapter.invoke("hello")
+    assert isinstance(exc.value.__cause__, ValueError)
+    assert crew.last_inputs is None
+
+
+@pytest.mark.asyncio
+async def test_input_mapper_must_return_a_dict():
+    crew = MockCrew()
+    adapter = CrewAIAdapter(crew=crew, input_mapper=lambda raw, ctx: ["not", "a", "dict"])
+    with pytest.raises(TypeError, match="input_mapper must return a dict, got list"):
+        await adapter.invoke("hello")
 
 
 @pytest.mark.asyncio
@@ -294,3 +308,68 @@ def test_load_adapter_crewai():
 def test_flat_import():
     from a2a_adapter import CrewAIAdapter as CA
     assert CA is CrewAIAdapter
+
+
+# ──── Test: kickoff selection and timeout ────
+
+
+class MockCrewAttributeErrorInside:
+    """kickoff_async exists but the crew's own code raises AttributeError."""
+
+    def __init__(self):
+        self.kickoff_calls = 0
+
+    async def kickoff_async(self, inputs=None):
+        raise AttributeError("'NoneType' object has no attribute 'run'")
+
+    def kickoff(self, inputs=None):
+        self.kickoff_calls += 1
+        return MockCrewOutput("ran twice")
+
+
+@pytest.mark.asyncio
+async def test_attribute_error_inside_crew_does_not_rerun():
+    crew = MockCrewAttributeErrorInside()
+    adapter = CrewAIAdapter(crew=crew)
+    with pytest.raises(AttributeError, match="no attribute 'run'"):
+        await adapter.invoke("test")
+    assert crew.kickoff_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_sync_fallback_runs_off_the_event_loop():
+    main_thread = threading.get_ident()
+    seen = {}
+
+    class Crew:
+        def kickoff(self, inputs=None):
+            seen["thread"] = threading.get_ident()
+            return MockCrewOutput("ok")
+
+    assert await CrewAIAdapter(crew=Crew()).invoke("x") == "ok"
+    assert seen["thread"] != main_thread
+
+
+@pytest.mark.asyncio
+async def test_invoke_timeout_has_clear_message():
+    class SlowCrew:
+        async def kickoff_async(self, inputs=None):
+            await asyncio.sleep(1)
+
+    adapter = CrewAIAdapter(crew=SlowCrew(), timeout=0.05)
+    with pytest.raises(TimeoutError, match="CrewAI crew timed out after 0.05 seconds"):
+        await adapter.invoke("x")
+
+
+@pytest.mark.asyncio
+async def test_output_dict_with_non_json_values():
+    from datetime import datetime
+
+    when = datetime(2026, 1, 2, 3, 4, 5)
+
+    class Crew:
+        async def kickoff_async(self, inputs=None):
+            return {"when": when}
+
+    result = await CrewAIAdapter(crew=Crew()).invoke("test")
+    assert json.loads(result) == {"when": str(when)}
