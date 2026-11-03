@@ -706,3 +706,24 @@ async def test_stream_skips_non_ai_chunks_and_chat_messages():
     ])
     chunks = await _collect(LangGraphAdapter(graph=graph))
     assert "".join(chunks) == "reply\n\nmore\n\nchat reply"
+
+
+@pytest.mark.asyncio
+async def test_stream_falls_through_to_output_keys_without_ai_message():
+    """Like invoke(), a write whose messages hold no AI reply falls through
+    to the common output keys."""
+    for messages in ([], [TypedMessage("tool result", type="tool")]):
+        graph = UpdatesGraph([{"agent": {"messages": messages, "output": "final"}}])
+        assert await _collect(LangGraphAdapter(graph=graph)) == ["final"]
+
+
+@pytest.mark.asyncio
+async def test_stream_tool_only_messages_write_emits_nothing():
+    graph = UpdatesGraph([{"tools": {"messages": [TypedMessage("raw", type="tool")]}}])
+    assert await _collect(LangGraphAdapter(graph=graph)) == []
+
+
+@pytest.mark.asyncio
+async def test_stream_ai_reply_wins_over_output_key():
+    graph = UpdatesGraph([{"agent": {"messages": [TypedMessage("reply")], "output": "x"}}])
+    assert await _collect(LangGraphAdapter(graph=graph)) == ["reply"]

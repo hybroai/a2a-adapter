@@ -317,7 +317,9 @@ class LangGraphAdapter(BaseA2AAdapter):
             for message in reversed(messages):
                 if self._is_ai_message(message):
                     return self._extract_message_content(message)
-            return ""
+            # No AI reply (empty or tool-only messages): fall through to the
+            # node's output keys, as invoke() does for an empty list. Tool
+            # message content itself is still never emitted.
 
         # Same keys as _extract_output (invoke)
         for key in ("output", "response", "result", "answer", "text", "content"):
