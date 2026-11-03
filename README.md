@@ -66,6 +66,7 @@ existing ASGI app instead, use `to_a2a(adapter)`.
 | CrewAI | `CrewAIAdapter` | No | [crewai_agent.py](examples/crewai_agent.py) |
 | Ollama | `OllamaAdapter` | Yes | [ollama_agent.py](examples/ollama_agent.py) |
 | Hermes Agent | `HermesAdapter` | Yes | [hermes_agent.py](examples/hermes_agent.py) |
+| DeepSeek Harness | `DeepSeekHarnessAdapter` | No | [deepseek_harness_agent.py](examples/deepseek_harness_agent.py) |
 | Python callable | `CallableAdapter` | Optional | [quickstart.py](examples/quickstart.py) |
 | Custom class | `BaseA2AAdapter` | Optional | [custom_adapter.py](examples/custom_adapter.py) |
 

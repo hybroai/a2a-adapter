@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `DeepSeekHarnessAdapter` (`"deepseek-harness"` in `load_adapter`) exposes a
+  DeepSeek Harness (dsh) coding agent through `deepseek-harness-sdk`. Install
+  with `pip install "a2a-adapter[deepseek-harness]"`. One runtime is launched
+  on the first request and reused; each A2A `contextId` maps to a durable dsh
+  session, so conversations survive server restarts. Turns are serialized,
+  responses are not streamed, and cancelling the running task restarts the
+  runtime because the SDK has no interrupt call
+
 ## [0.2.16] - 2026-11-03
 
 ### Changed

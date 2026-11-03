@@ -153,6 +153,7 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 | `HermesAdapter` | Gateway pattern: `SessionDB` + `AIAgent.run_conversation()` in a thread pool; requires Hermes on `PYTHONPATH` | Yes (callback → queue) |
 | `OllamaAdapter` | Wraps `OllamaClient` HTTP client (`/api/chat`) | Yes (NDJSON streaming) |
 | `PiAdapter` | One persistent `pi --mode rpc` process and session | Yes (JSONL events) |
+| `DeepSeekHarnessAdapter` | One `deepseek-harness-sdk` runtime (`dsh` over stdio JSON-RPC) on a single worker thread; one durable session per `context_id` | No |
 | `CallableAdapter` | Direct function call | Optional |
 
 **Input pipeline (all adapters):** `input_mapper` > JSON parse > `input_key` fallback.
@@ -194,6 +195,7 @@ a2a_adapter/
     ├── codex.py         # CodexAdapter
     ├── openclaw.py      # OpenClawAdapter + OpenClawAgentAdapter
     ├── hermes.py        # HermesAdapter (Hermes Agent gateway pattern)
+    ├── deepseek_harness.py  # DeepSeekHarnessAdapter (DeepSeek Harness SDK runtime)
     └── pi.py            # PiAdapter and internal persistent JSONL RPC runtime
 ```
 

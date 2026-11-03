@@ -38,6 +38,7 @@ crewai = ["crewai>=0.1.0"]
 langchain = ["langchain>=0.1.0", "langchain-core>=0.1.0"]
 langgraph = ["langgraph>=0.0.1"]
 ollama = []
+deepseek-harness = ["deepseek-harness-sdk>=0.2.1rc2,<0.3"]
 all = [
     "crewai>=0.1.0",
     "langchain>=0.1.0",

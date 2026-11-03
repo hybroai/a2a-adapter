@@ -45,6 +45,7 @@ _ADAPTER_LAZY_MAP = {
     "CodexAdapter": (".integrations.codex", "CodexAdapter"),
     "HermesAdapter": (".integrations.hermes", "HermesAdapter"),
     "PiAdapter": (".integrations.pi", "PiAdapter"),
+    "DeepSeekHarnessAdapter": (".integrations.deepseek_harness", "DeepSeekHarnessAdapter"),
 }
 
 
@@ -106,4 +107,5 @@ __all__ = [
     "CodexAdapter",
     "HermesAdapter",
     "PiAdapter",
+    "DeepSeekHarnessAdapter",
 ]
