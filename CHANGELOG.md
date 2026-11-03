@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `--model`, `--provider`, `--profile`, `--dsh-home`, `--reasoning-effort`,
   `--max-tokens` and `--startup-timeout`; `--timeout` and `--executable` map to
   the turn timeout and the `dsh` binary. Arguments after `--` are rejected
+- `DeepSeekHarnessHeadlessAdapter` (`"deepseek-harness-headless"` in
+  `load_adapter`) runs `dsh --profile headless` once per request. dsh headless
+  mode has no resume, so every request is a fresh session and `contextId`
+  carries no history; prefer `DeepSeekHarnessAdapter`. Library only, no CLI
+  subcommand
 
 ## [0.2.16] - 2026-11-03
 

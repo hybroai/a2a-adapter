@@ -48,6 +48,10 @@ _BUILTIN_MAP: Dict[str, tuple[str, str]] = {
         "a2a_adapter.integrations.deepseek_harness",
         "DeepSeekHarnessAdapter",
     ),
+    "deepseek-harness-headless": (
+        "a2a_adapter.integrations.deepseek_harness_headless",
+        "DeepSeekHarnessHeadlessAdapter",
+    ),
 }
 
 

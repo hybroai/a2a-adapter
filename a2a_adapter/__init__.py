@@ -46,6 +46,10 @@ _ADAPTER_LAZY_MAP = {
     "HermesAdapter": (".integrations.hermes", "HermesAdapter"),
     "PiAdapter": (".integrations.pi", "PiAdapter"),
     "DeepSeekHarnessAdapter": (".integrations.deepseek_harness", "DeepSeekHarnessAdapter"),
+    "DeepSeekHarnessHeadlessAdapter": (
+        ".integrations.deepseek_harness_headless",
+        "DeepSeekHarnessHeadlessAdapter",
+    ),
 }
 
 
@@ -108,4 +112,5 @@ __all__ = [
     "HermesAdapter",
     "PiAdapter",
     "DeepSeekHarnessAdapter",
+    "DeepSeekHarnessHeadlessAdapter",
 ]

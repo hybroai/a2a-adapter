@@ -157,6 +157,7 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 | `OllamaAdapter` | Wraps `OllamaClient` HTTP client (`/api/chat`) | Yes (NDJSON streaming) |
 | `PiAdapter` | One persistent `pi --mode rpc` process and session | Yes (JSONL events) |
 | `DeepSeekHarnessAdapter` | One `deepseek-harness-sdk` runtime (`dsh` over stdio JSON-RPC) on a single worker thread; one durable session per `context_id` | No |
+| `DeepSeekHarnessHeadlessAdapter` | `dsh --profile headless <task>` subprocess; stateless, every turn is a fresh dsh session | No |
 | `CallableAdapter` | Direct function call | Optional |
 
 **Input pipeline (all adapters):** `input_mapper` > JSON parse > `input_key` fallback.
@@ -199,6 +200,7 @@ a2a_adapter/
     ├── openclaw.py      # OpenClawAdapter + OpenClawAgentAdapter
     ├── hermes.py        # HermesAdapter (Hermes Agent gateway pattern)
     ├── deepseek_harness.py  # DeepSeekHarnessAdapter (DeepSeek Harness SDK runtime)
+    ├── deepseek_harness_headless.py  # DeepSeekHarnessHeadlessAdapter (stateless dsh CLI)
     └── pi.py            # PiAdapter and internal persistent JSONL RPC runtime
 ```
 
