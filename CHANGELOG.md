@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   session, so conversations survive server restarts. Turns are serialized,
   responses are not streamed, and cancelling the running task restarts the
   runtime because the SDK has no interrupt call
+- `a2a-adapter dsh` serves `DeepSeekHarnessAdapter` from the command line, with
+  `--model`, `--provider`, `--profile`, `--dsh-home`, `--reasoning-effort`,
+  `--max-tokens` and `--startup-timeout`; `--timeout` and `--executable` map to
+  the turn timeout and the `dsh` binary. Arguments after `--` are rejected
 
 ## [0.2.16] - 2026-11-03
 

@@ -120,14 +120,17 @@ Three public functions:
 
 The `a2a-adapter` console script is intentionally thin:
 
-- Supports `pi`, `codex`, `claude`, and `openclaw`
+- Supports `pi`, `codex`, `claude`, `openclaw`, and `dsh` (DeepSeek Harness)
 - Resolves the working directory and A2A server settings
 - Passes native agent arguments after `--` into the selected adapter
 - Rejects protocol/session flags owned by the adapter
 - Calls the same `serve_agent()` used by Python SDK consumers
 
 Hermes is not a v1 CLI target because `HermesAdapter` is an in-process gateway
-adapter rather than a local CLI subprocess adapter.
+adapter rather than a local CLI subprocess adapter. `dsh` is a target because
+`DeepSeekHarnessAdapter` drives a local `dsh` subprocess like Pi; its SDK takes
+no native argv, so the subcommand exposes explicit options and rejects
+arguments after `--`.
 
 ### Loader (`loader.py`)
 

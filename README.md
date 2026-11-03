@@ -72,8 +72,8 @@ existing ASGI app instead, use `to_a2a(adapter)`.
 
 ## 2. Use It as a CLI
 
-Start a classic local agent (Claude Code, Codex, Pi, or OpenClaw) as an A2A
-server with one command.
+Start a classic local agent (Claude Code, Codex, Pi, OpenClaw, or DeepSeek
+Harness) as an A2A server with one command.
 
 **Install the CLI** as an isolated tool, so the `a2a-adapter` command lands on
 your `PATH`:
@@ -98,6 +98,7 @@ a2a-adapter claude --port 9010
 a2a-adapter pi --port 9012
 a2a-adapter codex --port 9011
 a2a-adapter openclaw --port 9008
+a2a-adapter dsh --port 9013
 ```
 
 Options before `--` configure the A2A server. Options after `--` are passed
@@ -123,13 +124,26 @@ limited by the OS command-line length; OpenClaw itself rejects prompts over
 | `--description` | `<Agent> agent working in <folder>` | Agent Card description |
 | `--skill` | one skill from the card name and description | Agent Card skill as JSON (`id`, `name`, `description`, at least one entry in `tags`, optional `examples`); repeatable |
 | `--timeout` | `600` | Per-request timeout in seconds |
-| `--executable` | `claude`, `codex`, `pi`, `openclaw` | Path to the agent executable |
+| `--executable` | `claude`, `codex`, `pi`, `openclaw`; for `dsh`, the runtime bundled with the SDK | Path to the agent executable |
 
 Pi source commands can be selected without a shell wrapper:
 
 ```bash
 A2A_PI_COMMAND='npx tsx /path/to/pi/packages/coding-agent/src/cli.ts' \
   a2a-adapter pi --port 9012
+```
+
+DeepSeek Harness runs through its Python SDK rather than a CLI, so it needs
+the extra (`uv tool install "a2a-adapter[deepseek-harness]"`) and
+`DEEPSEEK_API_KEY` in the environment. It takes no native options after `--`;
+use `--model`, `--provider`, `--profile`, `--dsh-home`, `--reasoning-effort`,
+`--max-tokens` and `--startup-timeout` instead. Each A2A conversation
+(`contextId`) gets its own durable dsh session under `--dsh-home` (default:
+`$DSH_HOME`, else the per-user state directory below), so it resumes after the
+server restarts.
+
+```bash
+a2a-adapter dsh --port 9013 --model <model>
 ```
 
 Run `a2a-adapter -help` for the supported agents, or

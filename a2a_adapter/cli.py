@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shlex
@@ -12,6 +13,8 @@ from pathlib import Path
 
 from .integrations.claude_code import ClaudeCodeAdapter
 from .integrations.codex import CodexAdapter
+from .integrations.deepseek_harness import _INSTALL_HINT as _DSH_INSTALL_HINT
+from .integrations.deepseek_harness import DeepSeekHarnessAdapter, resolve_dsh_bin
 from .integrations.openclaw import OpenClawAdapter, VALID_THINKING_LEVELS
 from .integrations.pi import PiAdapter
 from .server import serve_agent
@@ -64,6 +67,8 @@ _MANAGED_OPTIONS = {
     "codex": _CODEX_MANAGED_OPTIONS,
     "claude": _CLAUDE_CODE_MANAGED_OPTIONS,
     "openclaw": _OPENCLAW_MANAGED_OPTIONS,
+    # dsh runs through its SDK, which takes no native argv; see _validate_agent_args.
+    "dsh": set(),
 }
 # Agents whose parsers (commander, clap) accept glued short options, so
 # "-pfoo" or "-print" reaches them as "-p". Pi matches each flag exactly.
@@ -73,6 +78,7 @@ _AGENT_DISPLAY_NAMES = {
     "codex": "Codex",
     "claude": "Claude Code",
     "openclaw": "OpenClaw",
+    "dsh": "DeepSeek Harness",
 }
 
 
@@ -85,6 +91,13 @@ def _port(value: str) -> int:
 
 def _positive_float(value: str) -> float:
     number = float(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return number
+
+
+def _positive_int(value: str) -> int:
+    number = int(value)
     if number <= 0:
         raise argparse.ArgumentTypeError("value must be greater than zero")
     return number
@@ -153,6 +166,25 @@ def _build_parser() -> argparse.ArgumentParser:
     openclaw_parser.add_argument("--agent-id")
     openclaw_parser.add_argument("--thinking", choices=sorted(VALID_THINKING_LEVELS), default="low")
 
+    dsh_parser = subparsers.add_parser(
+        "dsh", help="Serve DeepSeek Harness over A2A", add_help=False
+    )
+    _add_server_options(dsh_parser)
+    dsh_parser.add_argument("--model", help="Model id (default: the SDK's default)")
+    dsh_parser.add_argument("--provider", help="Model provider (default: the SDK's default)")
+    dsh_parser.add_argument("--profile", default="sdk", help="dsh profile (default: sdk)")
+    dsh_parser.add_argument(
+        "--dsh-home", help="Harness home (default: $DSH_HOME, else a per-user state directory)"
+    )
+    dsh_parser.add_argument("--reasoning-effort", help="Reasoning effort passed to the model")
+    dsh_parser.add_argument("--max-tokens", type=_positive_int, help="Maximum output tokens")
+    dsh_parser.add_argument(
+        "--startup-timeout",
+        type=_positive_float,
+        default=30.0,
+        help="Seconds to wait for the dsh runtime to start",
+    )
+
     return parser
 
 
@@ -200,6 +232,8 @@ def _validate_agent_args(
             )
     if agent == "codex" and any(value in {"resume", "review"} for value in agent_args):
         parser.error("Codex subcommands are managed by a2a-adapter")
+    if agent == "dsh" and agent_args:
+        parser.error("dsh does not accept native options after '--'; use the dsh options instead")
 
 
 def _working_directory(parser: argparse.ArgumentParser, value: str) -> str:
@@ -249,6 +283,10 @@ def _card_identity(agent: str, working_dir: str, name: str, description: str) ->
     if not description:
         description = f"{product} agent working in {folder}" if folder else f"{product} agent"
     return name, description
+
+
+def _dsh_sdk_installed() -> bool:
+    return importlib.util.find_spec("deepseek_harness") is not None
 
 
 def _pi_command(parser: argparse.ArgumentParser, executable: str | None) -> list[str]:
@@ -311,6 +349,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             openclaw_path=args.executable or "openclaw",
             working_directory=working_dir,
             cli_args=agent_args,
+            name=name,
+            description=description,
+            skills=skills,
+        )
+    elif args.agent == "dsh":
+        # The SDK is imported on the first request; fail before serving instead.
+        if not _dsh_sdk_installed():
+            parser.error(_DSH_INSTALL_HINT)
+        try:
+            resolve_dsh_bin(args.executable)
+        except FileNotFoundError as error:
+            parser.error(str(error))
+        adapter = DeepSeekHarnessAdapter(
+            working_dir=working_dir,
+            dsh_home=args.dsh_home,
+            provider=args.provider,
+            model=args.model,
+            reasoning_effort=args.reasoning_effort,
+            max_tokens=args.max_tokens,
+            profile=args.profile,
+            dsh_bin=args.executable,
+            timeout=args.timeout,
+            startup_timeout=args.startup_timeout,
             name=name,
             description=description,
             skills=skills,
