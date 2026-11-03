@@ -50,6 +50,16 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
     - any other id becomes ``a2a-<first 16 hex chars of its sha256>``;
     - a request without a ``context_id`` gets a one-off ``a2a-<12 hex>`` session.
 
+    The default ``sdk`` profile starts new sessions in dsh's
+    ``workspace-write`` preset: shell commands and file writes are confined to
+    the workspace and temp directories, but reads and network access are not
+    (``web_fetch`` can reach loopback and private hosts). ``sdk-minimal`` runs
+    with ``danger-full-access``, and ``DSH_PERMISSION_MODE``, ``patches`` or a
+    custom profile can change the preset too; the warning logged for
+    ``sdk-minimal`` is a best-effort notice, not a guarantee. Either way the
+    agent executes tools for whoever can reach the A2A server, so keep the
+    server on a trusted interface.
+
     Sessions live under ``dsh_home``: the explicit argument, else a non-empty
     ``DSH_HOME`` environment variable, else a per-user, per-project state
     directory. Prefer the ``DEEPSEEK_API_KEY`` environment variable over the
@@ -69,7 +79,7 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
         from a2a_adapter import DeepSeekHarnessAdapter, serve_agent
 
         adapter = DeepSeekHarnessAdapter(working_dir="/path/to/project")
-        serve_agent(adapter, port=9010)
+        serve_agent(adapter, host="127.0.0.1", port=9010)
     """
 
     def __init__(
@@ -105,6 +115,12 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
         self.reasoning_effort = reasoning_effort
         self.max_tokens = max_tokens
         self.profile = profile
+        if profile == "sdk-minimal":
+            logger.warning(
+                "DeepSeekHarnessAdapter: profile 'sdk-minimal' runs tools with "
+                "danger-full-access (no sandbox or approvals). Only use it in "
+                "trusted, sandboxed environments."
+            )
         self.patches = tuple(patches)
         self.base_url = base_url
         self._api_key = api_key

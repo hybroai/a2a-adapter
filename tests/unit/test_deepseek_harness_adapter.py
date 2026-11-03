@@ -287,6 +287,16 @@ class TestConfiguration:
             await adapter.invoke("hi", context_id="ctx-1", context=_context("t1"))
         await adapter.close()
 
+    def test_full_access_profile_logs_a_warning(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING):
+            DeepSeekHarnessAdapter(working_dir=str(tmp_path), profile="sdk-minimal")
+        assert "danger-full-access" in caplog.text
+
+    def test_default_profile_logs_no_warning(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING):
+            DeepSeekHarnessAdapter(working_dir=str(tmp_path))
+        assert caplog.text == ""
+
     @pytest.mark.asyncio
     async def test_unset_options_keep_sdk_defaults(self, adapter, sdk):
         await adapter.invoke("hi", context_id="ctx-1", context=_context("t1"))

@@ -13,6 +13,9 @@ Usage:
 Each A2A contextId maps to its own durable dsh session, so a conversation
 continues across turns and server restarts. Sessions are stored under
 DSH_HOME when set, otherwise in a per-user state directory.
+
+The A2A server has no authentication and the agent runs shell commands in
+the working directory, so this binds to localhost only.
 """
 
 import os
@@ -29,4 +32,4 @@ adapter = DeepSeekHarnessAdapter(
     description="DeepSeek Harness coding agent",
 )
 
-serve_agent(adapter, port=9010)
+serve_agent(adapter, host="127.0.0.1", port=9010)
