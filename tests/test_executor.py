@@ -1,9 +1,7 @@
 """Tests for AdapterAgentExecutor — the bridge between adapters and A2A SDK."""
 
 import asyncio
-import uuid
-from typing import AsyncIterator
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from a2a.server.agent_execution import RequestContext

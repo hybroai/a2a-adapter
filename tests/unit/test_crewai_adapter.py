@@ -5,7 +5,7 @@ Unit tests for CrewAIAgentAdapter.
 import asyncio
 import json
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from a2a_adapter.integrations.crewai import CrewAIAgentAdapter
 from a2a.types import Message, SendMessageRequest, Task, TaskState, Role, Part

@@ -1,6 +1,5 @@
 """Tests for HermesAdapter (v0.2)."""
 
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 

@@ -11,7 +11,6 @@ Usage:
     python examples/crewai_agent.py
 """
 
-import os
 
 from crewai import Agent, Crew, Process
 from a2a_adapter import CrewAIAdapter, serve_agent

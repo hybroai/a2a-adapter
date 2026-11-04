@@ -14,7 +14,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from a2a_adapter.integrations.codex import CodexAdapter
-from a2a_adapter.base_adapter import AdapterMetadata, CommandResult, ParseResult, default_state_dir
+from a2a_adapter.base_adapter import CommandResult, ParseResult, default_state_dir
 from a2a_adapter.exceptions import CancelledByAdapterError
 from a2a_adapter.loader import load_adapter
 from a2a_adapter.server import build_agent_card, to_a2a

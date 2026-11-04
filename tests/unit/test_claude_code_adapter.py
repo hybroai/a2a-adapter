@@ -15,7 +15,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from a2a_adapter.integrations.claude_code import ClaudeCodeAdapter
-from a2a_adapter.base_adapter import AdapterMetadata, default_state_dir
+from a2a_adapter.base_adapter import default_state_dir
 from a2a_adapter.exceptions import CancelledByAdapterError
 from a2a_adapter.loader import load_adapter
 from a2a_adapter.server import build_agent_card, to_a2a
@@ -914,16 +914,10 @@ class TestCancelRunning:
             assert "task-kill" in adapter._killed_tasks
             mock_proc.kill.assert_called_once()
 
-            # The invoke should raise CancelledByAdapterError after communicate
-            # returns/raises due to the kill. We need communicate to actually
-            # return after kill. Let's adjust: the blocking_communicate is
-            # running in wait_for which respects cancellation differently.
-            # Since the real impl uses wait_for, and the proc was killed,
-            # let's simulate the communicate finishing quickly after kill.
-
-        # Note: In real usage, proc.communicate() would return when the
-        # process is killed. For this test, the blocking_communicate
-        # would need to complete. Let's test the simpler path.
+            # The mock communicate ignores the kill, so stop the turn here;
+            # test_cancel_running_via_killed_tasks covers the error it raises.
+            invoke_task.cancel()
+            await asyncio.gather(invoke_task, return_exceptions=True)
 
     @pytest.mark.asyncio
     async def test_cancel_running_via_killed_tasks(self, adapter, mock_proc):

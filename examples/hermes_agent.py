@@ -22,7 +22,7 @@ HERMES_AGENT_PATH = os.path.expanduser("~/Projects/hermes-agent")
 if HERMES_AGENT_PATH not in sys.path:
     sys.path.insert(0, HERMES_AGENT_PATH)
 
-from a2a_adapter import HermesAdapter, serve_agent
+from a2a_adapter import HermesAdapter, serve_agent  # noqa: E402 (after the sys.path insert)
 
 adapter = HermesAdapter(
     model="claude-opus-4.6",

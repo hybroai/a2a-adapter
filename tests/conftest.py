@@ -1,15 +1,14 @@
 """Shared fixtures for a2a-adapter tests."""
 
-import asyncio
 from typing import AsyncIterator
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
 from a2a.types import Part
 
-from a2a_adapter.base_adapter import AdapterMetadata, BaseA2AAdapter
+from a2a_adapter.base_adapter import BaseA2AAdapter
 
 
 class StubAdapter(BaseA2AAdapter):

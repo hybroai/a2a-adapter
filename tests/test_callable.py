@@ -5,7 +5,6 @@ import threading
 import time
 
 import pytest
-from a2a.types import Part
 
 from a2a_adapter.integrations.callable import CallableAdapter
 

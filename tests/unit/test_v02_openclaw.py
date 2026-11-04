@@ -14,12 +14,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from a2a_adapter.integrations.openclaw import (
     OpenClawAdapter,
     VALID_THINKING_LEVELS,
-    _INVALID_SESSION_CHARS_RE,
     _SESSION_ID_MAX_LEN,
 )
 from a2a.types import TaskState
 
-from a2a_adapter.base_adapter import AdapterMetadata
 from a2a_adapter.exceptions import CancelledByAdapterError
 from a2a_adapter.server import build_agent_card, to_a2a
 from a2a_adapter.loader import load_adapter

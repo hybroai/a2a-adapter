@@ -9,7 +9,6 @@ import json
 import pytest
 
 from a2a_adapter.integrations.langchain import LangChainAdapter
-from a2a_adapter.base_adapter import AdapterMetadata
 from a2a_adapter.server import build_agent_card, to_a2a
 from a2a_adapter.loader import load_adapter
 

@@ -20,7 +20,7 @@ import httpx
 import uvicorn
 from a2a.server.context import ServerCallContext
 from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes, create_rest_routes
+from a2a.server.routes import create_jsonrpc_routes, create_rest_routes
 from a2a.server.request_handlers.response_helpers import agent_card_to_dict
 from a2a.server.tasks import (
     BasePushNotificationSender,
