@@ -18,6 +18,7 @@ from .integrations.deepseek_harness import DeepSeekHarnessAdapter, resolve_dsh_b
 from .integrations.openclaw import OpenClawAdapter, VALID_THINKING_LEVELS
 from .integrations.pi import PiAdapter
 from .server import serve_agent
+from .terminal import BackendInfo, TerminalDisplay, Verbosity
 
 
 _PI_MANAGED_OPTIONS = {
@@ -133,7 +134,34 @@ def _add_server_options(
             "and optional examples; repeatable (default: one skill from the card name and description)"
         ),
     )
-    parser.add_argument("--log-level", default="info", help="Uvicorn log level")
+    parser.add_argument(
+        "--log-level", default="warning", help="Uvicorn log level (default: warning)"
+    )
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument(
+        "-q",
+        "--quiet",
+        dest="verbosity",
+        action="store_const",
+        const=Verbosity.QUIET,
+        help="Show only the startup card and errors",
+    )
+    output.add_argument(
+        "-v",
+        "--verbose",
+        dest="verbosity",
+        action="store_const",
+        const=Verbosity.VERBOSE,
+        help="Show full prompt and reply text in the activity log",
+    )
+    output.add_argument(
+        "--debug",
+        dest="verbosity",
+        action="store_const",
+        const=Verbosity.DEBUG,
+        help="Also show raw A2A request, response and stream payloads",
+    )
+    parser.set_defaults(verbosity=Verbosity.NORMAL)
     parser.add_argument("--executable", help="Path to the underlying agent executable")
 
 
@@ -307,9 +335,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     skills = _card_skills(args.agent, name, description, args.skill)
 
     if args.agent == "pi":
+        pi_command = _pi_command(parser, args.executable)
+        command = shlex.join([*pi_command, *agent_args])
         adapter = PiAdapter(
             working_dir=working_dir,
-            pi_command=_pi_command(parser, args.executable),
+            pi_command=pi_command,
             cli_args=agent_args,
             session_id=args.session_id,
             session_dir=args.session_dir,
@@ -319,6 +349,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             skills=skills,
         )
     elif args.agent == "codex":
+        command = shlex.join([args.executable or "codex", *agent_args])
         adapter = CodexAdapter(
             working_dir=working_dir,
             codex_path=args.executable or "codex",
@@ -329,6 +360,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             skills=skills,
         )
     elif args.agent == "claude":
+        command = shlex.join([args.executable or "claude", *agent_args])
         adapter = ClaudeCodeAdapter(
             working_dir=working_dir,
             claude_path=args.executable or "claude",
@@ -339,6 +371,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             skills=skills,
         )
     elif args.agent == "openclaw":
+        command = shlex.join([args.executable or "openclaw", *agent_args])
         adapter = OpenClawAdapter(
             session_id=args.session_id,
             agent_id=args.agent_id,
@@ -356,9 +389,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not _dsh_sdk_installed():
             parser.error(_DSH_INSTALL_HINT)
         try:
-            resolve_dsh_bin(args.executable)
+            dsh_bin = resolve_dsh_bin(args.executable)
         except FileNotFoundError as error:
             parser.error(str(error))
+        command = " · ".join(
+            [dsh_bin or "dsh", f"profile {args.profile}"]
+            + ([f"provider {args.provider}"] if args.provider else [])
+            + ([f"model {args.model}"] if args.model else [])
+        )
         adapter = DeepSeekHarnessAdapter(
             working_dir=working_dir,
             dsh_home=args.dsh_home,
@@ -377,15 +415,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:  # pragma: no cover - argparse limits this to registered subcommands
         raise AssertionError(f"unsupported agent: {args.agent}")
 
-    display_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
-    print(f"Starting {args.agent} as an A2A agent")
-    print(f"Working directory: {working_dir}")
-    print(f"Agent Card: http://{display_host}:{args.port}/.well-known/agent-card.json")
+    display = TerminalDisplay(
+        BackendInfo(command=command, cwd=working_dir, timeout=args.timeout),
+        verbosity=args.verbosity,
+    )
     serve_agent(
         adapter,
         host=args.host,
         port=args.port,
         log_level=args.log_level,
+        display=display,
     )
     return 0
 

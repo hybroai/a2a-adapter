@@ -13,8 +13,9 @@ Replaces: client.py (deprecated in v0.2, removed in v0.3)
 """
 
 import logging
+import sys
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import uvicorn
@@ -41,13 +42,18 @@ from a2a.utils.constants import (
     TransportProtocol,
 )
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .base_adapter import BaseA2AAdapter
 from .executor import AdapterAgentExecutor
 
+if TYPE_CHECKING:
+    from .terminal import ActivityLog, TerminalDisplay
+
 logger = logging.getLogger(__name__)
+_STARTUP_FAILURE = 3  # uvicorn's exit code when startup fails
 LEGACY_AGENT_CARD_PATH = "/.well-known/agent.json"
 
 
@@ -95,6 +101,8 @@ def to_a2a(
     adapter: BaseA2AAdapter,
     agent_card: AgentCard | None = None,
     task_store: TaskStore | None = None,
+    *,
+    activity: "ActivityLog | None" = None,
     **card_overrides: Any,
 ) -> Any:
     """Convert any adapter into an A2A Protocol ASGI application.
@@ -110,6 +118,8 @@ def to_a2a(
             auto-generated from adapter.get_metadata().
         task_store: Optional TaskStore for task persistence.
             Defaults to InMemoryTaskStore.
+        activity: Optional ActivityLog that prints one row per A2A
+            operation and task state change (used by the CLI).
         **card_overrides: Override individual AgentCard fields
             (name, description, url, version, streaming).
 
@@ -134,7 +144,7 @@ def to_a2a(
         context=ServerCallContext(),
     )
 
-    executor = AdapterAgentExecutor(adapter)
+    executor = AdapterAgentExecutor(adapter, observer=activity)
     handler = DefaultRequestHandler(
         agent_executor=executor,
         task_store=task_store,
@@ -157,7 +167,26 @@ def to_a2a(
     routes.extend(create_jsonrpc_routes(handler, rpc_url="/", enable_v0_3_compat=True))
     routes.extend(create_rest_routes(handler, enable_v0_3_compat=True))
 
-    return Starlette(routes=routes, lifespan=_lifespan)
+    middleware = []
+    if activity is not None:
+        from .terminal import ActivityMiddleware
+
+        middleware.append(Middleware(ActivityMiddleware, log=activity))
+
+    return Starlette(routes=routes, lifespan=_lifespan, middleware=middleware)
+
+
+class _ReadyServer(uvicorn.Server):
+    """Uvicorn server that calls ``on_ready`` once its socket is listening."""
+
+    def __init__(self, config: uvicorn.Config, on_ready) -> None:
+        super().__init__(config)
+        self._on_ready = on_ready
+
+    async def startup(self, sockets=None) -> None:
+        await super().startup(sockets=sockets)
+        if self.started and not self.should_exit:
+            self._on_ready()
 
 
 def serve_agent(
@@ -166,6 +195,8 @@ def serve_agent(
     host: str = "0.0.0.0",
     port: int = 9000,
     log_level: str = "info",
+    *,
+    display: "TerminalDisplay | None" = None,
     **kwargs: Any,
 ) -> None:
     """One-line A2A server startup.
@@ -180,6 +211,9 @@ def serve_agent(
         host: Host address to bind to (default: "0.0.0.0").
         port: Port to listen on (default: 9000).
         log_level: Logging level (default: "info").
+        display: Optional TerminalDisplay. When given, Uvicorn's own
+            startup and access lines are replaced by the display's card
+            (shown once the socket is listening) and activity rail.
         **kwargs: Additional arguments passed to uvicorn.run()
             (e.g., workers, ssl_keyfile, reload).
 
@@ -195,8 +229,42 @@ def serve_agent(
             url=f"http://{display_host}:{port}/",
         )
 
-    app = to_a2a(adapter, agent_card)
-    uvicorn.run(app, host=host, port=port, log_level=log_level, **kwargs)
+    if display is None:
+        app = to_a2a(adapter, agent_card)
+        uvicorn.run(app, host=host, port=port, log_level=log_level, **kwargs)
+        return
+
+    if kwargs.get("workers", 1) not in (None, 1) or kwargs.get("reload"):
+        raise ValueError("serve_agent(display=...) runs one in-process server; drop workers/reload")
+    owned = sorted({"access_log", "log_config"} & kwargs.keys())
+    if owned:
+        raise ValueError(
+            f"serve_agent(display=...) sets Uvicorn logging itself; drop {', '.join(owned)}"
+        )
+    app = to_a2a(adapter, agent_card, activity=display.activity)
+    display.install_logging(log_level)
+    try:
+        config = uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            log_level=log_level,
+            log_config=None,
+            access_log=False,
+            **kwargs,
+        )
+        server = _ReadyServer(config, on_ready=lambda: display.ready(agent_card))
+        try:
+            server.run()
+        except KeyboardInterrupt:
+            pass  # Ctrl+C after a graceful shutdown, as in uvicorn.run()
+        finally:
+            display.close()
+    finally:
+        display.uninstall_logging()
+    if not server.started:
+        # Startup failed (e.g. the lifespan raised); exit as uvicorn.run() does.
+        sys.exit(_STARTUP_FAILURE)
 
 
 def build_agent_card(

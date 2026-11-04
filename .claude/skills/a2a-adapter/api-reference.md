@@ -273,7 +273,12 @@ Run it from the project directory the agent should work in. Options before `--` 
 | `--skill` | one skill from the card name and description | Agent Card skill as JSON (`id`, `name`, `description`, at least one `tags` entry, optional `examples`); repeatable |
 | `--timeout` | `600` | Per-request timeout in seconds |
 | `--executable` | `claude`, `codex`, `pi`, `openclaw`; for `dsh`, the bundled runtime | Path to the agent executable |
-| `--log-level` | `info` | Uvicorn log level |
+| `--log-level` | `warning` | Level of Uvicorn's own log lines in the activity log |
+| `-q` / `--quiet` | off | Show only the startup card and errors |
+| `-v` / `--verbose` | off | Show full prompt and reply text under each activity row |
+| `--debug` | off | Also show raw A2A request, response and stream payloads |
+
+`-q`, `-v` and `--debug` are mutually exclusive. Once the server is listening, the CLI prints a startup card: the agent's name, its Agent Card, JSON-RPC and REST URLs, its capabilities and the backend command. After that it prints an activity log, with one row per A2A operation (`message/send`, `tasks/get`, ...) and per task state change, plus one-line previews of each prompt and reply. Output that isn't a terminal, or runs with `NO_COLOR` set, gets the same information as plain lines.
 
 Agent-specific options:
 - **`openclaw`:** `--agent-id`, `--session-id`, `--thinking` (default `low`).
@@ -293,6 +298,8 @@ serve_agent(
     host: str = "0.0.0.0",                 # All interfaces; use "127.0.0.1" for local-only
     port: int = 9000,
     log_level: str = "info",
+    *,
+    display: TerminalDisplay | None = None,  # CLI startup card + activity log
     **kwargs,                              # Passed to uvicorn.run()
 )
 ```
