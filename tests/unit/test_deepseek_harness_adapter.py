@@ -6,7 +6,9 @@ placed in ``sys.modules``. Its ``Session.run`` blocks in a worker thread on a
 """
 
 import asyncio
+import gc
 import hashlib
+import json
 import logging
 import os
 import re
@@ -57,15 +59,24 @@ class FakeSession:
         self.harness = harness
         self.id = session_id
 
-    def run(self, prompt):
+    def run(self, prompt, *, on_notification=None):
         sdk = self.harness.sdk
         if not self.harness.running or self.harness.exit_code is not None:
             # Like the SDK: Session.run writes to the runtime and never launches it.
             raise FakeTransportClosedError("DeepSeek Harness runtime is not running")
         sdk.run_calls.append((self.id, prompt))
+        notifications = [_resolve(note, self.id) for note in sdk.notifications]
+        early = notifications[: sdk.notify_before_gate]
+        late = notifications[sdk.notify_before_gate :]
+        for note in early:
+            if on_notification is not None:
+                on_notification(note)
         self.harness.started.set()
         if self.harness.gate is not None:
             self.harness.gate.wait(10)
+        for note in late:
+            if on_notification is not None:
+                on_notification(note)
         if self.harness.closed:
             raise FakeTransportClosedError("DeepSeek Harness runtime closed")
         if sdk.run_error is not None:
@@ -79,6 +90,31 @@ class FakeSession:
             events=list(sdk.events),
             notifications=[],
         )
+
+
+def _resolve(note, session_id):
+    payload = dict(note.payload)
+    if payload.get("sessionId") is None:
+        payload["sessionId"] = session_id
+    return SimpleNamespace(method=note.method, payload=payload)
+
+
+def _event(event, session_id=None):
+    """A session.event notification; session_id None means the running session."""
+    return SimpleNamespace(
+        method="session.event", payload={"sessionId": session_id, "event": event}
+    )
+
+
+def _assistant(*texts, reasoning=None):
+    content = [{"type": "reasoning", "text": reasoning}] if reasoning else []
+    content += [{"type": "text", "text": text} for text in texts]
+    return _event(
+        {
+            "type": "assistant/message",
+            "data": {"message": {"role": "assistant", "content": content}},
+        }
+    )
 
 
 class FakeHarness:
@@ -149,6 +185,8 @@ class FakeSdk:
         self.final_response = "hello world"
         self.finish_reason: str | None = "completed"
         self.events: list[dict] = []
+        self.notifications: list[SimpleNamespace] = []
+        self.notify_before_gate = 0
 
     def create(self, **kwargs) -> FakeHarness:
         harness = FakeHarness(self, **kwargs)
@@ -770,13 +808,213 @@ class TestClose:
         assert sdk.harness.close_calls == 1
 
 
+async def _collect(stream):
+    return [chunk async for chunk in stream]
+
+
+class TestStream:
+    @pytest.mark.asyncio
+    async def test_streams_each_assistant_message_text(self, adapter, sdk):
+        sdk.notifications = [
+            _event({"type": "turn/start", "data": {}}),
+            _assistant("Checking the tests.", reasoning="hidden thoughts"),
+            _event({"type": "tool/call", "data": {}}),
+            _event(_assistant("other session").payload["event"], session_id="a2a-other"),
+            SimpleNamespace(method="session.status", payload={"status": "running"}),
+            _assistant("All ", "tests pass."),
+        ]
+        sdk.final_response = "All tests pass."
+        chunks = await _collect(
+            adapter.stream("run tests", context_id="ctx-1", context=_context("t1"))
+        )
+        assert chunks == ["Checking the tests.", "\n\nAll tests pass."]
+        assert sdk.run_calls == [("a2a-ctx-1", "run tests")]
+
+    @pytest.mark.asyncio
+    async def test_chunks_arrive_while_the_turn_runs(self, adapter, sdk):
+        sdk.gates = [threading.Event()]
+        sdk.notifications = [_assistant("first"), _assistant("second")]
+        sdk.notify_before_gate = 1
+        stream = adapter.stream("work", context_id="ctx-1", context=_context("t1"))
+        first = await asyncio.wait_for(stream.__anext__(), 5)
+        assert first == "first"
+        assert sdk.harness.gate.is_set() is False
+        sdk.harness.gate.set()
+        assert await _collect(stream) == ["\n\nsecond"]
+
+    @pytest.mark.asyncio
+    async def test_final_response_is_streamed_when_no_message_event_arrived(self, adapter, sdk):
+        sdk.final_response = "hello world"
+        assert await _collect(adapter.stream("hi", context_id="ctx-1", context=_context("t1"))) == [
+            "hello world"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_failed_turn_with_no_text_raises_with_runtime_error(self, adapter, sdk):
+        sdk.final_response = ""
+        sdk.finish_reason = "error"
+        sdk.events = [
+            {
+                "type": "turn/end",
+                "data": {"reason": {"kind": "error", "error": {"code": "X", "message": "boom"}}},
+            }
+        ]
+        with pytest.raises(RuntimeError, match="X: boom"):
+            await _collect(adapter.stream("hi", context_id="ctx-1", context=_context("t1")))
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_stream(self, adapter, sdk):
+        sdk.gates = [threading.Event()]
+        sdk.notifications = [_assistant("partial")]
+        sdk.notify_before_gate = 1
+        stream = adapter.stream("work", context_id="ctx-1", context=_context("t1"))
+        assert await asyncio.wait_for(stream.__anext__(), 5) == "partial"
+        harness = sdk.harness
+        await adapter.cancel(context=_context("t1"))
+        with pytest.raises(CancelledByAdapterError):
+            await asyncio.wait_for(_collect(stream), 5)
+        assert harness.running is False
+
+    @pytest.mark.asyncio
+    async def test_no_chunk_is_sent_after_cancel(self, adapter, sdk):
+        sdk.gates = [threading.Event()]
+        sdk.notifications = [_assistant("first"), _assistant("second")]
+        sdk.notify_before_gate = 2
+        stream = adapter.stream("work", context_id="ctx-1", context=_context("t1"))
+        assert await asyncio.wait_for(stream.__anext__(), 5) == "first"
+        await adapter.cancel(context=_context("t1"))
+        with pytest.raises(CancelledByAdapterError):
+            await asyncio.wait_for(stream.__anext__(), 5)
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_the_turn_finished_stops_queued_chunks(self, adapter, sdk):
+        sdk.notifications = [_assistant("first"), _assistant("second")]
+        stream = adapter.stream("work", context_id="ctx-1", context=_context("t1"))
+        assert await asyncio.wait_for(stream.__anext__(), 5) == "first"
+        for _ in range(100):  # let the turn finish while "second" stays queued
+            if adapter._active_task_id is None:
+                break
+            await asyncio.sleep(0.01)
+        await adapter.cancel(context=_context("t1"))
+        with pytest.raises(CancelledByAdapterError):
+            await asyncio.wait_for(stream.__anext__(), 5)
+        assert adapter._cancelled_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_the_last_chunk_still_stops_the_stream(self, adapter, sdk):
+        sdk.notifications = [_assistant("only")]
+        stream = adapter.stream("work", context_id="ctx-1", context=_context("t1"))
+        assert await asyncio.wait_for(stream.__anext__(), 5) == "only"
+        for _ in range(100):
+            if adapter._active_task_id is None:
+                break
+            await asyncio.sleep(0.01)
+        await adapter.cancel(context=_context("t1"))
+        with pytest.raises(CancelledByAdapterError):
+            await asyncio.wait_for(stream.__anext__(), 5)
+        assert adapter._cancelled_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_cancelling_the_consumer_drops_the_turn_and_leaves_no_task(self, adapter, sdk):
+        sdk.gates = [threading.Event()]
+        consumer = asyncio.create_task(
+            _collect(adapter.stream("work", context_id="ctx-1", context=_context("t1")))
+        )
+        await _wait_started(sdk)
+        harness = sdk.harness
+        consumer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+        await asyncio.sleep(0)
+        assert harness.running is False
+        assert not [task for task in asyncio.all_tasks() if "Queue.get" in repr(task)]
+        assert (
+            await asyncio.wait_for(
+                adapter.invoke("next", context_id="ctx-1", context=_context("t2")), 5
+            )
+            == "hello world"
+        )
+
+    @pytest.mark.asyncio
+    async def test_failed_turn_after_consumer_left_is_not_logged_as_unhandled(self, adapter, sdk):
+        adapter.timeout = 0.2
+        sdk.gates = [threading.Event()]
+        sdk.notifications = [_assistant("partial")]
+        sdk.notify_before_gate = 1
+        loop = asyncio.get_running_loop()
+        unhandled = []
+        loop.set_exception_handler(lambda _loop, ctx: unhandled.append(ctx["message"]))
+        try:
+            stream = adapter.stream("work", context_id="ctx-1", context=_context("t1"))
+            assert await asyncio.wait_for(stream.__anext__(), 5) == "partial"
+            await asyncio.sleep(0.5)  # the turn times out while the consumer is away
+            await stream.aclose()
+            del stream
+            gc.collect()
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(None)
+        assert unhandled == []
+
+    @pytest.mark.asyncio
+    async def test_stream_and_invoke_take_turns(self, adapter, sdk):
+        sdk.gates = [threading.Event()]
+        sdk.notifications = [_assistant("streamed")]
+        consumer = asyncio.create_task(
+            _collect(adapter.stream("first", context_id="ctx-1", context=_context("t1")))
+        )
+        await _wait_started(sdk)
+        second = asyncio.create_task(
+            adapter.invoke("second", context_id="ctx-2", context=_context("t2"))
+        )
+        await asyncio.sleep(0.05)
+        assert [call[1] for call in sdk.run_calls] == ["first"]
+        sdk.harness.gate.set()
+        assert await asyncio.wait_for(consumer, 5) == ["streamed"]
+        await asyncio.wait_for(second, 5)
+        assert [call[1] for call in sdk.run_calls] == ["first", "second"]
+
+    @pytest.mark.asyncio
+    async def test_timeout_during_stream(self, adapter, sdk):
+        adapter.timeout = 0.2
+        sdk.gates = [threading.Event()]
+        with pytest.raises(TimeoutError):
+            await _collect(adapter.stream("work", context_id="ctx-1", context=_context("t1")))
+        assert sdk.harnesses[0].running is False
+
+    @pytest.mark.asyncio
+    async def test_closing_the_stream_early_drops_the_turn(self, adapter, sdk):
+        sdk.gates = [threading.Event()]
+        sdk.notifications = [_assistant("partial")]
+        sdk.notify_before_gate = 1
+        stream = adapter.stream("work", context_id="ctx-1", context=_context("t1"))
+        assert await asyncio.wait_for(stream.__anext__(), 5) == "partial"
+        harness = sdk.harness
+        await asyncio.wait_for(stream.aclose(), 5)
+        assert harness.running is False
+        # The turn lock is free again.
+        assert (
+            await asyncio.wait_for(
+                adapter.invoke("next", context_id="ctx-1", context=_context("t2")), 5
+            )
+            == "hello world"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancelled_before_start_streams_nothing(self, adapter, sdk):
+        await adapter.cancel(context=_context("t1"))
+        with pytest.raises(CancelledByAdapterError):
+            await _collect(adapter.stream("hi", context_id="ctx-1", context=_context("t1")))
+        assert sdk.run_calls == []
+
+
 class TestMetadataAndRegistration:
     def test_metadata_defaults(self, adapter):
         metadata = adapter.get_metadata()
         assert metadata.name == "DeepSeek Harness"
         assert metadata.description
-        assert metadata.streaming is False
-        assert adapter.supports_streaming() is False
+        assert metadata.streaming is True
+        assert adapter.supports_streaming() is True
 
     def test_metadata_overrides(self, tmp_path):
         adapter = DeepSeekHarnessAdapter(
@@ -809,6 +1047,43 @@ class TestMetadataAndRegistration:
 
 
 class TestA2AIntegration:
+    @pytest.mark.asyncio
+    async def test_message_stream_sends_artifact_chunks(self, adapter, sdk):
+        sdk.notifications = [_assistant("step one"), _assistant("done")]
+        sdk.final_response = "done"
+        app = to_a2a(adapter)
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "request-1",
+            "method": "message/stream",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "messageId": "message-1",
+                    "parts": [{"kind": "text", "text": "hello dsh"}],
+                }
+            },
+        }
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            response = await client.post("/", json=payload)
+
+        assert response.status_code == 200
+        events = [
+            json.loads(line[len("data:") :])
+            for line in response.text.splitlines()
+            if line.startswith("data:")
+        ]
+        chunks = [
+            part["text"]
+            for event in events
+            for part in event.get("result", {}).get("artifact", {}).get("parts", [])
+            if "text" in part
+        ]
+        assert chunks == ["step one", "\n\ndone"]
+        assert events[-1]["result"]["status"]["state"] == "completed"
+
     @pytest.mark.asyncio
     async def test_message_send_completes_through_real_a2a_stack(self, adapter, sdk):
         app = to_a2a(adapter)

@@ -14,8 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   with `pip install "a2a-adapter[deepseek-harness]"`. One runtime is launched
   on the first request and reused; each A2A `contextId` maps to a durable dsh
   session, so conversations survive server restarts. Turns are serialized,
-  responses are not streamed, and cancelling the running task restarts the
-  runtime because the SDK has no interrupt call
+  and cancelling the running task restarts the runtime because the SDK has no
+  interrupt call. Streaming sends each assistant message as the runtime
+  finishes it (the runtime reports whole messages, not tokens). The A2A
+  executor streams `message/send` too, so its reply holds every assistant
+  message of the turn, not only the last
 - `a2a-adapter dsh` serves `DeepSeekHarnessAdapter` from the command line, with
   `--model`, `--provider`, `--profile`, `--dsh-home`, `--reasoning-effort`,
   `--max-tokens` and `--startup-timeout`; `--timeout` and `--executable` map to

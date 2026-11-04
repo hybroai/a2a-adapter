@@ -13,6 +13,7 @@ registry/loader purposes. Install it with
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import os
@@ -20,7 +21,7 @@ import re
 import shutil
 import uuid
 import weakref
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -191,14 +192,92 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
         context = kwargs.get("context")
         task_id = context.task_id if context else uuid.uuid4().hex
         session_id = self._session_key(context_id)
+        result = await self._turn(task_id, session_id, user_input, bool(context_id))
+        return self._check_result(result, session_id)
 
+    # ──── Optional: stream ────
+
+    async def stream(
+        self, user_input: str, context_id: str | None = None, **kwargs: Any
+    ) -> AsyncIterator[str]:
+        """Yield the text of each assistant message as the runtime finishes it.
+
+        The runtime reports whole messages, not tokens, so a turn that calls
+        tools streams one chunk per model step, joined by blank lines;
+        ``invoke`` returns only the last message.
+        """
+        context = kwargs.get("context")
+        task_id = context.task_id if context else uuid.uuid4().hex
+        session_id = self._session_key(context_id)
+        loop = asyncio.get_running_loop()
+        chunks: asyncio.Queue[str] = asyncio.Queue()
+
+        def on_event(event: dict) -> None:
+            # Runs on the worker thread.
+            text = _message_text(event)
+            if text:
+                # An abandoned turn may still report after the loop closed.
+                with contextlib.suppress(RuntimeError):
+                    loop.call_soon_threadsafe(chunks.put_nowait, text)
+
+        turn = asyncio.create_task(
+            self._turn(task_id, session_id, user_input, bool(context_id), on_event=on_event)
+        )
+        # Read the outcome even when the consumer leaves before the turn ends.
+        turn.add_done_callback(_consume_result)
+        streamed = False
+        getter: asyncio.Future[str] | None = None
+        try:
+            while not turn.done():
+                getter = asyncio.ensure_future(chunks.get())
+                done, _ = await asyncio.wait({getter, turn}, return_when=asyncio.FIRST_COMPLETED)
+                if getter not in done:
+                    getter.cancel()
+                    continue
+                if task_id in self._cancelled_tasks or _cancelled(turn):
+                    # cancel() already reported the task; send nothing more.
+                    continue
+                yield f"\n\n{getter.result()}" if streamed else getter.result()
+                streamed = True
+            if _cancelled(turn):
+                raise turn.exception()
+            # The worker queues every chunk before the turn completes.
+            while not chunks.empty():
+                self._raise_if_cancelled_late(task_id)
+                text = chunks.get_nowait()
+                yield f"\n\n{text}" if streamed else text
+                streamed = True
+            text = self._check_result(turn.result(), session_id)
+            if not streamed and text:
+                self._raise_if_cancelled_late(task_id)
+                yield text
+            self._raise_if_cancelled_late(task_id)
+        finally:
+            if getter is not None:
+                getter.cancel()
+            if not turn.done():
+                # The consumer went away: cancelling the turn closes the runtime.
+                # wait() lets a cancellation of this task propagate.
+                turn.cancel()
+                await asyncio.wait({turn})
+
+    async def _turn(
+        self,
+        task_id: str,
+        session_id: str,
+        prompt: str,
+        resumable: bool,
+        *,
+        on_event: Callable[[dict], None] | None = None,
+    ) -> Any:
+        """Run one turn under the turn lock, honouring cancel() for ``task_id``."""
         self._raise_if_cancelled(task_id)
         async with self._turn_lock:
             self._raise_if_cancelled(task_id)
             self._active_task_id = task_id
             try:
                 result = await self._run_turn_relaunching(
-                    task_id, session_id, user_input, resumable=bool(context_id)
+                    task_id, session_id, prompt, resumable=resumable, on_event=on_event
                 )
                 if task_id in self._cancelled_tasks:
                     # cancel() already reported the task as cancelled.
@@ -212,8 +291,7 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
             finally:
                 self._active_task_id = None
                 self._cancelled_tasks.discard(task_id)
-
-        return self._check_result(result, session_id)
+        return result
 
     # ──── Optional: cancel ────
 
@@ -234,7 +312,7 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
         return AdapterMetadata(
             name=self._name or "DeepSeek Harness",
             description=self._description or "DeepSeek Harness coding agent",
-            streaming=False,
+            streaming=True,
             skills=self._skills,
             provider=self._agent_provider,
             documentation_url=self._documentation_url,
@@ -332,7 +410,13 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
     # ──── Internal: turns ────
 
     async def _run_turn_relaunching(
-        self, task_id: str, session_id: str, prompt: str, *, resumable: bool
+        self,
+        task_id: str,
+        session_id: str,
+        prompt: str,
+        *,
+        resumable: bool,
+        on_event: Callable[[dict], None] | None = None,
     ) -> Any:
         """Run one turn, relaunching once if the runtime died while idle."""
         for attempt in range(2):
@@ -340,7 +424,9 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
             if task_id in self._cancelled_tasks:
                 raise CancelledByAdapterError(f"Task {task_id} was cancelled")
             try:
-                return await self._run_turn(harness, session_id, prompt, resumable=resumable)
+                return await self._run_turn(
+                    harness, session_id, prompt, resumable=resumable, on_event=on_event
+                )
             except _RuntimeExitedError:
                 # Nothing was sent, and _run_turn already dropped the runtime.
                 if attempt:
@@ -348,7 +434,13 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
         raise AssertionError("unreachable")  # pragma: no cover
 
     async def _run_turn(
-        self, harness: Any, session_id: str, prompt: str, *, resumable: bool
+        self,
+        harness: Any,
+        session_id: str,
+        prompt: str,
+        *,
+        resumable: bool,
+        on_event: Callable[[dict], None] | None = None,
     ) -> Any:
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(
@@ -359,6 +451,7 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
             session_id,
             prompt,
             resumable,
+            on_event,
         )
         try:
             done, _ = await asyncio.wait({future}, timeout=self.timeout)
@@ -389,6 +482,7 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
         session_id: str,
         prompt: str,
         resumable: bool,
+        on_event: Callable[[dict], None] | None = None,
     ) -> Any:
         """Worker-thread job: open the session if needed, then run one turn.
 
@@ -414,7 +508,17 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
         self._raise_if_retired(harness)
         # A close after this point makes run() fail: Session.run only writes
         # to a running runtime and never relaunches it.
-        return session.run(prompt)
+        if on_event is None:
+            return session.run(prompt)
+
+        def forward(notification: Any) -> None:
+            payload = notification.payload
+            if notification.method == "session.event" and payload.get("sessionId") == session_id:
+                event = payload.get("event")
+                if isinstance(event, dict):
+                    on_event(event)
+
+        return session.run(prompt, on_notification=forward)
 
     def _resume_or_start(self, harness: Any, session_id: str) -> Any:
         try:
@@ -450,6 +554,12 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
             f"DeepSeek Harness turn produced no response (finish reason: {reason!r}){suffix}"
         )
 
+    def _raise_if_cancelled_late(self, task_id: str) -> None:
+        """Stop a stream whose task was cancelled after its turn finished."""
+        if task_id in self._cancelled_tasks:
+            self._cancelled_tasks.discard(task_id)
+            raise CancelledByAdapterError(f"Task {task_id} was cancelled")
+
     def _raise_if_cancelled(self, task_id: str) -> None:
         if task_id in self._cancelled_tasks:
             self._cancelled_tasks.discard(task_id)
@@ -480,6 +590,29 @@ def _runtime_exited(harness: Any) -> bool:
     proc = getattr(getattr(harness, "client", None), "_proc", None)
     poll = getattr(proc, "poll", None)
     return callable(poll) and poll() is not None
+
+
+def _cancelled(turn: asyncio.Task) -> bool:
+    """Whether a finished turn ended because cancel() was called for its task."""
+    return turn.done() and isinstance(turn.exception(), CancelledByAdapterError)
+
+
+def _message_text(event: dict) -> str:
+    """Return the text blocks of an ``assistant/message`` event, as the SDK reads them."""
+    if event.get("type") != "assistant/message":
+        return ""
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return ""
+    message = data.get("message")
+    content = (message if isinstance(message, dict) else data).get("content")
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        str(block.get("text") or "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
 
 
 def _turn_error(events: list[Any]) -> str:
