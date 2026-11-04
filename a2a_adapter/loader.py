@@ -44,6 +44,14 @@ _BUILTIN_MAP: Dict[str, tuple[str, str]] = {
     "codex": ("a2a_adapter.integrations.codex", "CodexAdapter"),
     "hermes": ("a2a_adapter.integrations.hermes", "HermesAdapter"),
     "pi": ("a2a_adapter.integrations.pi", "PiAdapter"),
+    "deepseek-harness": (
+        "a2a_adapter.integrations.deepseek_harness",
+        "DeepSeekHarnessAdapter",
+    ),
+    "deepseek-harness-headless": (
+        "a2a_adapter.integrations.deepseek_harness_headless",
+        "DeepSeekHarnessHeadlessAdapter",
+    ),
 }
 
 

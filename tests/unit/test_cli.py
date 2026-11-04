@@ -9,9 +9,16 @@ import pytest
 from a2a_adapter.cli import main
 from a2a_adapter.integrations.claude_code import ClaudeCodeAdapter
 from a2a_adapter.integrations.codex import CodexAdapter
+from a2a_adapter.integrations.deepseek_harness import DeepSeekHarnessAdapter
 from a2a_adapter.integrations.openclaw import OpenClawAdapter
 from a2a_adapter.integrations.pi import PiAdapter
 from a2a_adapter.server import _agent_card_json, build_agent_card
+
+
+@pytest.fixture(autouse=True)
+def dsh_sdk_installed(monkeypatch):
+    """CI has no deepseek-harness-sdk; dsh tests below opt out where it matters."""
+    monkeypatch.setattr("a2a_adapter.cli._dsh_sdk_installed", lambda: True)
 
 
 def test_pi_cli_uses_current_contract_and_forwards_native_args(tmp_path, monkeypatch):
@@ -156,6 +163,7 @@ def test_openclaw_cli_maps_owned_options_and_forwards_native_args(tmp_path):
         ["codex", "-help"],
         ["claude", "-help"],
         ["openclaw", "-help"],
+        ["dsh", "-help"],
     ],
 )
 def test_help_aliases_include_usage(argv, capsys):
@@ -201,6 +209,98 @@ def test_pi_cli_forwards_single_dash_words_that_start_with_managed_flags(
     assert serve.call_args.args[0].cli_args == [native_option]
 
 
+def test_dsh_cli_maps_options_to_the_sdk_adapter(tmp_path):
+    home = tmp_path / "dsh-home"
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        result = main(
+            [
+                "dsh",
+                "--cwd",
+                str(tmp_path),
+                "--model",
+                "deepseek-example",
+                "--provider",
+                "deepseek-official",
+                "--profile",
+                "sdk-minimal",
+                "--dsh-home",
+                str(home),
+                "--reasoning-effort",
+                "high",
+                "--max-tokens",
+                "2048",
+                "--startup-timeout",
+                "45",
+                "--timeout",
+                "120",
+                "--executable",
+                "/opt/dsh",
+            ]
+        )
+
+    assert result == 0
+    adapter = serve.call_args.args[0]
+    assert isinstance(adapter, DeepSeekHarnessAdapter)
+    assert adapter.working_dir == str(tmp_path.resolve())
+    assert adapter.model == "deepseek-example"
+    assert adapter.provider == "deepseek-official"
+    assert adapter.profile == "sdk-minimal"
+    assert adapter.dsh_home == str(home)
+    assert adapter.reasoning_effort == "high"
+    assert adapter.max_tokens == 2048
+    assert adapter.startup_timeout == 45
+    assert adapter.timeout == 120
+    assert adapter.dsh_bin == "/opt/dsh"
+    serve.assert_called_once_with(adapter, host="127.0.0.1", port=9000, log_level="info")
+
+
+def test_dsh_cli_leaves_unset_options_to_the_sdk(tmp_path, monkeypatch):
+    monkeypatch.delenv("DSH_HOME", raising=False)
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        main(["dsh", "--cwd", str(tmp_path)])
+
+    adapter = serve.call_args.args[0]
+    assert adapter.model is None
+    assert adapter.provider is None
+    assert adapter.profile == "sdk"
+    assert adapter.reasoning_effort is None
+    assert adapter.max_tokens is None
+    assert adapter.dsh_bin is None
+    assert adapter.startup_timeout == 30
+
+
+def test_dsh_cli_rejects_native_args_after_separator(tmp_path, capsys):
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        with pytest.raises(SystemExit, match="2"):
+            main(["dsh", "--cwd", str(tmp_path), "--", "--model", "x"])
+    serve.assert_not_called()
+    assert "does not accept native options after '--'" in capsys.readouterr().err
+
+
+def test_dsh_cli_rejects_executable_missing_from_path(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("a2a_adapter.integrations.deepseek_harness.shutil.which", lambda n: None)
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        with pytest.raises(SystemExit, match="2"):
+            main(["dsh", "--cwd", str(tmp_path), "--executable", "dsh"])
+    serve.assert_not_called()
+    assert "not found on PATH" in capsys.readouterr().err
+
+
+def test_dsh_cli_fails_fast_without_the_sdk(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("a2a_adapter.cli._dsh_sdk_installed", lambda: False)
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        with pytest.raises(SystemExit, match="2"):
+            main(["dsh", "--cwd", str(tmp_path)])
+    serve.assert_not_called()
+    assert "a2a-adapter[deepseek-harness]" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5"])
+def test_dsh_cli_rejects_invalid_max_tokens(tmp_path, value):
+    with pytest.raises(SystemExit, match="2"):
+        main(["dsh", "--cwd", str(tmp_path), "--max-tokens", value])
+
+
 def test_cli_rejects_missing_working_directory(tmp_path):
     with pytest.raises(SystemExit, match="2"):
         main(["pi", "--cwd", str(tmp_path / "missing")])
@@ -218,7 +318,13 @@ def test_cli_uses_official_claude_command_name_only():
 
 @pytest.mark.parametrize(
     "agent, product",
-    [("pi", "Pi"), ("codex", "Codex"), ("claude", "Claude Code"), ("openclaw", "OpenClaw")],
+    [
+        ("pi", "Pi"),
+        ("codex", "Codex"),
+        ("claude", "Claude Code"),
+        ("openclaw", "OpenClaw"),
+        ("dsh", "DeepSeek Harness"),
+    ],
 )
 def test_cli_defaults_agent_card_to_product_and_folder(tmp_path, agent, product):
     workspace = tmp_path / "my-project"
@@ -243,7 +349,7 @@ def test_cli_name_and_description_override_defaults(tmp_path):
     assert meta.description == "Reviews PRs"
 
 
-@pytest.mark.parametrize("agent", ["pi", "codex", "claude", "openclaw"])
+@pytest.mark.parametrize("agent", ["pi", "codex", "claude", "openclaw", "dsh"])
 def test_cli_defaults_to_one_skill_describing_the_agent(tmp_path, agent):
     with patch("a2a_adapter.cli.serve_agent") as serve:
         main([agent, "--cwd", str(tmp_path), "--name", "Reviewer", "--description", "Reviews"])

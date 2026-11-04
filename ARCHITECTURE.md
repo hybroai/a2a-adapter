@@ -120,14 +120,17 @@ Three public functions:
 
 The `a2a-adapter` console script is intentionally thin:
 
-- Supports `pi`, `codex`, `claude`, and `openclaw`
+- Supports `pi`, `codex`, `claude`, `openclaw`, and `dsh` (DeepSeek Harness)
 - Resolves the working directory and A2A server settings
 - Passes native agent arguments after `--` into the selected adapter
 - Rejects protocol/session flags owned by the adapter
 - Calls the same `serve_agent()` used by Python SDK consumers
 
 Hermes is not a v1 CLI target because `HermesAdapter` is an in-process gateway
-adapter rather than a local CLI subprocess adapter.
+adapter rather than a local CLI subprocess adapter. `dsh` is a target because
+`DeepSeekHarnessAdapter` drives a local `dsh` subprocess like Pi; its SDK takes
+no native argv, so the subcommand exposes explicit options and rejects
+arguments after `--`.
 
 ### Loader (`loader.py`)
 
@@ -153,6 +156,8 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 | `HermesAdapter` | Gateway pattern: `SessionDB` + `AIAgent.run_conversation()` in a thread pool; requires Hermes on `PYTHONPATH` | Yes (callback → queue) |
 | `OllamaAdapter` | Wraps `OllamaClient` HTTP client (`/api/chat`) | Yes (NDJSON streaming) |
 | `PiAdapter` | One persistent `pi --mode rpc` process and session | Yes (JSONL events) |
+| `DeepSeekHarnessAdapter` | One `deepseek-harness-sdk` runtime (`dsh` over stdio JSON-RPC) on a single worker thread; one durable session per `context_id`; streams each assistant message | Yes |
+| `DeepSeekHarnessHeadlessAdapter` | `dsh --profile headless` subprocess, task on stdin; stateless by design, every turn is a fresh dsh session | No |
 | `CallableAdapter` | Direct function call | Optional |
 
 **Input pipeline (all adapters):** `input_mapper` > JSON parse > `input_key` fallback.
@@ -194,6 +199,8 @@ a2a_adapter/
     ├── codex.py         # CodexAdapter
     ├── openclaw.py      # OpenClawAdapter + OpenClawAgentAdapter
     ├── hermes.py        # HermesAdapter (Hermes Agent gateway pattern)
+    ├── deepseek_harness.py  # DeepSeekHarnessAdapter (DeepSeek Harness SDK runtime)
+    ├── deepseek_harness_headless.py  # DeepSeekHarnessHeadlessAdapter (stateless dsh CLI)
     └── pi.py            # PiAdapter and internal persistent JSONL RPC runtime
 ```
 

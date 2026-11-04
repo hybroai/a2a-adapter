@@ -221,6 +221,10 @@ class AdapterAgentExecutor(AgentExecutor):
                         last_chunk=False,
                     )
                 prev_chunk = chunk
+        except CancelledByAdapterError:
+            # cancel() already emitted the canceled state; sending the
+            # held-back chunk now would follow the task's terminal state.
+            raise
         except Exception:
             # Close the artifact with the held-back chunk, which has not
             # been sent yet; re-sending chunks[-1] would duplicate content.

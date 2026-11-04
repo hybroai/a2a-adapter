@@ -13,6 +13,8 @@ This package contains concrete adapter implementations for various agent framewo
 - Ollama: Local model HTTP integration
 - Hermes: Multi-purpose AI agent with tool use and persistent memory
 - Pi: Persistent coding agent RPC wrapper
+- DeepSeek Harness: dsh coding agent via its Python SDK runtime
+- DeepSeek Harness headless: stateless one-task dsh CLI wrapper
 
 Migrated framework modules also retain deprecated v0.1 `*AgentAdapter`
 classes for backwards compatibility. Newer CLI-backed integrations expose
@@ -33,6 +35,8 @@ __all__ = [
     "OllamaClient",
     "HermesAdapter",
     "PiAdapter",
+    "DeepSeekHarnessAdapter",
+    "DeepSeekHarnessHeadlessAdapter",
     # v0.1 (deprecated)
     "N8nAgentAdapter",
     "CrewAIAgentAdapter",
@@ -82,6 +86,12 @@ def __getattr__(name: str):
     elif name == "PiAdapter":
         from .pi import PiAdapter
         return PiAdapter
+    elif name == "DeepSeekHarnessAdapter":
+        from .deepseek_harness import DeepSeekHarnessAdapter
+        return DeepSeekHarnessAdapter
+    elif name == "DeepSeekHarnessHeadlessAdapter":
+        from .deepseek_harness_headless import DeepSeekHarnessHeadlessAdapter
+        return DeepSeekHarnessHeadlessAdapter
     # v0.1 adapters (deprecated)
     elif name == "N8nAgentAdapter":
         from .n8n import N8nAgentAdapter

@@ -12,7 +12,7 @@ Usage (v0.1 — deprecated, still works):
     >>> # See migration guide for upgrading to v0.2 API
 """
 
-__version__ = "0.2.16"
+__version__ = "0.2.17"
 
 # ──── v0.2 Core Exports (eager, no optional deps) ────
 from .base_adapter import AdapterMetadata, BaseA2AAdapter
@@ -45,6 +45,11 @@ _ADAPTER_LAZY_MAP = {
     "CodexAdapter": (".integrations.codex", "CodexAdapter"),
     "HermesAdapter": (".integrations.hermes", "HermesAdapter"),
     "PiAdapter": (".integrations.pi", "PiAdapter"),
+    "DeepSeekHarnessAdapter": (".integrations.deepseek_harness", "DeepSeekHarnessAdapter"),
+    "DeepSeekHarnessHeadlessAdapter": (
+        ".integrations.deepseek_harness_headless",
+        "DeepSeekHarnessHeadlessAdapter",
+    ),
 }
 
 
@@ -106,4 +111,6 @@ __all__ = [
     "CodexAdapter",
     "HermesAdapter",
     "PiAdapter",
+    "DeepSeekHarnessAdapter",
+    "DeepSeekHarnessHeadlessAdapter",
 ]
