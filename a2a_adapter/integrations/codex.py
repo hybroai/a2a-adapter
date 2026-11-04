@@ -82,9 +82,10 @@ class CodexAdapter(BaseA2AAdapter):
         if bypass_approvals is not None:
             self.bypass_approvals = bypass_approvals
         else:
-            self.bypass_approvals = os.getenv(
-                "A2A_CODEX_BYPASS_APPROVALS", ""
-            ).lower() in ("1", "true")
+            self.bypass_approvals = os.getenv("A2A_CODEX_BYPASS_APPROVALS", "").lower() in (
+                "1",
+                "true",
+            )
         if self.bypass_approvals:
             logger.warning(
                 "CodexAdapter: --dangerously-bypass-approvals-and-sandbox is "
@@ -95,9 +96,7 @@ class CodexAdapter(BaseA2AAdapter):
         if skip_git_check is not None:
             self.skip_git_check = skip_git_check
         else:
-            self.skip_git_check = os.getenv(
-                "A2A_CODEX_SKIP_GIT_CHECK", ""
-            ).lower() in ("1", "true")
+            self.skip_git_check = os.getenv("A2A_CODEX_SKIP_GIT_CHECK", "").lower() in ("1", "true")
         if self.skip_git_check:
             logger.warning(
                 "CodexAdapter: --skip-git-repo-check is ENABLED. "
@@ -106,17 +105,13 @@ class CodexAdapter(BaseA2AAdapter):
 
     # ──── Public Interface ────
 
-    async def invoke(
-        self, user_input: str, context_id: str | None = None, **kwargs: Any
-    ) -> str:
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs: Any) -> str:
         context = kwargs.get("context")
         key = context_id or "_default"
         task_id = context.task_id if context else key
         lock = self._get_context_lock(key)
         async with lock:
-            return await self._run_subprocess(
-                key, task_id, user_input=user_input
-            )
+            return await self._run_subprocess(key, task_id, user_input=user_input)
 
     def supports_streaming(self) -> bool:
         return False
@@ -147,9 +142,7 @@ class CodexAdapter(BaseA2AAdapter):
         cmd.append(message)
         return CommandResult(args=cmd, used_resume=bool(thread_id))
 
-    def _parse_invoke_output(
-        self, stdout_text: str, context_key: str
-    ) -> ParseResult:
+    def _parse_invoke_output(self, stdout_text: str, context_key: str) -> ParseResult:
         thread_id: str | None = None
         text_parts: list[str] = []
 
@@ -172,9 +165,7 @@ class CodexAdapter(BaseA2AAdapter):
                     if text:
                         text_parts.append(text)
             elif event_type == "turn.failed":
-                error_msg = event.get("error", {}).get(
-                    "message", "Unknown error"
-                )
+                error_msg = event.get("error", {}).get("message", "Unknown error")
                 raise RuntimeError(f"Codex turn failed: {error_msg}")
 
         if not text_parts:

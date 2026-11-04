@@ -78,6 +78,5 @@ class TestCheckHermesResult:
             "interrupted": True,
         }
         assert (
-            HermesAdapter._check_hermes_result(result, "s1")
-            == "Operation interrupted during retry"
+            HermesAdapter._check_hermes_result(result, "s1") == "Operation interrupted during retry"
         )

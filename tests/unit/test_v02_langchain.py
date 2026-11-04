@@ -9,7 +9,6 @@ import json
 import pytest
 
 from a2a_adapter.integrations.langchain import LangChainAdapter
-from a2a_adapter.base_adapter import AdapterMetadata
 from a2a_adapter.server import build_agent_card, to_a2a
 from a2a_adapter.loader import load_adapter
 
@@ -180,7 +179,9 @@ async def test_input_mapper_error_fails_the_task():
 @pytest.mark.asyncio
 async def test_input_mapper_must_return_a_dict():
     runnable = MockRunnable()
-    adapter = LangChainAdapter(runnable=runnable, input_mapper=lambda raw, ctx: ["not", "a", "dict"])
+    adapter = LangChainAdapter(
+        runnable=runnable, input_mapper=lambda raw, ctx: ["not", "a", "dict"]
+    )
     with pytest.raises(TypeError, match="input_mapper must return a dict, got list"):
         await adapter.invoke("hello")
 
@@ -322,12 +323,14 @@ def test_to_a2a_builds_app():
 
 
 def test_load_adapter_langchain():
-    adapter = load_adapter({
-        "adapter": "langchain",
-        "runnable": MockRunnable(),
-        "input_key": "query",
-        "timeout": 30,
-    })
+    adapter = load_adapter(
+        {
+            "adapter": "langchain",
+            "runnable": MockRunnable(),
+            "input_key": "query",
+            "timeout": 30,
+        }
+    )
     assert isinstance(adapter, LangChainAdapter)
     assert adapter.input_key == "query"
     assert adapter.timeout == 30
@@ -400,6 +403,7 @@ async def test_stream_empty_chunks_filtered():
 def test_flat_import():
     """Verify from a2a_adapter import LangChainAdapter works."""
     from a2a_adapter import LangChainAdapter as LC
+
     assert LC is LangChainAdapter
 
 

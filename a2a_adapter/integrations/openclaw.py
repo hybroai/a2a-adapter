@@ -147,9 +147,7 @@ def _extract_json_from_output(stdout_text: str) -> dict:
     # Find the first '{' and use raw_decode to extract exactly one JSON object
     json_start = stdout_text.find("{")
     if json_start == -1:
-        raise RuntimeError(
-            f"OpenClaw output does not contain JSON object: {stdout_text[:200]}"
-        )
+        raise RuntimeError(f"OpenClaw output does not contain JSON object: {stdout_text[:200]}")
 
     decoder = json.JSONDecoder()
     try:
@@ -157,6 +155,7 @@ def _extract_json_from_output(stdout_text: str) -> dict:
         return obj
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Failed to parse OpenClaw JSON output: {e}") from e
+
 
 # Regex for sanitizing session IDs (matches OpenClaw's VALID_ID_RE pattern)
 # OpenClaw session IDs must be alphanumeric with underscores/hyphens, max 64 chars
@@ -291,10 +290,13 @@ class OpenClawAdapter(BaseA2AAdapter):
             *self.cli_args,
             "--local",
             # The prompt goes through stdin (see CommandResult.stdin).
-            "--message-file", "-",
+            "--message-file",
+            "-",
             "--json",
-            "--session-id", context_key,
-            "--thinking", self.thinking,
+            "--session-id",
+            context_key,
+            "--thinking",
+            self.thinking,
         ]
         if self.agent_id:
             cmd.extend(["--agent", self.agent_id])
@@ -495,7 +497,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
         self._background_tasks: Dict[str, asyncio.Task[None]] = {}
         self._background_processes: Dict[str, AsyncProcess] = {}
         self._cancelled_tasks: set[str] = set()
-        
+
         # Push notification configuration per task
         self._push_configs: Dict[str, PushNotificationConfig] = {}
         self._http_client: httpx.AsyncClient | None = None
@@ -582,7 +584,9 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             pn_config = push_config.push_notification_config
             if pn_config and pn_config.url:
                 self._push_configs[task_id] = pn_config
-                logger.debug("Stored push notification config for task %s: %s", task_id, pn_config.url)
+                logger.debug(
+                    "Stored push notification config for task %s: %s", task_id, pn_config.url
+                )
 
         # Create initial task with "working" state
         now = datetime.now(timezone.utc)
@@ -642,7 +646,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
     async def _cleanup_loop(self) -> None:
         """
         Background loop that periodically cleans up expired tasks.
-        
+
         Runs every cleanup_interval_seconds and removes tasks that have been
         in a terminal state for longer than task_ttl_seconds.
         """
@@ -735,11 +739,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
                 role=Role.ROLE_AGENT,
                 message_id=str(uuid.uuid4()),
                 context_id=context_id,
-                parts=[
-                    Part(
-                        text=f"OpenClaw command timed out after {self.timeout} seconds"
-                    )
-                ],
+                parts=[Part(text=f"OpenClaw command timed out after {self.timeout} seconds")],
             )
 
             timeout_task = Task(
@@ -782,9 +782,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
 
             # Check if task was cancelled during execution
             if task_id in self._cancelled_tasks:
-                logger.debug(
-                    "Task %s was cancelled during execution, not updating state", task_id
-                )
+                logger.debug("Task %s was cancelled during execution, not updating state", task_id)
                 return
 
             failure_message = _extract_openclaw_failure_message(framework_output)
@@ -798,9 +796,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
                         timestamp=datetime.now(timezone.utc),
                     ),
                 )
-                await self.task_store.save(
-                    failed_task, self._create_minimal_context()
-                )
+                await self.task_store.save(failed_task, self._create_minimal_context())
                 self._record_task_completion(task_id)
                 await self._send_push_notification(task_id, failed_task)
                 return
@@ -825,7 +821,10 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             if response_artifact is not None:
                 artifacts.append(response_artifact)
             else:
-                hint = _extract_openclaw_status_hint(framework_output) or "OpenClaw completed without visible output"
+                hint = (
+                    _extract_openclaw_status_hint(framework_output)
+                    or "OpenClaw completed without visible output"
+                )
                 status_message = self._build_status_message(context_id, hint)
             completed_task = Task(
                 id=task_id,
@@ -949,7 +948,10 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             raise RuntimeError("OpenClaw command returned empty output")
 
         parsed = _extract_json_from_output(stdout_text)
-        logger.debug("OpenClaw parsed JSON keys: %s", list(parsed.keys()) if isinstance(parsed, dict) else type(parsed))
+        logger.debug(
+            "OpenClaw parsed JSON keys: %s",
+            list(parsed.keys()) if isinstance(parsed, dict) else type(parsed),
+        )
         if isinstance(parsed, dict) and "payloads" in parsed:
             logger.debug("OpenClaw payloads count: %d", len(parsed.get("payloads", [])))
             for i, p in enumerate(parsed.get("payloads", [])):
@@ -993,7 +995,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
 
         prefix = getattr(self, "session_id", "a2a")
         max_suffix_len = _SESSION_ID_MAX_LEN - len(prefix) - 1
-        
+
         if max_suffix_len > 0:
             sanitized = sanitized[:max_suffix_len]
             return f"{prefix}-{sanitized}"
@@ -1121,9 +1123,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
                 env=env,
             )
 
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=self.timeout
-            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
 
         except FileNotFoundError:
             raise FileNotFoundError(
@@ -1134,9 +1134,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             # Kill the process if it times out
             proc.kill()
             await proc.wait()
-            raise RuntimeError(
-                f"OpenClaw command timed out after {self.timeout} seconds"
-            )
+            raise RuntimeError(f"OpenClaw command timed out after {self.timeout} seconds")
 
         # Check return code
         if proc.returncode != 0:
@@ -1153,7 +1151,10 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             raise RuntimeError("OpenClaw command returned empty output")
 
         parsed = _extract_json_from_output(stdout_text)
-        logger.debug("OpenClaw sync parsed JSON keys: %s", list(parsed.keys()) if isinstance(parsed, dict) else type(parsed))
+        logger.debug(
+            "OpenClaw sync parsed JSON keys: %s",
+            list(parsed.keys()) if isinstance(parsed, dict) else type(parsed),
+        )
         if isinstance(parsed, dict) and "payloads" in parsed:
             logger.debug("OpenClaw sync payloads count: %d", len(parsed.get("payloads", [])))
             for i, p in enumerate(parsed.get("payloads", [])):
@@ -1205,7 +1206,10 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
         if response_message is not None:
             return response_message
 
-        hint = _extract_openclaw_status_hint(framework_output) or "OpenClaw completed without visible output"
+        hint = (
+            _extract_openclaw_status_hint(framework_output)
+            or "OpenClaw completed without visible output"
+        )
         return Task(
             id=str(uuid.uuid4()),
             context_id=task_context_id,
@@ -1229,8 +1233,14 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
         self, framework_output: Dict[str, Any], context_id: str | None
     ) -> Message | None:
         """Create a response Message from OpenClaw output."""
-        logger.debug("_create_response_message called with framework_output keys: %s", 
-                     list(framework_output.keys()) if isinstance(framework_output, dict) else type(framework_output))
+        logger.debug(
+            "_create_response_message called with framework_output keys: %s",
+            (
+                list(framework_output.keys())
+                if isinstance(framework_output, dict)
+                else type(framework_output)
+            ),
+        )
         parts = self._extract_response_parts(framework_output)
         if not parts:
             logger.info("No visible OpenClaw parts extracted for response message")
@@ -1238,7 +1248,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
 
         logger.debug("Created Message with %d parts", len(parts))
         for i, part in enumerate(parts):
-            text_value = getattr(part, 'text', None)
+            text_value = getattr(part, "text", None)
             if text_value is not None:
                 logger.debug("Part[%d] text length: %d", i, len(text_value) if text_value else 0)
 
@@ -1281,7 +1291,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
     def _create_response_artifact(self, framework_output: Dict[str, Any]) -> Artifact | None:
         """
         Create an Artifact from OpenClaw output.
-        
+
         Per A2A spec, task outputs should be stored in artifacts, not messages.
         Messages are for conversation history; artifacts are for task results.
         """
@@ -1358,9 +1368,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
 
             # A2A-compliant: Send full Task wrapped in StreamResponse format
             # This ensures artifacts (with response content) are included
-            payload = {
-                "task": MessageToDict(task)
-            }
+            payload = {"task": MessageToDict(task)}
 
             # Build headers
             headers = {"Content-Type": "application/json"}
@@ -1428,9 +1436,7 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
         logger.debug("Set push notification config for task %s: %s", task_id, config.url)
         return True
 
-    async def get_push_notification_config(
-        self, task_id: str
-    ) -> PushNotificationConfig | None:
+    async def get_push_notification_config(self, task_id: str) -> PushNotificationConfig | None:
         """
         Get push notification config for a task.
 
@@ -1521,7 +1527,11 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
             return False
 
         # Only allow deletion of tasks in terminal states
-        terminal_states = {TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_CANCELED}
+        terminal_states = {
+            TaskState.TASK_STATE_COMPLETED,
+            TaskState.TASK_STATE_FAILED,
+            TaskState.TASK_STATE_CANCELED,
+        }
         if task.status.state not in terminal_states:
             raise ValueError(
                 f"Cannot delete task {task_id} with state={task.status.state}. "

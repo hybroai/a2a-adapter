@@ -283,12 +283,8 @@ class N8nAdapter(BaseA2AAdapter):
 
         # Advertise multimodal capabilities when enabled
         if self.multimodal_mode:
-            input_modes.extend(
-                self._supported_input_types or self._DEFAULT_INPUT_TYPES
-            )
-            output_modes.extend(
-                self._supported_output_types or self._DEFAULT_OUTPUT_TYPES
-            )
+            input_modes.extend(self._supported_input_types or self._DEFAULT_INPUT_TYPES)
+            output_modes.extend(self._supported_output_types or self._DEFAULT_OUTPUT_TYPES)
 
         return AdapterMetadata(
             name=self._name or "N8nAdapter",
@@ -329,7 +325,9 @@ class N8nAdapter(BaseA2AAdapter):
                 parsed = json.loads(user_input)
                 if isinstance(parsed, dict):
                     payload = {
-                        **self.default_inputs, **parsed, **self.payload_template,
+                        **self.default_inputs,
+                        **parsed,
+                        **self.payload_template,
                     }
                     self._set_context(payload, context_id)
                     return payload
@@ -448,9 +446,7 @@ class N8nAdapter(BaseA2AAdapter):
         try:
             return await asyncio.wait_for(self._download(url), self.timeout)
         except asyncio.TimeoutError as e:
-            raise ValueError(
-                f"Fetching file {url} timed out after {self.timeout}s"
-            ) from e
+            raise ValueError(f"Fetching file {url} timed out after {self.timeout}s") from e
 
     async def _download(self, url: str) -> bytes:
         try:
@@ -467,17 +463,13 @@ class N8nAdapter(BaseA2AAdapter):
                 resp.raise_for_status()
                 declared = resp.headers.get("Content-Length")
                 if declared and declared.isdigit() and int(declared) > limit:
-                    raise ValueError(
-                        f"File at {url} exceeds max_file_bytes ({declared} > {limit})"
-                    )
+                    raise ValueError(f"File at {url} exceeds max_file_bytes ({declared} > {limit})")
                 chunks: list[bytes] = []
                 size = 0
                 async for chunk in resp.aiter_bytes():
                     size += len(chunk)
                     if size > limit:
-                        raise ValueError(
-                            f"File at {url} exceeds max_file_bytes ({limit})"
-                        )
+                        raise ValueError(f"File at {url} exceeds max_file_bytes ({limit})")
                     chunks.append(chunk)
                 return b"".join(chunks)
         except httpx.HTTPError as e:
@@ -523,7 +515,9 @@ class N8nAdapter(BaseA2AAdapter):
             start = time.monotonic()
             try:
                 resp = await client.post(
-                    self.webhook_url, json=payload, headers=headers,
+                    self.webhook_url,
+                    json=payload,
+                    headers=headers,
                 )
                 dur_ms = int((time.monotonic() - start) * 1000)
 
@@ -539,7 +533,7 @@ class N8nAdapter(BaseA2AAdapter):
 
             except HTTPStatusError as e:
                 if self.retry_on_server_error and attempt < self.max_retries:
-                    await asyncio.sleep(self.backoff * (2 ** attempt))
+                    await asyncio.sleep(self.backoff * (2**attempt))
                     continue
                 raise RuntimeError(
                     f"n8n upstream {e.response.status_code} "
@@ -549,7 +543,7 @@ class N8nAdapter(BaseA2AAdapter):
             except (ConnectError, ConnectTimeout, PoolTimeout) as e:
                 # The request was never sent, so retrying cannot re-run the workflow.
                 if attempt < self.max_retries:
-                    await asyncio.sleep(self.backoff * (2 ** attempt))
+                    await asyncio.sleep(self.backoff * (2**attempt))
                     continue
                 raise RuntimeError(
                     f"n8n upstream unavailable/timeout after retries (req_id={req_id}): {e}"
@@ -559,7 +553,7 @@ class N8nAdapter(BaseA2AAdapter):
                 # ReadTimeout, reset or dropped connection, ...: n8n may have
                 # received the request and started the workflow.
                 if self.retry_on_server_error and attempt < self.max_retries:
-                    await asyncio.sleep(self.backoff * (2 ** attempt))
+                    await asyncio.sleep(self.backoff * (2**attempt))
                     continue
                 raise RuntimeError(
                     f"n8n upstream timeout or connection error "
@@ -579,9 +573,7 @@ class N8nAdapter(BaseA2AAdapter):
                 return self._extract_text_from_item(output[0])
             else:
                 texts = [
-                    self._extract_text_from_item(item)
-                    for item in output
-                    if isinstance(item, dict)
+                    self._extract_text_from_item(item) for item in output if isinstance(item, dict)
                 ]
                 return "\n".join(t for t in texts if t) or json.dumps(output, indent=2)
         elif isinstance(output, dict):
@@ -599,10 +591,7 @@ class N8nAdapter(BaseA2AAdapter):
         for key in ("output", "result", "message", "text", "response", "content"):
             if key in item:
                 return str(item[key])
-        filtered = {
-            k: v for k, v in item.items()
-            if k not in (self.file_field, self.image_field)
-        }
+        filtered = {k: v for k, v in item.items() if k not in (self.file_field, self.image_field)}
         return json.dumps(filtered, indent=2) if filtered else ""
 
     def _extract_response(self, output: Any) -> list[Part]:
@@ -624,9 +613,7 @@ class N8nAdapter(BaseA2AAdapter):
             return [Part(text="[Empty response]")]
         return parts
 
-    def _file_ref_parts(
-        self, refs: Any, default_media_type: str | None
-    ) -> list[Part]:
+    def _file_ref_parts(self, refs: Any, default_media_type: str | None) -> list[Part]:
         """Convert response file refs to Parts, skipping unusable ones.
 
         A ref becomes a url Part when it has ``url``/``uri``, or a raw Part
@@ -643,8 +630,7 @@ class N8nAdapter(BaseA2AAdapter):
                 continue
             meta = {
                 "filename": self._str_field(ref, "name"),
-                "media_type": self._str_field(ref, "mime_type", "mimeType")
-                or default_media_type,
+                "media_type": self._str_field(ref, "mime_type", "mimeType") or default_media_type,
             }
             location = self._str_field(ref, "url", "uri")
             data = ref.get("data")
@@ -688,32 +674,32 @@ class N8nAgentAdapter(BaseAgentAdapter):
 
     This adapter forwards A2A message requests to an n8n webhook URL and
     translates the response back to A2A format.
-    
+
     Supports two execution modes:
-    
-    1. **Synchronous Mode** (default): 
+
+    1. **Synchronous Mode** (default):
        - Blocks until the n8n workflow completes
        - Returns a Message with the workflow result
        - Best for quick workflows (< 30 seconds)
-    
+
     2. **Async Task Mode** (async_mode=True):
        - Returns a Task with state="working" immediately
        - Processes the workflow in the background
        - Clients can poll get_task() for status updates
        - Best for long-running workflows
        - Tasks time out after async_timeout seconds (default: 300)
-    
+
     **Memory Considerations (Async Mode)**:
-    
+
     When using InMemoryTaskStore (the default), completed tasks remain in memory
     indefinitely. For production use, either:
-    
+
     1. Call delete_task() after retrieving completed tasks to free memory
     2. Use DatabaseTaskStore for persistent storage with external cleanup
     3. Implement a periodic cleanup routine for old completed tasks
-    
+
     Example cleanup pattern::
-    
+
         task = await adapter.get_task(task_id)
         if task and task.status.state in ("completed", "failed", "canceled"):
             # Process the result...
@@ -775,13 +761,13 @@ class N8nAgentAdapter(BaseAgentAdapter):
         self.parse_json_input = parse_json_input
         self.input_mapper = input_mapper
         self.default_inputs = default_inputs or {}
-        
+
         # Async task mode configuration
         self.async_mode = async_mode
         self.async_timeout = async_timeout
         self._background_tasks: Dict[str, "asyncio.Task[None]"] = {}
         self._cancelled_tasks: set[str] = set()  # Track cancelled task IDs
-        
+
         # Initialize task store for async mode
         if async_mode:
             if not _HAS_TASK_STORE:
@@ -808,7 +794,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
     async def handle(self, params: MessageSendParams) -> Message | Task:
         """
         Handle a non-streaming A2A message request.
-        
+
         In sync mode (default): Blocks until workflow completes, returns Message.
         In async mode: Returns Task immediately, processes in background.
         """
@@ -839,7 +825,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
     async def _handle_async(self, params: MessageSendParams) -> Task:
         """
         Handle request asynchronously - returns Task immediately, processes in background.
-        
+
         1. Creates a Task with state="working"
         2. Saves the task to the TaskStore
         3. Starts a background coroutine to execute the workflow
@@ -848,12 +834,12 @@ class N8nAgentAdapter(BaseAgentAdapter):
         # Generate IDs
         task_id = str(uuid.uuid4())
         context_id = self.extract_context_id(params) or str(uuid.uuid4())
-        
+
         # Extract the initial message for history
         initial_message = None
         if hasattr(params, "message") and params.message:
             initial_message = params.message
-        
+
         # Create initial task with "working" state
         now = datetime.now(timezone.utc)
         task = Task(
@@ -869,13 +855,13 @@ class N8nAgentAdapter(BaseAgentAdapter):
         # Save initial task state
         await self.task_store.save(task, self._create_minimal_context())
         logger.debug("Created async task %s with state=working", task_id)
-        
+
         # Start background processing with timeout
         bg_task = asyncio.create_task(
             self._execute_workflow_with_timeout(task_id, context_id, params)
         )
         self._background_tasks[task_id] = bg_task
-        
+
         # Clean up background task reference when done and handle exceptions
         def _on_task_done(t: "asyncio.Task[None]") -> None:
             self._background_tasks.pop(task_id, None)
@@ -889,9 +875,9 @@ class N8nAgentAdapter(BaseAgentAdapter):
                         task_id,
                         exc,
                     )
-        
+
         bg_task.add_done_callback(_on_task_done)
-        
+
         return task
 
     async def _execute_workflow_with_timeout(
@@ -902,7 +888,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
     ) -> None:
         """
         Execute the workflow with a timeout wrapper.
-        
+
         This ensures that long-running workflows don't hang indefinitely.
         """
         try:
@@ -915,7 +901,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
             if task_id in self._cancelled_tasks:
                 logger.debug("Task %s was cancelled, not marking as failed", task_id)
                 return
-            
+
             logger.error("Task %s timed out after %s seconds", task_id, self.async_timeout)
             now = datetime.now(timezone.utc)
             error_message = Message(
@@ -944,21 +930,21 @@ class N8nAgentAdapter(BaseAgentAdapter):
     ) -> None:
         """
         Execute the n8n workflow in the background and update task state.
-        
+
         This runs as a background coroutine after the initial Task is returned.
         """
         try:
             logger.debug("Starting background execution for task %s", task_id)
-            
+
             # Execute the workflow (this may take a while)
             framework_input = await self.to_framework(params)
             framework_output = await self.call_framework(framework_input, params)
-            
+
             # Check if task was cancelled during execution
             if task_id in self._cancelled_tasks:
                 logger.debug("Task %s was cancelled during execution, not updating state", task_id)
                 return
-            
+
             # Convert to message
             response_text = self._extract_response_text(framework_output)
             response_message = Message(
@@ -973,7 +959,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
             if hasattr(params, "message") and params.message:
                 history.append(params.message)
             history.append(response_message)
-            
+
             # Update task to completed state with artifacts (A2A compliant)
             now = datetime.now(timezone.utc)
             completed_task = Task(
@@ -996,18 +982,18 @@ class N8nAgentAdapter(BaseAgentAdapter):
 
             await self.task_store.save(completed_task, self._create_minimal_context())
             logger.debug("Task %s completed successfully", task_id)
-            
+
         except asyncio.CancelledError:
             # Task was cancelled - don't update state, cancel_task() handles it
             logger.debug("Task %s was cancelled", task_id)
             raise  # Re-raise to properly cancel the task
-            
+
         except Exception as e:
             # Check if task was cancelled (don't overwrite canceled state)
             if task_id in self._cancelled_tasks:
                 logger.debug("Task %s was cancelled, not marking as failed", task_id)
                 return
-            
+
             # Update task to failed state
             logger.error("Task %s failed: %s", task_id, e)
             now = datetime.now(timezone.utc)
@@ -1106,7 +1092,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
         # Build payload with custom template support
         payload: Dict[str, Any] = {
             **self.payload_template,  # Start with template (e.g., {"name": "A2A Agent"})
-            **self.default_inputs,    # Add default inputs
+            **self.default_inputs,  # Add default inputs
             self.message_field: user_message,  # Add message with custom field name
         }
 
@@ -1169,9 +1155,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
                 if attempt < self.max_retries:
                     await asyncio.sleep(self.backoff * (2**attempt))
                     continue
-                raise RuntimeError(
-                    f"n8n upstream 5xx after retries (req_id={req_id}): {e}"
-                ) from e
+                raise RuntimeError(f"n8n upstream 5xx after retries (req_id={req_id}): {e}") from e
 
             except (ConnectError, ReadTimeout) as e:
                 if attempt < self.max_retries:
@@ -1218,7 +1202,9 @@ class N8nAgentAdapter(BaseAgentAdapter):
                         text = self._extract_text_from_item(item)
                         if text:
                             texts.append(text)
-                response_text = "\n".join(texts) if texts else json.dumps(framework_output, indent=2)
+                response_text = (
+                    "\n".join(texts) if texts else json.dumps(framework_output, indent=2)
+                )
         elif isinstance(framework_output, dict):
             # Handle single object format (first entry only)
             response_text = self._extract_text_from_item(framework_output)
@@ -1275,15 +1261,15 @@ class N8nAgentAdapter(BaseAgentAdapter):
     async def get_task(self, task_id: str) -> Task | None:
         """
         Get the current status of a task by ID.
-        
+
         This method is used for polling task status in async task execution mode.
-        
+
         Args:
             task_id: The ID of the task to retrieve
-            
+
         Returns:
             The Task object with current status, or None if not found
-            
+
         Raises:
             RuntimeError: If async mode is not enabled
         """
@@ -1303,17 +1289,17 @@ class N8nAgentAdapter(BaseAgentAdapter):
     async def delete_task(self, task_id: str) -> bool:
         """
         Delete a task from the task store.
-        
+
         This can be used to clean up completed/failed tasks to prevent memory leaks
-        when using InMemoryTaskStore. Only tasks in terminal states (completed, 
+        when using InMemoryTaskStore. Only tasks in terminal states (completed,
         failed, canceled) should be deleted.
-        
+
         Args:
             task_id: The ID of the task to delete
-            
+
         Returns:
             True if the task was deleted, False if not found or still running
-            
+
         Raises:
             RuntimeError: If async mode is not enabled
             ValueError: If the task is still running (not in a terminal state)
@@ -1327,15 +1313,19 @@ class N8nAgentAdapter(BaseAgentAdapter):
         task = await self.task_store.get(task_id, self._create_minimal_context())
         if not task:
             return False
-        
+
         # Only allow deletion of tasks in terminal states
-        terminal_states = {TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_CANCELED}
+        terminal_states = {
+            TaskState.TASK_STATE_COMPLETED,
+            TaskState.TASK_STATE_FAILED,
+            TaskState.TASK_STATE_CANCELED,
+        }
         if task.status.state not in terminal_states:
             raise ValueError(
                 f"Cannot delete task {task_id} with state={task.status.state}. "
                 f"Only tasks in terminal states (completed, failed, canceled) can be deleted."
             )
-        
+
         await self.task_store.delete(task_id, self._create_minimal_context())
         logger.debug("Deleted task %s", task_id)
         return True
@@ -1343,13 +1333,13 @@ class N8nAgentAdapter(BaseAgentAdapter):
     async def cancel_task(self, task_id: str) -> Task | None:
         """
         Attempt to cancel a running task.
-        
+
         Note: This only cancels the background asyncio task. If the HTTP request
         to n8n is already in flight, it cannot be cancelled on the n8n side.
-        
+
         Args:
             task_id: The ID of the task to cancel
-            
+
         Returns:
             The updated Task object with state="canceled", or None if not found
         """
@@ -1358,10 +1348,10 @@ class N8nAgentAdapter(BaseAgentAdapter):
                 "cancel_task() is only available in async mode. "
                 "Initialize adapter with async_mode=True"
             )
-        
+
         # Mark task as cancelled to prevent race conditions
         self._cancelled_tasks.add(task_id)
-        
+
         # Cancel the background task if still running and wait for it
         bg_task = self._background_tasks.get(task_id)
         if bg_task and not bg_task.done():
@@ -1374,7 +1364,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
                 pass  # Expected when task is cancelled
             except Exception:
                 pass  # Task may have failed, we're cancelling anyway
-        
+
         # Update task state to canceled
         task = await self.task_store.get(task_id, self._create_minimal_context())
         if task:
@@ -1391,7 +1381,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
             await self.task_store.save(canceled_task, self._create_minimal_context())
             logger.debug("Task %s marked as canceled", task_id)
             return canceled_task
-        
+
         return None
 
     # ---------- Lifecycle ----------
@@ -1401,7 +1391,7 @@ class N8nAgentAdapter(BaseAgentAdapter):
         # Mark all tasks as cancelled to prevent state updates
         for task_id in self._background_tasks:
             self._cancelled_tasks.add(task_id)
-        
+
         # Cancel all pending background tasks
         tasks_to_cancel = []
         for task_id, bg_task in list(self._background_tasks.items()):
@@ -1409,14 +1399,14 @@ class N8nAgentAdapter(BaseAgentAdapter):
                 bg_task.cancel()
                 tasks_to_cancel.append(bg_task)
                 logger.debug("Cancelling background task %s during close", task_id)
-        
+
         # Wait for all cancelled tasks to complete
         if tasks_to_cancel:
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-        
+
         self._background_tasks.clear()
         self._cancelled_tasks.clear()
-        
+
         if self._client is not None:
             await self._client.aclose()
             self._client = None
@@ -1432,5 +1422,3 @@ class N8nAgentAdapter(BaseAgentAdapter):
     def supports_streaming(self) -> bool:
         """This adapter does not support streaming responses."""
         return False
-
-

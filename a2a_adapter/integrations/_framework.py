@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 async def run_with_timeout(
-    awaitable: Awaitable[T], timeout: float | None, what: str,
+    awaitable: Awaitable[T],
+    timeout: float | None,
+    what: str,
 ) -> T:
     """Await ``awaitable``, raising ``TimeoutError("<what> timed out after
     N seconds")`` if it takes longer than ``timeout`` (``None``: no limit).
@@ -32,7 +34,9 @@ async def run_with_timeout(
 
 
 async def iter_with_timeout(
-    iterable: AsyncIterable[T], timeout: float | None, what: str,
+    iterable: AsyncIterable[T],
+    timeout: float | None,
+    what: str,
 ) -> AsyncIterator[T]:
     """Yield from ``iterable`` with ``timeout`` seconds for the whole stream.
 

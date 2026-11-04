@@ -446,6 +446,7 @@ class TestLangGraphAdapterStreaming:
     @pytest.mark.asyncio
     async def test_handle_stream_yields_events(self):
         """Test that handle_stream yields proper SSE events."""
+
         # Create mock graph with async generator
         async def mock_astream(input_dict):
             states = [

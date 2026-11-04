@@ -385,9 +385,15 @@ class TestConfiguration:
     async def test_missing_sdk_raises_install_hint(self, tmp_path, monkeypatch):
         monkeypatch.setitem(sys.modules, "deepseek_harness", None)
         adapter = DeepSeekHarnessAdapter(working_dir=str(tmp_path), dsh_home=str(tmp_path / "h"))
-        with pytest.raises(ImportError, match=r"a2a-adapter\[deepseek-harness\]"):
+        with pytest.raises(ImportError) as raised:
             await adapter.invoke("hi", context_id="ctx-1", context=_context("t1"))
         await adapter.close()
+        for command in [
+            'uv tool install "a2a-adapter[deepseek-harness]"',
+            'pipx install --force "a2a-adapter[deepseek-harness]"',
+            'pip install "a2a-adapter[deepseek-harness]"',
+        ]:
+            assert command in str(raised.value)
 
 
 class TestTurns:

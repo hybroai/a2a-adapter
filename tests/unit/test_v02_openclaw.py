@@ -14,12 +14,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from a2a_adapter.integrations.openclaw import (
     OpenClawAdapter,
     VALID_THINKING_LEVELS,
-    _INVALID_SESSION_CHARS_RE,
     _SESSION_ID_MAX_LEN,
 )
 from a2a.types import TaskState
 
-from a2a_adapter.base_adapter import AdapterMetadata
 from a2a_adapter.exceptions import CancelledByAdapterError
 from a2a_adapter.server import build_agent_card, to_a2a
 from a2a_adapter.loader import load_adapter
@@ -475,13 +473,9 @@ async def test_concurrent_invokes_track_independent_processes():
     proc_b = FakeProcess(_ok_output("from b"))
 
     with patch(_SPAWN, AsyncMock(side_effect=[proc_a, proc_b])):
-        run_a = asyncio.create_task(
-            adapter.invoke("a", context_id="ctx-a", context=_ctx("task-a"))
-        )
+        run_a = asyncio.create_task(adapter.invoke("a", context_id="ctx-a", context=_ctx("task-a")))
         await asyncio.wait_for(proc_a.started.wait(), 2)
-        run_b = asyncio.create_task(
-            adapter.invoke("b", context_id="ctx-b", context=_ctx("task-b"))
-        )
+        run_b = asyncio.create_task(adapter.invoke("b", context_id="ctx-b", context=_ctx("task-b")))
         await asyncio.wait_for(proc_b.started.wait(), 2)
 
         assert adapter._active_processes["task-a"] is proc_a
@@ -506,13 +500,9 @@ async def test_same_session_runs_one_at_a_time():
     spawn = AsyncMock(side_effect=[proc_a, proc_b])
 
     with patch(_SPAWN, spawn):
-        run_a = asyncio.create_task(
-            adapter.invoke("a", context_id="same", context=_ctx("task-a"))
-        )
+        run_a = asyncio.create_task(adapter.invoke("a", context_id="same", context=_ctx("task-a")))
         await asyncio.wait_for(proc_a.started.wait(), 2)
-        run_b = asyncio.create_task(
-            adapter.invoke("b", context_id="same", context=_ctx("task-b"))
-        )
+        run_b = asyncio.create_task(adapter.invoke("b", context_id="same", context=_ctx("task-b")))
         for _ in range(5):
             await asyncio.sleep(0)
         assert spawn.call_count == 1
@@ -615,12 +605,14 @@ def test_to_a2a_builds_app():
 
 
 def test_load_adapter_openclaw():
-    adapter = load_adapter({
-        "adapter": "openclaw",
-        "session_id": "test-session",
-        "thinking": "high",
-        "timeout": 120,
-    })
+    adapter = load_adapter(
+        {
+            "adapter": "openclaw",
+            "session_id": "test-session",
+            "thinking": "high",
+            "timeout": 120,
+        }
+    )
     assert isinstance(adapter, OpenClawAdapter)
     assert adapter.session_id == "test-session"
     assert adapter.thinking == "high"
@@ -632,6 +624,7 @@ def test_load_adapter_openclaw():
 
 def test_flat_import():
     from a2a_adapter import OpenClawAdapter as OC
+
     assert OC is OpenClawAdapter
 
 

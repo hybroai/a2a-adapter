@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 from types import SimpleNamespace
-from typing import AsyncIterator
 
 import pytest
 from a2a.types import Part
@@ -250,7 +249,6 @@ class TestSessionStore:
         assert store.read_text() == before
         assert sorted(p.name for p in tmp_path.iterdir()) == ["sessions.json"]
 
-
     def test_save_fsyncs_before_replacing(self, tmp_path, monkeypatch):
         calls = []
         real_fsync, real_replace = os.fsync, os.replace
@@ -266,6 +264,7 @@ class TestSessionStore:
         adapter._sessions = {"ctx-1": "sess-A"}
         adapter._save_sessions()
         assert calls == ["fsync", "replace"]
+
 
 class TestDefaultStateDir:
     def test_outside_working_dir_and_per_project(self, tmp_path, monkeypatch):
@@ -289,9 +288,7 @@ class TestDefaultStateDir:
 
     def test_relative_working_dir_resolves_to_absolute(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        assert default_state_dir("codex", ".") == default_state_dir(
-            "codex", str(tmp_path)
-        )
+        assert default_state_dir("codex", ".") == default_state_dir("codex", str(tmp_path))
 
     def test_agents_do_not_share_a_dir(self, tmp_path):
         assert default_state_dir("codex", str(tmp_path)) != default_state_dir(

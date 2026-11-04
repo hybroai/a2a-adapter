@@ -24,31 +24,31 @@ logger = logging.getLogger(__name__)
 class BaseAgentAdapter(ABC):
     """
     Abstract base class for adapting agent frameworks to the A2A Protocol.
-    
+
     This class provides the core interface for translating between A2A Protocol
     messages and framework-specific inputs/outputs. Concrete implementations
     handle the specifics of n8n, CrewAI, LangChain, etc.
-    
+
     The adapter follows a three-step process:
     1. to_framework: Convert A2A MessageSendParams to framework input
     2. call_framework: Execute the framework-specific logic
     3. from_framework: Convert framework output back to A2A Message/Task
-    
+
     Common Input Handling (available to all adapters):
-    
+
     All adapters can use these input mapping features (in priority order):
-    
+
     1. **input_mapper** (highest priority):
        Custom function for full control over input transformation.
        Signature: (raw_input: str, context_id: str | None) -> dict
-    
+
     2. **parse_json_input** (default: True):
        Automatically parse JSON input and pass directly to framework.
        Perfect for structured inputs.
-    
+
     3. **Framework-specific fallback**:
        Each adapter has its own fallback behavior (e.g., inputs_key for CrewAI).
-    
+
     For adapters that support async task execution, the adapter can:
     - Return a Task with state="submitted" or "working" immediately
     - Run the actual work in the background
@@ -122,10 +122,10 @@ class BaseAgentAdapter(ABC):
     def extract_context_id(self, params: MessageSendParams) -> str | None:
         """
         Extract context_id from MessageSendParams.
-        
+
         Args:
             params: A2A message parameters
-            
+
         Returns:
             The context_id string or None if not present
         """
@@ -136,10 +136,10 @@ class BaseAgentAdapter(ABC):
     def try_parse_json(self, raw_input: str) -> Dict[str, Any] | None:
         """
         Attempt to parse raw input as JSON object.
-        
+
         Args:
             raw_input: Raw text input
-            
+
         Returns:
             Parsed dict if successful, None otherwise
         """
@@ -167,16 +167,16 @@ class BaseAgentAdapter(ABC):
     ) -> Dict[str, Any]:
         """
         Apply the standard input mapping pipeline.
-        
+
         Processing priority:
         1. input_mapper (custom function) - highest priority
         2. parse_json_input (auto JSON parsing)
         3. fallback_key (simple text mapping)
-        
+
         Args:
             params: A2A message parameters
             fallback_key: Key to use for plain text when JSON parsing fails
-            
+
         Returns:
             Dictionary with mapped input data
         """
@@ -222,13 +222,13 @@ class BaseAgentAdapter(ABC):
     async def handle(self, params: MessageSendParams) -> Message | Task:
         """
         Handle a non-streaming A2A message request.
-        
+
         Args:
             params: A2A protocol message parameters
-            
+
         Returns:
             A2A Message or Task response
-            
+
         Raises:
             Exception: If the underlying framework call fails
         """
@@ -236,52 +236,46 @@ class BaseAgentAdapter(ABC):
         framework_output = await self.call_framework(framework_input, params)
         return await self.from_framework(framework_output, params)
 
-    async def handle_stream(
-        self, params: MessageSendParams
-    ) -> AsyncIterator[Dict[str, Any]]:
+    async def handle_stream(self, params: MessageSendParams) -> AsyncIterator[Dict[str, Any]]:
         """
         Handle a streaming A2A message request.
-        
+
         Default implementation raises NotImplementedError. Override this method
         in subclasses that support streaming responses.
-        
+
         Args:
             params: A2A protocol message parameters
-            
+
         Yields:
             Server-Sent Events compatible dictionaries with 'event' and 'data' keys
-            
+
         Raises:
             NotImplementedError: If streaming is not supported by this adapter
         """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not support streaming"
-        )
+        raise NotImplementedError(f"{self.__class__.__name__} does not support streaming")
 
     @abstractmethod
     async def to_framework(self, params: MessageSendParams) -> Any:
         """
         Convert A2A message parameters to framework-specific input format.
-        
+
         Args:
             params: A2A protocol message parameters
-            
+
         Returns:
             Framework-specific input (format varies by implementation)
         """
         ...
 
     @abstractmethod
-    async def call_framework(
-        self, framework_input: Any, params: MessageSendParams
-    ) -> Any:
+    async def call_framework(self, framework_input: Any, params: MessageSendParams) -> Any:
         """
         Execute the underlying agent framework with the prepared input.
-        
+
         Args:
             framework_input: Framework-specific input from to_framework()
             params: Original A2A message parameters (for context)
-            
+
         Returns:
             Framework-specific output
         """
@@ -293,11 +287,11 @@ class BaseAgentAdapter(ABC):
     ) -> Message | Task:
         """
         Convert framework output to A2A Message or Task.
-        
+
         Args:
             framework_output: Output from call_framework()
             params: Original A2A message parameters (for context)
-            
+
         Returns:
             A2A Message or Task response
         """
@@ -306,27 +300,24 @@ class BaseAgentAdapter(ABC):
     def supports_streaming(self) -> bool:
         """
         Check if this adapter supports streaming responses.
-        
+
         Returns:
             True if streaming is supported, False otherwise
         """
         try:
             # Check if handle_stream is overridden
-            return (
-                self.__class__.handle_stream
-                != BaseAgentAdapter.handle_stream
-            )
+            return self.__class__.handle_stream != BaseAgentAdapter.handle_stream
         except AttributeError:
             return False
 
     def supports_async_tasks(self) -> bool:
         """
         Check if this adapter supports async task execution.
-        
+
         Async task execution allows the adapter to return a Task immediately
         with state="working" and process the request in the background.
         Clients can then poll for task status via get_task().
-        
+
         Returns:
             True if async tasks are supported, False otherwise
         """
@@ -335,16 +326,16 @@ class BaseAgentAdapter(ABC):
     async def get_task(self, task_id: str) -> Task | None:
         """
         Get the current status of a task by ID.
-        
+
         This method is used for polling task status in async task execution mode.
         Override this method in subclasses that support async tasks.
-        
+
         Args:
             task_id: The ID of the task to retrieve
-            
+
         Returns:
             The Task object with current status, or None if not found
-            
+
         Raises:
             NotImplementedError: If async tasks are not supported by this adapter
         """
@@ -355,20 +346,19 @@ class BaseAgentAdapter(ABC):
     async def cancel_task(self, task_id: str) -> Task | None:
         """
         Attempt to cancel a running task.
-        
+
         This method is used to cancel async tasks that are still in progress.
         Override this method in subclasses that support async tasks.
-        
+
         Args:
             task_id: The ID of the task to cancel
-            
+
         Returns:
             The updated Task object with state="canceled", or None if not found
-            
+
         Raises:
             NotImplementedError: If async tasks are not supported by this adapter
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support async task execution"
         )
-

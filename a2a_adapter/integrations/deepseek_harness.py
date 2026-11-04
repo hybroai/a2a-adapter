@@ -33,11 +33,15 @@ logger = logging.getLogger(__name__)
 _SAFE_SESSION_ID = re.compile(r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?")
 _MAX_VERBATIM_CONTEXT_ID = 100
 
-_INSTALL_HINT = (
-    "DeepSeekHarnessAdapter requires deepseek-harness-sdk. "
-    'Install with: pip install "a2a-adapter[deepseek-harness]" '
-    "(supported platforms: Linux x64/arm64, macOS 14+, Windows x64)."
+# Upgrading never adds an extra, so name the reinstall for each installer.
+_INSTALL_COMMANDS = (
+    "Add the deepseek-harness extra with the tool that installed a2a-adapter:\n"
+    '  uv tool install "a2a-adapter[deepseek-harness]"\n'
+    '  pipx install --force "a2a-adapter[deepseek-harness]"\n'
+    '  pip install "a2a-adapter[deepseek-harness]"\n'
+    "Supported platforms: Linux x64/arm64, macOS 14+, Windows x64."
 )
+_INSTALL_HINT = f"DeepSeekHarnessAdapter requires deepseek-harness-sdk.\n{_INSTALL_COMMANDS}"
 
 
 class DeepSeekHarnessAdapter(BaseA2AAdapter):

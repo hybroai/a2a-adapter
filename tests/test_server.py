@@ -66,9 +66,7 @@ class TestBuildAgentCard:
                 return "ok"
 
             def get_metadata(self):
-                return AdapterMetadata(
-                    provider={"organization": "Acme", "url": "https://acme.com"}
-                )
+                return AdapterMetadata(provider={"organization": "Acme", "url": "https://acme.com"})
 
         card = build_agent_card(ProviderAdapter())
         assert card.provider is not None

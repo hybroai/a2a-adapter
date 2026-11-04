@@ -121,9 +121,7 @@ def load_adapter(config: dict) -> BaseA2AAdapter:
     adapter_type = config.pop("adapter", None)
 
     if not adapter_type:
-        raise ValueError(
-            "Config must include 'adapter' key specifying the adapter type"
-        )
+        raise ValueError("Config must include 'adapter' key specifying the adapter type")
 
     # Priority 1: User-registered adapters
     cls = _REGISTRY.get(adapter_type)
@@ -143,8 +141,7 @@ def load_adapter(config: dict) -> BaseA2AAdapter:
     if cls is None:
         registered = sorted(set(_REGISTRY) | set(_BUILTIN_MAP))
         raise ValueError(
-            f"Unknown adapter type: {adapter_type!r}. "
-            f"Available: {', '.join(registered)}"
+            f"Unknown adapter type: {adapter_type!r}. " f"Available: {', '.join(registered)}"
         )
 
     return cls(**config)

@@ -163,11 +163,14 @@ class LangGraphAdapter(BaseA2AAdapter):
         inputs = self._build_inputs(user_input, context_id)
         result = await run_with_timeout(
             self.graph.ainvoke(inputs, **self._config_kwargs(context_id)),
-            self.timeout, "LangGraph graph",
+            self.timeout,
+            "LangGraph graph",
         )
         return self._extract_output(result)
 
-    async def stream(self, user_input: str, context_id: str | None = None, **kwargs) -> AsyncIterator[str]:
+    async def stream(
+        self, user_input: str, context_id: str | None = None, **kwargs
+    ) -> AsyncIterator[str]:
         """Stream each node's new output via astream(stream_mode="updates").
 
         Every update holds only what one node just wrote, so its text is a
@@ -178,7 +181,9 @@ class LangGraphAdapter(BaseA2AAdapter):
         inputs = self._build_inputs(user_input, context_id)
         emitted = False
         updates = self.graph.astream(
-            inputs, stream_mode="updates", **self._config_kwargs(context_id),
+            inputs,
+            stream_mode="updates",
+            **self._config_kwargs(context_id),
         )
         async for update in iter_with_timeout(updates, self.timeout, "LangGraph graph"):
             text = self._extract_update_text(update)
@@ -247,6 +252,7 @@ class LangGraphAdapter(BaseA2AAdapter):
         if self.input_key == "messages":
             try:
                 from langchain_core.messages import HumanMessage
+
                 base["messages"] = [HumanMessage(content=user_message)]
             except ImportError:
                 base["messages"] = [{"role": "user", "content": user_message}]
@@ -361,9 +367,7 @@ class LangGraphAdapter(BaseA2AAdapter):
                     return str(value[key])
             return json.dumps(value, indent=2, default=str)
         if isinstance(value, list):
-            return "\n".join(
-                LangGraphAdapter._extract_value_text(item) for item in value
-            )
+            return "\n".join(LangGraphAdapter._extract_value_text(item) for item in value)
         return str(value)
 
     @staticmethod
@@ -775,6 +779,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
             # Try to use LangChain message format if available
             try:
                 from langchain_core.messages import HumanMessage
+
                 base_input["messages"] = [HumanMessage(content=user_message)]
             except ImportError:
                 # Fallback to dict format
@@ -811,7 +816,10 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
                 self.graph.ainvoke(framework_input),
                 timeout=self.timeout,
             )
-            logger.debug("LangGraph returned state with keys: %s", list(result.keys()) if isinstance(result, dict) else type(result).__name__)
+            logger.debug(
+                "LangGraph returned state with keys: %s",
+                list(result.keys()) if isinstance(result, dict) else type(result).__name__,
+            )
             return result
         except asyncio.TimeoutError as e:
             logger.error("LangGraph workflow timed out after %s seconds", self.timeout)
@@ -923,9 +931,7 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
 
     # ---------- Streaming support ----------
 
-    async def handle_stream(
-        self, params: MessageSendParams
-    ) -> AsyncIterator[Dict[str, Any]]:
+    async def handle_stream(self, params: MessageSendParams) -> AsyncIterator[Dict[str, Any]]:
         """
         Handle a streaming A2A message request.
 
@@ -956,16 +962,20 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
 
             if text and text != accumulated_text:
                 # Calculate the new chunk (delta)
-                new_content = text[len(accumulated_text):] if text.startswith(accumulated_text) else text
+                new_content = (
+                    text[len(accumulated_text) :] if text.startswith(accumulated_text) else text
+                )
                 accumulated_text = text
 
                 if new_content:
                     yield {
                         "event": "message",
-                        "data": json.dumps({
-                            "type": "content",
-                            "content": new_content,
-                        }),
+                        "data": json.dumps(
+                            {
+                                "type": "content",
+                                "content": new_content,
+                            }
+                        ),
                     }
 
         # Use final state if we have it, otherwise use accumulated
@@ -982,10 +992,16 @@ class LangGraphAgentAdapter(BaseAgentAdapter):
         # Send completion event
         yield {
             "event": "done",
-            "data": json.dumps({
-                "status": "completed",
-                "message": final_message.model_dump() if hasattr(final_message, "model_dump") else str(final_message),
-            }),
+            "data": json.dumps(
+                {
+                    "status": "completed",
+                    "message": (
+                        final_message.model_dump()
+                        if hasattr(final_message, "model_dump")
+                        else str(final_message)
+                    ),
+                }
+            ),
         }
 
         logger.debug("LangGraph stream completed")

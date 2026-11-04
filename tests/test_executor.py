@@ -1,9 +1,7 @@
 """Tests for AdapterAgentExecutor — the bridge between adapters and A2A SDK."""
 
 import asyncio
-import uuid
-from typing import AsyncIterator
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from a2a.server.agent_execution import RequestContext
@@ -181,15 +179,8 @@ class TestExecuteInvoke:
         await executor.execute(ctx, event_queue)
 
         events = await _collect_events(event_queue)
-        status_events = [
-            e
-            for e in events
-            if type(e).__name__ == "TaskStatusUpdateEvent"
-        ]
-        assert any(
-            hasattr(e, "status") and getattr(e.status, "state", None)
-            for e in status_events
-        )
+        status_events = [e for e in events if type(e).__name__ == "TaskStatusUpdateEvent"]
+        assert any(hasattr(e, "status") and getattr(e.status, "state", None) for e in status_events)
 
 
 # ── execute (streaming path) ─────────────────────────────────
@@ -211,9 +202,7 @@ class TestExecuteStreaming:
         await executor.execute(ctx, event_queue)
 
         events = await _collect_events(event_queue)
-        artifact_events = [
-            e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"
-        ]
+        artifact_events = [e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"]
         assert len(artifact_events) == 3
 
     async def test_streaming_filters_empty_chunks(self, ctx, event_queue):
@@ -224,9 +213,7 @@ class TestExecuteStreaming:
         await executor.execute(ctx, event_queue)
 
         events = await _collect_events(event_queue)
-        artifact_events = [
-            e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"
-        ]
+        artifact_events = [e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"]
         assert len(artifact_events) == 2
 
     async def test_streaming_filters_empty_text_parts(self, ctx, event_queue):
@@ -242,9 +229,7 @@ class TestExecuteStreaming:
         await executor.execute(ctx, event_queue)
 
         events = await _collect_events(event_queue)
-        artifact_events = [
-            e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"
-        ]
+        artifact_events = [e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"]
         assert len(artifact_events) == 2
 
     async def test_streaming_all_empty_produces_no_artifacts(self, ctx, event_queue):
@@ -255,14 +240,10 @@ class TestExecuteStreaming:
         await executor.execute(ctx, event_queue)
 
         events = await _collect_events(event_queue)
-        artifact_events = [
-            e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"
-        ]
+        artifact_events = [e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"]
         assert len(artifact_events) == 0
 
-        status_events = [
-            e for e in events if type(e).__name__ == "TaskStatusUpdateEvent"
-        ]
+        status_events = [e for e in events if type(e).__name__ == "TaskStatusUpdateEvent"]
         assert len(status_events) >= 1
 
     async def test_streaming_single_chunk(self, ctx, event_queue):
@@ -272,9 +253,7 @@ class TestExecuteStreaming:
         await executor.execute(ctx, event_queue)
 
         events = await _collect_events(event_queue)
-        artifact_events = [
-            e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"
-        ]
+        artifact_events = [e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"]
         assert len(artifact_events) == 1
 
     async def test_streaming_part_objects(self, ctx, event_queue):
@@ -288,9 +267,7 @@ class TestExecuteStreaming:
         await executor.execute(ctx, event_queue)
 
         events = await _collect_events(event_queue)
-        artifact_events = [
-            e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"
-        ]
+        artifact_events = [e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"]
         assert len(artifact_events) == 2
 
     async def test_streaming_failure_closes_artifact(self, ctx, event_queue):
@@ -302,14 +279,10 @@ class TestExecuteStreaming:
         await executor.execute(ctx, event_queue)
 
         events = await _collect_events(event_queue)
-        artifact_events = [
-            e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"
-        ]
+        artifact_events = [e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"]
         assert len(artifact_events) >= 1
 
-        status_events = [
-            e for e in events if type(e).__name__ == "TaskStatusUpdateEvent"
-        ]
+        status_events = [e for e in events if type(e).__name__ == "TaskStatusUpdateEvent"]
         states = [
             getattr(e.status, "state", None)
             for e in status_events
@@ -326,9 +299,7 @@ class TestExecuteStreaming:
         await executor.execute(ctx, event_queue)
 
         events = await _collect_events(event_queue)
-        artifact_events = [
-            e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"
-        ]
+        artifact_events = [e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"]
         assert [e.artifact.parts[0].text for e in artifact_events] == ["A", "B", "C"]
         assert [e.append for e in artifact_events] == [False, True, True]
         assert [e.last_chunk for e in artifact_events] == [False, False, True]
@@ -343,9 +314,7 @@ class TestExecuteStreaming:
         await executor.execute(ctx, event_queue)
 
         events = await _collect_events(event_queue)
-        artifact_events = [
-            e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"
-        ]
+        artifact_events = [e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"]
         assert [e.artifact.parts[0].text for e in artifact_events] == ["only"]
         assert artifact_events[0].append is False
         assert artifact_events[0].last_chunk is True
@@ -359,14 +328,10 @@ class TestExecuteStreaming:
         await executor.execute(ctx, event_queue)
 
         events = await _collect_events(event_queue)
-        artifact_events = [
-            e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"
-        ]
+        artifact_events = [e for e in events if type(e).__name__ == "TaskArtifactUpdateEvent"]
         assert len(artifact_events) == 0
 
-        status_events = [
-            e for e in events if type(e).__name__ == "TaskStatusUpdateEvent"
-        ]
+        status_events = [e for e in events if type(e).__name__ == "TaskStatusUpdateEvent"]
         states = [
             getattr(e.status, "state", None)
             for e in status_events

@@ -41,7 +41,11 @@ class TestBuildMultimodalPayload:
     async def test_url_part_passed_through_without_fetch(self, adapter):
         """By default a url Part is forwarded as a uri and never fetched."""
         ctx = MagicMock()
-        file_part = Part(url="http://169.254.169.254/latest/meta-data", filename="doc.pdf", media_type="application/pdf")
+        file_part = Part(
+            url="http://169.254.169.254/latest/meta-data",
+            filename="doc.pdf",
+            media_type="application/pdf",
+        )
         ctx.message.parts = [file_part]
         adapter._client = _client_for(_fail_if_called)
 
@@ -57,7 +61,9 @@ class TestBuildMultimodalPayload:
     async def test_image_categorized_separately(self, adapter):
         """A Part with image/* media_type should go to images, not files."""
         ctx = MagicMock()
-        img_part = Part(url="http://example.com/photo.png", filename="photo.png", media_type="image/png")
+        img_part = Part(
+            url="http://example.com/photo.png", filename="photo.png", media_type="image/png"
+        )
         ctx.message.parts = [img_part]
         adapter._client = _client_for(_fail_if_called)
 
@@ -70,7 +76,9 @@ class TestBuildMultimodalPayload:
     async def test_raw_part_no_fetch(self, adapter):
         """A Part with raw bytes should use data directly, not HTTP fetch."""
         ctx = MagicMock()
-        raw_part = Part(raw=b"raw-content", filename="data.bin", media_type="application/octet-stream")
+        raw_part = Part(
+            raw=b"raw-content", filename="data.bin", media_type="application/octet-stream"
+        )
         ctx.message.parts = [raw_part]
 
         payload = await adapter._build_multimodal_payload("process", "ctx-1", ctx)
@@ -216,9 +224,7 @@ class TestFetchFileContent:
 
     @pytest.fixture
     def adapter(self):
-        return N8nAdapter(
-            webhook_url="http://localhost:5678/webhook/test", fetch_file_urls=True
-        )
+        return N8nAdapter(webhook_url="http://localhost:5678/webhook/test", fetch_file_urls=True)
 
     async def test_url_part_fetches(self, adapter):
         part = Part(url="http://example.com/file.bin")
@@ -257,7 +263,13 @@ class TestExtractResponse:
     def test_with_files(self, adapter):
         output = {
             "output": "here are results",
-            "files": [{"url": "http://example.com/report.pdf", "name": "report.pdf", "mime_type": "application/pdf"}],
+            "files": [
+                {
+                    "url": "http://example.com/report.pdf",
+                    "name": "report.pdf",
+                    "mime_type": "application/pdf",
+                }
+            ],
         }
         parts = adapter._extract_response(output)
         assert len(parts) == 2
@@ -269,7 +281,13 @@ class TestExtractResponse:
     def test_with_images(self, adapter):
         output = {
             "output": "chart generated",
-            "images": [{"url": "http://example.com/chart.png", "name": "chart.png", "mimeType": "image/png"}],
+            "images": [
+                {
+                    "url": "http://example.com/chart.png",
+                    "name": "chart.png",
+                    "mimeType": "image/png",
+                }
+            ],
         }
         parts = adapter._extract_response(output)
         assert len(parts) == 2

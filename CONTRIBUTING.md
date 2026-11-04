@@ -422,7 +422,8 @@ a2a-adapter/
 ### Python Style
 
 - Follow PEP 8
-- Use Black for formatting (line length: 100)
+- Use Black for formatting (line length: 100) and keep Ruff clean; CI runs
+  `uv run ruff check .` and `uv run black --check .`
 - Use type hints where possible
 - Write docstrings for public APIs (Google style)
 
@@ -514,62 +515,48 @@ Fixed the bug in n8n adapter
 
 **(For maintainers only)**
 
-### Pre-Release Checklist
+Releases are automated with [release-please](https://github.com/googleapis/release-please).
+Do not bump the version or add CHANGELOG entries by hand.
 
-- [ ] All tests passing
-- [ ] Documentation updated
-- [ ] CHANGELOG.md updated
-- [ ] Version bumped in `pyproject.toml` and `a2a_adapter/__init__.py`
-- [ ] Package version consistency test passes
-- [ ] Release notes prepared
+Prerequisite: "Allow GitHub Actions to create and approve pull requests" must
+stay enabled in the repository's Actions settings, or release-please cannot
+open its PR.
 
-### Release Steps
+1. **Merge changes into `main` with Conventional Commit messages.**
+   release-please reads every commit that reaches `main` and ignores merge
+   commit subjects and commits that do not follow the format. If nothing
+   since the last release is a `fix:`, `feat:` or other releasable commit, no
+   release PR opens.
+   - With a merge commit, every commit in the PR needs a Conventional Commit
+     message.
+   - With a squash merge, check that the message GitHub proposes (the PR
+     title, or the only commit's message) is a Conventional Commit.
+   - `fix:`, `perf:` and `revert:` bump the patch version. `feat:` bumps it
+     too while the version is below 1.0.0, and the minor version from 1.0.0 on.
+   - `feat!:` or a `BREAKING CHANGE:` footer bumps the minor version below
+     1.0.0, and the major version from 1.0.0 on.
+   - `docs:`, `chore:`, `ci:`, `test:` and the other types do not start a release.
+2. **Review the release PR.** After each push to `main`, release-please opens
+   or updates a `chore(main): release X.Y.Z` PR. It bumps the version in
+   `pyproject.toml`, `a2a_adapter/__init__.py` and
+   `.release-please-manifest.json`, and adds the release's entries to
+   `CHANGELOG.md`. The workflow then pushes a
+   `chore: sync uv.lock with the release version` commit to it. Edit the PR if
+   the changelog needs wording changes.
 
-1. **Update version**
+   CI does not run on this PR, because GitHub starts no workflows for PRs
+   opened by `GITHUB_TOKEN`. Merge only once the PR's `uv.lock` shows the new
+   version: a stale lock fails `uv sync --locked` after the tag already
+   exists. If the lock commit is missing or the PR conflicts on `uv.lock`, run
+   `uv lock` on the PR branch and push.
+3. **Merge the release PR.** release-please creates the `vX.Y.Z` tag and the
+   GitHub Release, then dispatches `publish.yml` on that tag. The workflow runs
+   the tests, checks that the tag matches the package version, builds the
+   package and publishes it to PyPI after a maintainer approves the `pypi`
+   environment deployment.
 
-   ```bash
-   # Update pyproject.toml
-   version = "X.Y.Z"
-
-   # Update a2a_adapter/__init__.py
-   __version__ = "X.Y.Z"
-   ```
-
-2. **Update CHANGELOG.md**
-
-   ```markdown
-   ## [X.Y.Z] - YYYY-MM-DD
-
-   - Added: New feature X
-   - Fixed: Bug Y
-   ```
-
-3. **Create release commit**
-
-   ```bash
-   git add pyproject.toml a2a_adapter/__init__.py CHANGELOG.md
-   git commit -m "chore: release vX.Y.Z"
-   ```
-
-4. **Create and push tag**
-
-   ```bash
-   git tag vX.Y.Z
-   git push origin main --tags
-   ```
-
-5. **Build and publish to PyPI**
-
-   ```bash
-   python -m build
-   twine upload dist/*
-   ```
-
-6. **Create GitHub Release**
-   - Go to GitHub Releases
-   - Create new release from tag
-   - Copy CHANGELOG entry
-   - Publish release
+If publishing fails, fix the cause and re-run `publish.yml` from the Actions
+tab on the `vX.Y.Z` tag.
 
 ### Versioning
 
@@ -578,6 +565,9 @@ We follow [Semantic Versioning](https://semver.org/):
 - **MAJOR** - Breaking changes
 - **MINOR** - New features (backward compatible)
 - **PATCH** - Bug fixes (backward compatible)
+
+Until 1.0.0, versions shift down one level: breaking changes bump MINOR, and
+new features and fixes bump PATCH.
 
 ## 🆘 Getting Help
 
