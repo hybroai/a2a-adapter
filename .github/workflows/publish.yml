@@ -1,5 +1,7 @@
 name: Publish to PyPI
 
+# release-please.yml dispatches this workflow on each new v<version> tag. It
+# can also be run by hand, or by publishing a release from the GitHub UI.
 on:
   release:
     types: [published]
@@ -15,8 +17,15 @@ on:
           - 'true'
 
 jobs:
+  test:
+    name: Test
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   build:
     name: Build distribution
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -29,11 +38,11 @@ jobs:
           python-version: '3.12'
       
       - name: Check release tag matches package version
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || github.ref_type == 'tag'
         run: |
           version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
-            echo "::error::Release tag ${GITHUB_REF_NAME} does not match package version v${version}. Bump pyproject.toml and a2a_adapter/__init__.py first."
+            echo "::error::Release tag ${GITHUB_REF_NAME} does not match package version v${version}. Release through the release-please PR so the version is bumped first."
             exit 1
           fi
 
