@@ -46,9 +46,7 @@ class AdapterAgentExecutor(AgentExecutor):
     def __init__(self, adapter: BaseA2AAdapter) -> None:
         self._adapter = adapter
 
-    async def execute(
-        self, context: RequestContext, event_queue: EventQueue
-    ) -> None:
+    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         """Execute the adapter and emit A2A events to the queue.
 
         Called by DefaultRequestHandler for each incoming message/send
@@ -90,9 +88,7 @@ class AdapterAgentExecutor(AgentExecutor):
                 e,
                 exc_info=True,
             )
-            error_msg = updater.new_agent_message(
-                [Part(text=f"Agent execution failed: {e}")]
-            )
+            error_msg = updater.new_agent_message([Part(text=f"Agent execution failed: {e}")])
             await updater.failed(message=error_msg)
 
     @staticmethod
@@ -126,9 +122,7 @@ class AdapterAgentExecutor(AgentExecutor):
         elif isinstance(chunk, Part):
             return [chunk]
         else:
-            raise TypeError(
-                f"Unexpected type {type(chunk).__name__}. Expected str or Part."
-            )
+            raise TypeError(f"Unexpected type {type(chunk).__name__}. Expected str or Part.")
 
     async def _execute_invoke(
         self,
@@ -140,9 +134,7 @@ class AdapterAgentExecutor(AgentExecutor):
 
         Handles both text-only (str) and multimodal (list[Part]) responses.
         """
-        result = await self._adapter.invoke(
-            user_input, context.context_id, context=context
-        )
+        result = await self._adapter.invoke(user_input, context.context_id, context=context)
 
         # Type detection: str (backward compatible) or list[Part] (multimodal)
         if isinstance(result, str):
@@ -163,9 +155,7 @@ class AdapterAgentExecutor(AgentExecutor):
             await updater.add_artifact(parts, name="response")
 
         # Part(text="") would also serialize to {} in the completion message.
-        message = updater.new_agent_message(
-            [Part(text=response_text or "[Empty response]")]
-        )
+        message = updater.new_agent_message([Part(text=response_text or "[Empty response]")])
         await updater.complete(message=message)
 
     def _extract_text_from_parts(self, parts: list[Part]) -> str:
@@ -270,9 +260,7 @@ class AdapterAgentExecutor(AgentExecutor):
                 texts.append(chunk.text)
         return "".join(texts) if texts else "[Streamed non-text content]"
 
-    async def cancel(
-        self, context: RequestContext, event_queue: EventQueue
-    ) -> None:
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         """Cancel an ongoing execution.
 
         Called by DefaultRequestHandler when a tasks/cancel request arrives.

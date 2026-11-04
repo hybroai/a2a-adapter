@@ -290,12 +290,14 @@ def test_to_a2a_builds_app():
 
 
 def test_load_adapter_crewai():
-    adapter = load_adapter({
-        "adapter": "crewai",
-        "crew": MockCrew(),
-        "inputs_key": "topic",
-        "timeout": 600,
-    })
+    adapter = load_adapter(
+        {
+            "adapter": "crewai",
+            "crew": MockCrew(),
+            "inputs_key": "topic",
+            "timeout": 600,
+        }
+    )
     assert isinstance(adapter, CrewAIAdapter)
     assert adapter.inputs_key == "topic"
     assert adapter.timeout == 600
@@ -306,6 +308,7 @@ def test_load_adapter_crewai():
 
 def test_flat_import():
     from a2a_adapter import CrewAIAdapter as CA
+
     assert CA is CrewAIAdapter
 
 

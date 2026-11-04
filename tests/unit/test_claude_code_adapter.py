@@ -227,6 +227,7 @@ class TestBuildCommand:
 
     def test_skip_permissions_logs_warning(self, tmp_path, caplog):
         import logging
+
         with caplog.at_level(logging.WARNING):
             ClaudeCodeAdapter(
                 working_dir=str(tmp_path),
@@ -256,9 +257,7 @@ class TestPromptViaStdin:
 
     @pytest.mark.asyncio
     async def test_invoke_writes_prompt_to_stdin(self, adapter, mock_proc):
-        stdout = "\n".join(
-            json.dumps(e) for e in [_assistant_event("ok"), _result_event("ok")]
-        )
+        stdout = "\n".join(json.dumps(e) for e in [_assistant_event("ok"), _result_event("ok")])
         mock_proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
 
         with patch(
@@ -288,7 +287,9 @@ class TestPromptViaStdin:
             "a2a_adapter.base_adapter.create_subprocess_exec",
             return_value=mock_proc,
         ) as spawn:
-            chunks = [c async for c in adapter.stream("stream 프롬프트", context=_make_context("t"))]
+            chunks = [
+                c async for c in adapter.stream("stream 프롬프트", context=_make_context("t"))
+            ]
 
         assert chunks == ["ok"]
         assert spawn.call_args.kwargs["stdin"] == asyncio.subprocess.PIPE
@@ -328,19 +329,23 @@ class TestPromptViaStdin:
 
 class TestParseInvokeOutput:
     def test_assistant_events(self, adapter):
-        stdout = "\n".join([
-            json.dumps(_assistant_event("Hello ")),
-            json.dumps(_assistant_event("world")),
-        ])
+        stdout = "\n".join(
+            [
+                json.dumps(_assistant_event("Hello ")),
+                json.dumps(_assistant_event("world")),
+            ]
+        )
         result = adapter._parse_invoke_output(stdout, "ctx-1")
         assert result.text == "Hello world"
 
     def test_result_event_is_metadata_only(self, adapter):
         """Result event is metadata (session_id); assistant text is the response."""
-        stdout = "\n".join([
-            json.dumps(_assistant_event("visible response")),
-            json.dumps(_result_event("result metadata", "sess-new")),
-        ])
+        stdout = "\n".join(
+            [
+                json.dumps(_assistant_event("visible response")),
+                json.dumps(_result_event("result metadata", "sess-new")),
+            ]
+        )
         result = adapter._parse_invoke_output(stdout, "ctx-1")
         # Assistant text is the user-visible response, not result.result
         assert result.text == "visible response"
@@ -349,10 +354,12 @@ class TestParseInvokeOutput:
 
     def test_result_event_returns_session_id(self, adapter):
         """Result event extracts session_id in the ParseResult."""
-        stdout = "\n".join([
-            json.dumps(_assistant_event("the answer")),
-            json.dumps(_result_event("metadata", "sess-42")),
-        ])
+        stdout = "\n".join(
+            [
+                json.dumps(_assistant_event("the answer")),
+                json.dumps(_result_event("metadata", "sess-42")),
+            ]
+        )
         result = adapter._parse_invoke_output(stdout, "ctx-2")
         assert result.session_id == "sess-42"
 
@@ -378,11 +385,13 @@ class TestParseInvokeOutput:
 
     def test_mixed_events_assistant_text_used(self, adapter):
         """When both assistant and result events present, assistant text is the response."""
-        stdout = "\n".join([
-            json.dumps(_assistant_event("chunk A")),
-            json.dumps(_assistant_event("chunk B")),
-            json.dumps(_result_event("result metadata", "sess-99")),
-        ])
+        stdout = "\n".join(
+            [
+                json.dumps(_assistant_event("chunk A")),
+                json.dumps(_assistant_event("chunk B")),
+                json.dumps(_result_event("result metadata", "sess-99")),
+            ]
+        )
         result = adapter._parse_invoke_output(stdout, "ctx-1")
         assert result.text == "chunk Achunk B"
         assert result.session_id == "sess-99"
@@ -413,9 +422,7 @@ class TestInvokeStreamConsistency:
         # invoke path
         stdout = "\n".join(json.dumps(e) for e in events)
         mock_proc_invoke = AsyncMock()
-        mock_proc_invoke.communicate = AsyncMock(
-            return_value=(stdout.encode(), b"")
-        )
+        mock_proc_invoke.communicate = AsyncMock(return_value=(stdout.encode(), b""))
         mock_proc_invoke.returncode = 0
         mock_proc_invoke.pid = 1
 
@@ -424,7 +431,8 @@ class TestInvokeStreamConsistency:
             return_value=mock_proc_invoke,
         ):
             invoke_result = await adapter.invoke(
-                "test", context_id="ctx-inv",
+                "test",
+                context_id="ctx-inv",
                 context=_make_context("task-inv"),
             )
 
@@ -449,7 +457,8 @@ class TestInvokeStreamConsistency:
         ):
             stream_chunks = []
             async for chunk in adapter2.stream(
-                "test", context_id="ctx-str",
+                "test",
+                context_id="ctx-str",
                 context=_make_context("task-str"),
             ):
                 stream_chunks.append(chunk)
@@ -466,10 +475,12 @@ class TestInvokeStreamConsistency:
 class TestInvoke:
     @pytest.mark.asyncio
     async def test_invoke_success(self, adapter, mock_proc):
-        stdout = "\n".join([
-            json.dumps(_assistant_event("Hello World")),
-            json.dumps(_result_event("metadata", "sess-1")),
-        ])
+        stdout = "\n".join(
+            [
+                json.dumps(_assistant_event("Hello World")),
+                json.dumps(_result_event("metadata", "sess-1")),
+            ]
+        )
         mock_proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
         mock_proc.returncode = 0
 
@@ -478,7 +489,8 @@ class TestInvoke:
             return_value=mock_proc,
         ):
             result = await adapter.invoke(
-                "say hello", context_id="ctx-1",
+                "say hello",
+                context_id="ctx-1",
                 context=_make_context("task-1"),
             )
 
@@ -500,7 +512,8 @@ class TestInvoke:
         ):
             with pytest.raises(RuntimeError) as exc_info:
                 await adapter.invoke(
-                    "fail", context_id="ctx-1",
+                    "fail",
+                    context_id="ctx-1",
                     context=_make_context("task-1"),
                 )
 
@@ -522,7 +535,8 @@ class TestInvoke:
         ):
             with pytest.raises(RuntimeError, match="exit code 1"):
                 await adapter.invoke(
-                    "fail", context_id="ctx-1",
+                    "fail",
+                    context_id="ctx-1",
                     context=_make_context("task-1"),
                 )
 
@@ -534,7 +548,8 @@ class TestInvoke:
         ):
             with pytest.raises(FileNotFoundError, match="Claude Code binary not found"):
                 await adapter.invoke(
-                    "test", context_id="ctx-1",
+                    "test",
+                    context_id="ctx-1",
                     context=_make_context("task-1"),
                 )
 
@@ -552,7 +567,8 @@ class TestInvoke:
         ):
             with pytest.raises(FileNotFoundError, match="Working directory does not exist"):
                 await a.invoke(
-                    "test", context_id="ctx-1",
+                    "test",
+                    context_id="ctx-1",
                     context=_make_context("task-1"),
                 )
 
@@ -583,7 +599,8 @@ class TestStream:
         ):
             chunks = []
             async for chunk in adapter.stream(
-                "stream me", context_id="ctx-s",
+                "stream me",
+                context_id="ctx-s",
                 context=_make_context("task-s"),
             ):
                 chunks.append(chunk)
@@ -616,7 +633,8 @@ class TestStream:
             with pytest.raises(RuntimeError, match="exit code 1"):
                 chunks = []
                 async for chunk in adapter.stream(
-                    "fail stream", context_id="ctx-f",
+                    "fail stream",
+                    context_id="ctx-f",
                     context=_make_context("task-f"),
                 ):
                     chunks.append(chunk)
@@ -643,7 +661,8 @@ class TestStream:
         ):
             with pytest.raises(RuntimeError, match="stream boom"):
                 async for _ in adapter.stream(
-                    "error stream", context_id="ctx-e",
+                    "error stream",
+                    context_id="ctx-e",
                     context=_make_context("task-e"),
                 ):
                     pass
@@ -656,7 +675,8 @@ class TestStream:
         ):
             with pytest.raises(FileNotFoundError, match="Claude Code binary not found"):
                 async for _ in adapter.stream(
-                    "test", context_id="ctx-1",
+                    "test",
+                    context_id="ctx-1",
                     context=_make_context("task-1"),
                 ):
                     pass
@@ -675,7 +695,8 @@ class TestStream:
         ):
             with pytest.raises(FileNotFoundError, match="Working directory does not exist"):
                 async for _ in a.stream(
-                    "test", context_id="ctx-1",
+                    "test",
+                    context_id="ctx-1",
                     context=_make_context("task-1"),
                 ):
                     pass
@@ -701,7 +722,8 @@ class TestStream:
         ):
             with pytest.raises(RuntimeError, match="no output"):
                 async for _ in adapter.stream(
-                    "test", context_id="ctx-no-text",
+                    "test",
+                    context_id="ctx-no-text",
                     context=_make_context("task-no-text"),
                 ):
                     pass
@@ -727,7 +749,8 @@ class TestStream:
         ):
             with pytest.raises(RuntimeError, match="no output"):
                 async for _ in adapter.stream(
-                    "test", context_id="ctx-empty",
+                    "test",
+                    context_id="ctx-empty",
                     context=_make_context("task-empty"),
                 ):
                     pass
@@ -749,18 +772,22 @@ class TestPerContextSerial:
             event_first_started.set()
             await event_release_first.wait()
             execution_order.append("first_end")
-            stdout = "\n".join([
-                json.dumps(_assistant_event("r1")),
-                json.dumps(_result_event("meta", "s1")),
-            ])
+            stdout = "\n".join(
+                [
+                    json.dumps(_assistant_event("r1")),
+                    json.dumps(_result_event("meta", "s1")),
+                ]
+            )
             return (stdout.encode(), b"")
 
         async def fast_communicate(input=None):
             execution_order.append("second_start")
-            stdout = "\n".join([
-                json.dumps(_assistant_event("r2")),
-                json.dumps(_result_event("meta", "s2")),
-            ])
+            stdout = "\n".join(
+                [
+                    json.dumps(_assistant_event("r2")),
+                    json.dumps(_result_event("meta", "s2")),
+                ]
+            )
             return (stdout.encode(), b"")
 
         mock_proc_1 = AsyncMock()
@@ -788,7 +815,8 @@ class TestPerContextSerial:
         ):
             task1 = asyncio.create_task(
                 adapter.invoke(
-                    "first", context_id="shared-ctx",
+                    "first",
+                    context_id="shared-ctx",
                     context=_make_context("task-A"),
                 )
             )
@@ -797,7 +825,8 @@ class TestPerContextSerial:
 
             task2 = asyncio.create_task(
                 adapter.invoke(
-                    "second", context_id="shared-ctx",
+                    "second",
+                    context_id="shared-ctx",
                     context=_make_context("task-B"),
                 )
             )
@@ -832,10 +861,12 @@ class TestPerContextSerial:
             if started_count >= 2:
                 both_started.set()
             await release.wait()
-            stdout = "\n".join([
-                json.dumps(_assistant_event("ok")),
-                json.dumps(_result_event("meta", "s")),
-            ])
+            stdout = "\n".join(
+                [
+                    json.dumps(_assistant_event("ok")),
+                    json.dumps(_result_event("meta", "s")),
+                ]
+            )
             return (stdout.encode(), b"")
 
         mock_proc = AsyncMock()
@@ -849,13 +880,15 @@ class TestPerContextSerial:
         ):
             task1 = asyncio.create_task(
                 adapter.invoke(
-                    "a", context_id="ctx-A",
+                    "a",
+                    context_id="ctx-A",
                     context=_make_context("task-A"),
                 )
             )
             task2 = asyncio.create_task(
                 adapter.invoke(
-                    "b", context_id="ctx-B",
+                    "b",
+                    context_id="ctx-B",
                     context=_make_context("task-B"),
                 )
             )
@@ -901,7 +934,8 @@ class TestCancelRunning:
             ctx = _make_context("task-kill")
             invoke_task = asyncio.create_task(
                 adapter.invoke(
-                    "long running", context_id="ctx-k",
+                    "long running",
+                    context_id="ctx-k",
                     context=ctx,
                 )
             )
@@ -934,7 +968,8 @@ class TestCancelRunning:
         ):
             with pytest.raises(CancelledByAdapterError, match="killed by cancel"):
                 await adapter.invoke(
-                    "test", context_id="ctx-k",
+                    "test",
+                    context_id="ctx-k",
                     context=_make_context("task-kill"),
                 )
 
@@ -957,7 +992,8 @@ class TestCancelQueued:
         ) as mock_exec:
             with pytest.raises(CancelledByAdapterError, match="cancelled before execution"):
                 await adapter.invoke(
-                    "test", context_id="ctx-q",
+                    "test",
+                    context_id="ctx-q",
                     context=_make_context("task-q"),
                 )
 
@@ -990,7 +1026,8 @@ class TestCancelQueued:
         ) as mock_exec:
             with pytest.raises(CancelledByAdapterError, match="cancelled before execution"):
                 async for _ in adapter.stream(
-                    "test", context_id="ctx-sq",
+                    "test",
+                    context_id="ctx-sq",
                     context=_make_context("task-sq"),
                 ):
                     pass
@@ -1021,10 +1058,12 @@ class TestStaleSessionRetry:
                 proc.returncode = 1
             else:
                 # Second call: success (no --resume)
-                stdout = "\n".join([
-                    json.dumps(_assistant_event("retry success")),
-                    json.dumps(_result_event("metadata", "new-sess")),
-                ]).encode()
+                stdout = "\n".join(
+                    [
+                        json.dumps(_assistant_event("retry success")),
+                        json.dumps(_result_event("metadata", "new-sess")),
+                    ]
+                ).encode()
                 proc.communicate = AsyncMock(return_value=(stdout, b""))
                 proc.returncode = 0
             return proc
@@ -1034,7 +1073,8 @@ class TestStaleSessionRetry:
             side_effect=mock_create_subprocess,
         ):
             result = await adapter.invoke(
-                "retry me", context_id="ctx-stale",
+                "retry me",
+                context_id="ctx-stale",
                 context=_make_context("task-retry"),
             )
 
@@ -1061,7 +1101,8 @@ class TestStaleSessionRetry:
             # Should NOT retry — signal kill is a real failure, not a stale session
             with pytest.raises(RuntimeError, match="exit code -15"):
                 await adapter.invoke(
-                    "signal test", context_id="ctx-sig",
+                    "signal test",
+                    context_id="ctx-sig",
                     context=_make_context("task-sig"),
                 )
 
@@ -1083,7 +1124,8 @@ class TestStaleSessionRetry:
         ):
             with pytest.raises(RuntimeError, match="exit code 1"):
                 await adapter.invoke(
-                    "no retry", context_id="ctx-nr",
+                    "no retry",
+                    context_id="ctx-nr",
                     context=_make_context("task-nr"),
                 )
 
@@ -1106,7 +1148,8 @@ class TestStaleSessionRetry:
         ):
             with pytest.raises(RuntimeError, match="Authentication failed"):
                 await adapter.invoke(
-                    "test", context_id="ctx-stderr",
+                    "test",
+                    context_id="ctx-stderr",
                     context=_make_context("task-stderr"),
                 )
 
@@ -1133,7 +1176,8 @@ class TestStaleSessionRetry:
         ):
             with pytest.raises(RuntimeError, match="Environment error"):
                 async for _ in adapter.stream(
-                    "test", context_id="ctx-stderr-s",
+                    "test",
+                    context_id="ctx-stderr-s",
                     context=_make_context("task-stderr-s"),
                 ):
                     pass
@@ -1164,10 +1208,12 @@ class TestStaleSessionRetry:
                 proc.returncode = 1
             else:
                 # Second call: success (assistant text is the response)
-                proc.stdout = AsyncLineIterator([
-                    _json_line(_assistant_event("stream retry ok")),
-                    _json_line(_result_event("metadata", "new-sess-s")),
-                ])
+                proc.stdout = AsyncLineIterator(
+                    [
+                        _json_line(_assistant_event("stream retry ok")),
+                        _json_line(_result_event("metadata", "new-sess-s")),
+                    ]
+                )
                 proc.stderr = AsyncChunkReader(b"")
                 proc.stdin = _stdin_stub()
                 proc.returncode = 0
@@ -1179,7 +1225,8 @@ class TestStaleSessionRetry:
         ):
             chunks = []
             async for chunk in adapter.stream(
-                "retry stream", context_id="ctx-ss",
+                "retry stream",
+                context_id="ctx-ss",
                 context=_make_context("task-ss"),
             ):
                 chunks.append(chunk)
@@ -1208,7 +1255,8 @@ class TestStaleSessionRetry:
         ):
             with pytest.raises(RuntimeError, match="exit code -9"):
                 async for _ in adapter.stream(
-                    "signal stream", context_id="ctx-sig-s",
+                    "signal stream",
+                    context_id="ctx-sig-s",
                     context=_make_context("task-sig-s"),
                 ):
                     pass
@@ -1227,10 +1275,12 @@ class TestSessionPersistence:
         the same store for the same context_id."""
         store = str(tmp_path / "sessions.json")
         first = ClaudeCodeAdapter(working_dir=str(tmp_path), session_store_path=store)
-        stdout = "\n".join([
-            json.dumps(_assistant_event("hi")),
-            json.dumps(_result_event("metadata", "sess-persisted")),
-        ])
+        stdout = "\n".join(
+            [
+                json.dumps(_assistant_event("hi")),
+                json.dumps(_result_event("metadata", "sess-persisted")),
+            ]
+        )
         mock_proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
         with patch(
             "a2a_adapter.base_adapter.create_subprocess_exec",
@@ -1254,10 +1304,12 @@ class TestSessionPersistence:
     async def test_session_keys_are_context_ids(self, adapter, mock_proc):
         """Sessions are keyed by context_id, or "_default" without one, so
         the keys mean the same thing in every process."""
-        stdout = "\n".join([
-            json.dumps(_assistant_event("ok")),
-            json.dumps(_result_event("metadata", "sess-1")),
-        ])
+        stdout = "\n".join(
+            [
+                json.dumps(_assistant_event("ok")),
+                json.dumps(_result_event("metadata", "sess-1")),
+            ]
+        )
         mock_proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
         with patch(
             "a2a_adapter.base_adapter.create_subprocess_exec",
@@ -1378,33 +1430,39 @@ class TestMetadata:
 
 class TestLoaderIntegration:
     def test_load_adapter_claude_code(self, tmp_path):
-        a = load_adapter({
-            "adapter": "claude-code",
-            "working_dir": str(tmp_path),
-            "session_store_path": str(tmp_path / "s.json"),
-        })
+        a = load_adapter(
+            {
+                "adapter": "claude-code",
+                "working_dir": str(tmp_path),
+                "session_store_path": str(tmp_path / "s.json"),
+            }
+        )
         assert isinstance(a, ClaudeCodeAdapter)
         assert a.working_dir == str(tmp_path)
 
     def test_load_adapter_with_options(self, tmp_path):
-        a = load_adapter({
-            "adapter": "claude-code",
-            "working_dir": str(tmp_path),
-            "timeout": 120,
-            "claude_path": "/opt/claude",
-            "session_store_path": str(tmp_path / "s.json"),
-        })
+        a = load_adapter(
+            {
+                "adapter": "claude-code",
+                "working_dir": str(tmp_path),
+                "timeout": 120,
+                "claude_path": "/opt/claude",
+                "session_store_path": str(tmp_path / "s.json"),
+            }
+        )
         assert isinstance(a, ClaudeCodeAdapter)
         assert a.timeout == 120
         assert a.claude_path == "/opt/claude"
 
     def test_load_adapter_with_skip_permissions(self, tmp_path):
-        a = load_adapter({
-            "adapter": "claude-code",
-            "working_dir": str(tmp_path),
-            "skip_permissions": True,
-            "session_store_path": str(tmp_path / "s.json"),
-        })
+        a = load_adapter(
+            {
+                "adapter": "claude-code",
+                "working_dir": str(tmp_path),
+                "skip_permissions": True,
+                "session_store_path": str(tmp_path / "s.json"),
+            }
+        )
         assert isinstance(a, ClaudeCodeAdapter)
         assert a.skip_permissions is True
 
@@ -1428,6 +1486,7 @@ class TestServerIntegration:
 
 def test_flat_import():
     from a2a_adapter import ClaudeCodeAdapter as CC
+
     assert CC is ClaudeCodeAdapter
 
 
@@ -1507,7 +1566,8 @@ class TestStreamingStdoutEOF:
         ):
             chunks = []
             async for chunk in adapter.stream(
-                "test eof", context_id="ctx-eof",
+                "test eof",
+                context_id="ctx-eof",
                 context=_make_context("task-eof"),
             ):
                 chunks.append(chunk)

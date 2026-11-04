@@ -75,9 +75,7 @@ class HermesAdapter(BaseA2AAdapter):
         self._documentation_url = documentation_url
         self._icon_url = icon_url
 
-        self._executor = ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="hermes"
-        )
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="hermes")
         self._session_db = None  # lazy — see _ensure_session_db()
         self._running_agents: dict[str, object] = {}  # task_id → AIAgent
         self._session_locks: dict[str, asyncio.Lock] = {}  # context_id → lock
@@ -164,14 +162,16 @@ class HermesAdapter(BaseA2AAdapter):
             runtime = resolve_runtime_provider(
                 requested=self._provider_name or config_provider,
             )
-            kwargs.update({
-                "provider": runtime.get("provider"),
-                "api_mode": runtime.get("api_mode"),
-                "base_url": runtime.get("base_url"),
-                "api_key": runtime.get("api_key"),
-                "command": runtime.get("command"),
-                "args": list(runtime.get("args") or []),
-            })
+            kwargs.update(
+                {
+                    "provider": runtime.get("provider"),
+                    "api_mode": runtime.get("api_mode"),
+                    "base_url": runtime.get("base_url"),
+                    "api_key": runtime.get("api_key"),
+                    "command": runtime.get("command"),
+                    "args": list(runtime.get("args") or []),
+                }
+            )
         except Exception:
             logger.debug(
                 "Could not resolve runtime provider; using AIAgent defaults",
@@ -220,17 +220,13 @@ class HermesAdapter(BaseA2AAdapter):
             return final
 
         if failed or not completed:
-            raise RuntimeError(
-                error or "Hermes run did not complete successfully"
-            )
+            raise RuntimeError(error or "Hermes run did not complete successfully")
 
         return final
 
     # ──── Required: invoke ────
 
-    async def invoke(
-        self, user_input: str, context_id: str | None = None, **kwargs
-    ) -> str:
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         """Execute Hermes Agent and return the full response.
 
         Loads conversation history from SessionDB, runs run_conversation()
@@ -340,7 +336,8 @@ class HermesAdapter(BaseA2AAdapter):
     def get_metadata(self) -> AdapterMetadata:
         return AdapterMetadata(
             name=self._name or "Hermes",
-            description=self._description or (
+            description=self._description
+            or (
                 "Hermes AI Agent \u2014 multi-purpose assistant with tool use, "
                 "persistent memory, and subagent delegation."
             ),

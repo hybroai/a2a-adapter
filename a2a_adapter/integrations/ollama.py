@@ -85,9 +85,7 @@ class OllamaClient:
                 error_detail = error_json.get("error", error_detail)
             except Exception:
                 pass
-            raise RuntimeError(
-                f"Ollama error for model '{self.model}': {error_detail}"
-            ) from e
+            raise RuntimeError(f"Ollama error for model '{self.model}': {error_detail}") from e
 
     async def chat_stream(self, user_input: str) -> AsyncIterator[str]:
         """Stream response tokens from Ollama.
@@ -130,9 +128,7 @@ class OllamaClient:
                 error_detail = error_json.get("error", error_detail)
             except Exception:
                 pass
-            raise RuntimeError(
-                f"Ollama error for model '{self.model}': {error_detail}"
-            ) from e
+            raise RuntimeError(f"Ollama error for model '{self.model}': {error_detail}") from e
 
     async def close(self) -> None:
         """Close the HTTP client."""

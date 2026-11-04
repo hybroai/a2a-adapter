@@ -24,7 +24,9 @@ def make_message_send_params(text: str, context_id: str | None = None) -> SendMe
     )
 
 
-def make_message_send_params_with_dict_text(data: dict, context_id: str | None = None) -> SendMessageRequest:
+def make_message_send_params_with_dict_text(
+    data: dict, context_id: str | None = None
+) -> SendMessageRequest:
     """Helper to create SendMessageRequest where text is a dict (edge case)."""
     # Create a mock Part where text returns a dict
     mock_part = MagicMock()
@@ -103,7 +105,7 @@ class TestCrewAIAdapterDictTextHandling:
         # Create params where text is a dict (edge case)
         params = make_message_send_params_with_dict_text(
             {"customer_domain": "example.com", "project_description": "Test project"},
-            context_id="ctx-123"
+            context_id="ctx-123",
         )
         payload = await adapter.to_framework(params)
 
@@ -118,10 +120,7 @@ class TestCrewAIAdapterDictTextHandling:
         adapter = CrewAIAgentAdapter(crew=mock_crew, parse_json_input=False)
 
         # Create params where text is a dict
-        params = make_message_send_params_with_dict_text(
-            {"key": "value"},
-            context_id="ctx-123"
-        )
+        params = make_message_send_params_with_dict_text({"key": "value"}, context_id="ctx-123")
         raw_input = adapter.extract_raw_input(params)
 
         # Should be a JSON string
@@ -139,10 +138,9 @@ class TestCrewAIAdapterJSONParsing:
         mock_crew = MagicMock()
         adapter = CrewAIAgentAdapter(crew=mock_crew)  # parse_json_input=True by default
 
-        json_input = json.dumps({
-            "customer_domain": "example.com",
-            "project_description": "Build a marketing strategy"
-        })
+        json_input = json.dumps(
+            {"customer_domain": "example.com", "project_description": "Build a marketing strategy"}
+        )
         params = make_message_send_params(json_input, context_id="ctx-456")
         payload = await adapter.to_framework(params)
 
@@ -212,9 +210,7 @@ class TestCrewAIAdapterInputMapper:
             return {"overridden": True}
 
         adapter = CrewAIAgentAdapter(
-            crew=mock_crew,
-            input_mapper=override_mapper,
-            parse_json_input=True
+            crew=mock_crew, input_mapper=override_mapper, parse_json_input=True
         )
 
         json_input = json.dumps({"customer_domain": "example.com"})
@@ -252,7 +248,7 @@ class TestCrewAIAdapterDefaultInputs:
         mock_crew = MagicMock()
         adapter = CrewAIAgentAdapter(
             crew=mock_crew,
-            default_inputs={"default_key": "default_value", "customer_domain": "default.com"}
+            default_inputs={"default_key": "default_value", "customer_domain": "default.com"},
         )
 
         # JSON input overrides customer_domain but default_key should remain
@@ -270,7 +266,7 @@ class TestCrewAIAdapterDefaultInputs:
         adapter = CrewAIAgentAdapter(
             crew=mock_crew,
             default_inputs={"customer_domain": "default.com"},
-            parse_json_input=False
+            parse_json_input=False,
         )
 
         params = make_message_send_params("plain text query")

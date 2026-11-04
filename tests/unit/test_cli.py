@@ -199,9 +199,7 @@ def test_cli_rejects_adapter_managed_native_options(tmp_path, agent, managed_opt
 
 
 @pytest.mark.parametrize("native_option", ["-print", "-color", "-pignored"])
-def test_pi_cli_forwards_single_dash_words_that_start_with_managed_flags(
-    tmp_path, native_option
-):
+def test_pi_cli_forwards_single_dash_words_that_start_with_managed_flags(tmp_path, native_option):
     """Pi matches flags exactly, so -print is not its managed -p."""
     with patch("a2a_adapter.cli.serve_agent") as serve:
         main(["pi", "--cwd", str(tmp_path), "--", native_option])

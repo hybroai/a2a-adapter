@@ -17,9 +17,7 @@ class StubAdapter(BaseA2AAdapter):
     def __init__(self, response: str = "hello"):
         self._response = response
 
-    async def invoke(
-        self, user_input: str, context_id: str | None = None, **kwargs
-    ) -> str:
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         return self._response
 
 
@@ -29,13 +27,8 @@ class StreamingStubAdapter(BaseA2AAdapter):
     def __init__(self, chunks: list[str | Part]):
         self._chunks = chunks
 
-    async def invoke(
-        self, user_input: str, context_id: str | None = None, **kwargs
-    ) -> str:
-        return "".join(
-            c if isinstance(c, str) else (c.text or "")
-            for c in self._chunks
-        )
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
+        return "".join(c if isinstance(c, str) else (c.text or "") for c in self._chunks)
 
     async def stream(
         self, user_input: str, context_id: str | None = None, **kwargs
@@ -47,9 +40,7 @@ class StreamingStubAdapter(BaseA2AAdapter):
 class FailingAdapter(BaseA2AAdapter):
     """Adapter that raises on invoke."""
 
-    async def invoke(
-        self, user_input: str, context_id: str | None = None, **kwargs
-    ) -> str:
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         raise RuntimeError("boom")
 
 
@@ -60,9 +51,7 @@ class FailingStreamAdapter(BaseA2AAdapter):
         self._ok_chunks = ok_chunks
         self._error = error or RuntimeError("stream exploded")
 
-    async def invoke(
-        self, user_input: str, context_id: str | None = None, **kwargs
-    ) -> str:
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         raise RuntimeError("invoke not supported")
 
     async def stream(

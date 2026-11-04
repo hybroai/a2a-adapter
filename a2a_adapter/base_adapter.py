@@ -91,6 +91,7 @@ class CommandResult:
     single argument to 128 KiB (``MAX_ARG_STRLEN``), so large prompts passed on
     the command line fail with ``OSError: [Errno 7] Argument list too long``.
     """
+
     args: list[str]
     used_resume: bool
     stdin: str | None = None
@@ -99,6 +100,7 @@ class CommandResult:
 @dataclass(frozen=True, slots=True)
 class ParseResult:
     """Output of _parse_invoke_output() — response text + optional session ID."""
+
     text: str
     session_id: str | None = None
 
@@ -106,6 +108,7 @@ class ParseResult:
 @dataclass(frozen=True, slots=True)
 class StreamEvent:
     """Output of _handle_stream_line() — one parsed stdout line."""
+
     text: str | None = None
     session_id: str | None = None
     error: str | None = None
@@ -267,7 +270,7 @@ class BaseA2AAdapter(ABC):
 
     async def cancel(self, context_id: str | None = None, **kwargs) -> None:
         """Cancel execution. Two-set mechanism if super().__init__() was called."""
-        if not getattr(self, '_cli_runtime_enabled', False):
+        if not getattr(self, "_cli_runtime_enabled", False):
             return
 
         context = kwargs.get("context")
@@ -286,7 +289,7 @@ class BaseA2AAdapter(ABC):
 
     async def close(self) -> None:
         """Kill all active subprocesses. No-op if super().__init__() wasn't called."""
-        if not getattr(self, '_cli_runtime_enabled', False):
+        if not getattr(self, "_cli_runtime_enabled", False):
             return
 
         for task_id, proc in list(self._active_processes.items()):
@@ -313,16 +316,12 @@ class BaseA2AAdapter(ABC):
         # 1. Cancel check
         if task_id in self._cancelled_tasks:
             self._cancelled_tasks.discard(task_id)
-            raise CancelledByAdapterError(
-                f"Task {task_id} was cancelled before execution started"
-            )
+            raise CancelledByAdapterError(f"Task {task_id} was cancelled before execution started")
 
         # 2. Build command (subclass hook)
         cmd_result = self._build_command(user_input, context_key)
         logger.debug("Executing command: %s", " ".join(cmd_result.args))
-        stdin_bytes = (
-            cmd_result.stdin.encode("utf-8") if cmd_result.stdin is not None else None
-        )
+        stdin_bytes = cmd_result.stdin.encode("utf-8") if cmd_result.stdin is not None else None
 
         # 3. Spawn
         try:
@@ -337,9 +336,7 @@ class BaseA2AAdapter(ABC):
             )
         except FileNotFoundError:
             if not os.path.isdir(self.working_dir):
-                raise FileNotFoundError(
-                    f"Working directory does not exist: '{self.working_dir}'"
-                )
+                raise FileNotFoundError(f"Working directory does not exist: '{self.working_dir}'")
             raise FileNotFoundError(self._binary_not_found_message())
 
         # 4. Track
@@ -356,9 +353,7 @@ class BaseA2AAdapter(ABC):
                 if proc.returncode is None:
                     proc.kill()
                     await proc.wait()
-                raise RuntimeError(
-                    f"Command timed out after {self.timeout} seconds"
-                )
+                raise RuntimeError(f"Command timed out after {self.timeout} seconds")
             except asyncio.CancelledError:
                 # Task cancelled (tasks/cancel or shutdown): don't orphan the child
                 self._killed_tasks.discard(task_id)
@@ -373,9 +368,7 @@ class BaseA2AAdapter(ABC):
         if proc.returncode is not None and proc.returncode < 0:
             if task_id in self._killed_tasks:
                 self._killed_tasks.discard(task_id)
-                raise CancelledByAdapterError(
-                    f"Task {task_id} was killed by cancel request"
-                )
+                raise CancelledByAdapterError(f"Task {task_id} was killed by cancel request")
 
         stdout_text = stdout_bytes.decode("utf-8", errors="replace")
         stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
@@ -398,16 +391,16 @@ class BaseA2AAdapter(ABC):
             self._sessions.pop(context_key, None)
             self._save_sessions()
             return await self._run_subprocess(
-                context_key, task_id,
-                user_input=user_input, allow_retry=False,
+                context_key,
+                task_id,
+                user_input=user_input,
+                allow_retry=False,
             )
 
         # 7. Non-zero exit — prefer the CLI's structured error over stderr noise
         if proc.returncode != 0:
             detail = self._extract_error(stdout_text) or stderr_text or "(no stderr)"
-            raise RuntimeError(
-                f"Command failed with exit code {proc.returncode}: {detail}"
-            )
+            raise RuntimeError(f"Command failed with exit code {proc.returncode}: {detail}")
 
         output_text = self._select_invoke_output(stdout_text, stderr_text)
         if not output_text.strip():
@@ -435,9 +428,7 @@ class BaseA2AAdapter(ABC):
         # 1. Cancel check
         if task_id in self._cancelled_tasks:
             self._cancelled_tasks.discard(task_id)
-            raise CancelledByAdapterError(
-                f"Task {task_id} was cancelled before execution started"
-            )
+            raise CancelledByAdapterError(f"Task {task_id} was cancelled before execution started")
 
         # 2. Build command
         cmd_result = self._build_command(user_input, context_key)
@@ -456,9 +447,7 @@ class BaseA2AAdapter(ABC):
             )
         except FileNotFoundError:
             if not os.path.isdir(self.working_dir):
-                raise FileNotFoundError(
-                    f"Working directory does not exist: '{self.working_dir}'"
-                )
+                raise FileNotFoundError(f"Working directory does not exist: '{self.working_dir}'")
             raise FileNotFoundError(self._binary_not_found_message())
 
         # 4. Track
@@ -488,9 +477,7 @@ class BaseA2AAdapter(ABC):
         try:
             assert proc.stdout is not None
             while True:
-                line = await asyncio.wait_for(
-                    proc.stdout.readline(), timeout=self.timeout
-                )
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=self.timeout)
                 if not line:
                     break
                 text = line.decode("utf-8", errors="replace").strip()
@@ -514,9 +501,7 @@ class BaseA2AAdapter(ABC):
             aborted = True
             if proc.returncode is None:
                 proc.kill()
-            raise RuntimeError(
-                f"Command timed out after {self.timeout} seconds"
-            )
+            raise RuntimeError(f"Command timed out after {self.timeout} seconds")
         except (GeneratorExit, asyncio.CancelledError):
             aborted = True
             if proc.returncode is None:
@@ -552,9 +537,7 @@ class BaseA2AAdapter(ABC):
         if proc.returncode is not None and proc.returncode < 0:
             if task_id in self._killed_tasks:
                 self._killed_tasks.discard(task_id)
-                raise CancelledByAdapterError(
-                    f"Task {task_id} was killed by cancel request"
-                )
+                raise CancelledByAdapterError(f"Task {task_id} was killed by cancel request")
 
         # Stale retry — only when BOTH no output yielded and stderr empty.
         # If stderr has content, it signals a real error; don't mask it.
@@ -573,8 +556,10 @@ class BaseA2AAdapter(ABC):
             self._sessions.pop(context_key, None)
             self._save_sessions()
             async for chunk in self._run_subprocess_streaming(
-                context_key, task_id,
-                user_input=user_input, allow_retry=False,
+                context_key,
+                task_id,
+                user_input=user_input,
+                allow_retry=False,
             ):
                 yield chunk
             return
@@ -628,7 +613,8 @@ class BaseA2AAdapter(ABC):
         except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
             logger.warning(
                 "Could not load sessions from %s, starting with none: %s",
-                self._session_store_path, e,
+                self._session_store_path,
+                e,
             )
             self._sessions = {}
             return
@@ -636,7 +622,8 @@ class BaseA2AAdapter(ABC):
             self._sessions = {str(k): str(v) for k, v in data.items()}
             logger.debug(
                 "Loaded %d session(s) from %s",
-                len(self._sessions), self._session_store_path,
+                len(self._sessions),
+                self._session_store_path,
             )
         else:
             logger.warning(
@@ -669,7 +656,8 @@ class BaseA2AAdapter(ABC):
             tmp_path = None
             logger.debug(
                 "Saved %d session(s) to %s",
-                len(self._sessions), self._session_store_path,
+                len(self._sessions),
+                self._session_store_path,
             )
         except OSError as e:
             logger.warning("Could not save sessions to %s: %s", self._session_store_path, e)

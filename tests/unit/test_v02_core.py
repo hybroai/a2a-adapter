@@ -281,10 +281,14 @@ def test_serve_agent_prebuilt_card_not_overridden():
     from a2a.types import AgentCard, AgentCapabilities, AgentInterface
 
     custom_card = AgentCard(
-        name="Custom", description="",
-        version="1.0", capabilities=AgentCapabilities(streaming=False),
+        name="Custom",
+        description="",
+        version="1.0",
+        capabilities=AgentCapabilities(streaming=False),
         supported_interfaces=[AgentInterface(url="https://prod.example.com")],
-        skills=[], default_input_modes=["text"], default_output_modes=["text"],
+        skills=[],
+        default_input_modes=["text"],
+        default_output_modes=["text"],
     )
     with patch("a2a_adapter.server.uvicorn"):
         with patch("a2a_adapter.server.to_a2a") as mock_to_a2a:
@@ -309,10 +313,14 @@ def test_to_a2a_with_custom_card():
     from a2a.types import AgentCard, AgentCapabilities, AgentInterface
 
     card = AgentCard(
-        name="Custom", description="",
-        version="1.0", capabilities=AgentCapabilities(streaming=False),
+        name="Custom",
+        description="",
+        version="1.0",
+        capabilities=AgentCapabilities(streaming=False),
         supported_interfaces=[AgentInterface(url="http://x")],
-        skills=[], default_input_modes=["text"], default_output_modes=["text"],
+        skills=[],
+        default_input_modes=["text"],
+        default_output_modes=["text"],
     )
     app = to_a2a(MinimalAdapter(), agent_card=card)
     assert app is not None
@@ -425,6 +433,7 @@ def test_import_core_directly():
 
 def test_import_adapter_lazily():
     from a2a_adapter import N8nAdapter, CallableAdapter
+
     assert N8nAdapter is not None
     assert CallableAdapter is not None
 
@@ -443,6 +452,7 @@ def test_import_all_adapters():
         HermesAdapter,
         PiAdapter,
     )
+
     adapters = [
         N8nAdapter,
         CallableAdapter,

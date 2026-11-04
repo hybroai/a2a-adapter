@@ -389,9 +389,7 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
         logger.debug("Created async task %s with state=working", task_id)
 
         # Start background processing with timeout
-        bg_task = asyncio.create_task(
-            self._execute_crew_with_timeout(task_id, context_id, params)
-        )
+        bg_task = asyncio.create_task(self._execute_crew_with_timeout(task_id, context_id, params))
         self._background_tasks[task_id] = bg_task
 
         # Clean up background task reference when done
@@ -575,7 +573,6 @@ class CrewAIAgentAdapter(BaseAgentAdapter):
             "message": raw_input,
             "context_id": context_id,
         }
-
 
     # ---------- Framework call ----------
 

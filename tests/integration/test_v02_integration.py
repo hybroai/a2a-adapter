@@ -169,19 +169,14 @@ async def test_message_send_basic(echo_app):
         # Agent response is in status.message (the completion message)
         status_msg = result["status"].get("message", {})
         assert status_msg.get("role") == "agent"
-        text_parts = [
-            p["text"] for p in status_msg.get("parts", [])
-            if p.get("kind") == "text"
-        ]
+        text_parts = [p["text"] for p in status_msg.get("parts", []) if p.get("kind") == "text"]
         assert any("Echo: Hi there" in t for t in text_parts)
 
         # Artifacts should also contain the response
         artifacts = result.get("artifacts", [])
         assert len(artifacts) > 0
         artifact_texts = [
-            p["text"] for a in artifacts
-            for p in a.get("parts", [])
-            if p.get("kind") == "text"
+            p["text"] for a in artifacts for p in a.get("parts", []) if p.get("kind") == "text"
         ]
         assert any("Echo: Hi there" in t for t in artifact_texts)
 
@@ -267,9 +262,7 @@ async def test_multiple_sequential_requests(echo_app):
         base_url="http://testserver",
     ) as client:
         for i in range(3):
-            resp = await client.post(
-                "/", json=make_send_payload(f"Message {i}")
-            )
+            resp = await client.post("/", json=make_send_payload(f"Message {i}"))
             assert resp.status_code == 200
             data = resp.json()
             assert data["result"]["status"]["state"] == "completed"

@@ -15,11 +15,8 @@ async def mock_callable(inputs: dict) -> str:
 @pytest.mark.asyncio
 async def test_load_callable_adapter():
     """Test loading a callable adapter."""
-    adapter = await load_a2a_agent({
-        "adapter": "callable",
-        "callable": mock_callable
-    })
-    
+    adapter = await load_a2a_agent({"adapter": "callable", "callable": mock_callable})
+
     assert isinstance(adapter, CallableAgentAdapter)
 
 
@@ -49,4 +46,3 @@ async def test_load_callable_adapter_missing_function():
     """Test that callable adapter requires callable function."""
     with pytest.raises(ValueError, match="callable adapter requires 'callable'"):
         await load_a2a_agent({"adapter": "callable"})
-

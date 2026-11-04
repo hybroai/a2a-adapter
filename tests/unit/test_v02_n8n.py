@@ -42,18 +42,14 @@ class TestRetryPolicy:
             return httpx.Response(200, json={"output": "ok"})
 
         handler, calls = _counting_handler(responder)
-        adapter = _adapter_with_transport(
-            handler, max_retries=2, retry_on_server_error=True
-        )
+        adapter = _adapter_with_transport(handler, max_retries=2, retry_on_server_error=True)
 
         assert await adapter._post_with_retry({"message": "hi"}) == {"output": "ok"}
         assert len(calls) == 3
 
     async def test_5xx_retries_exhausted_when_opted_in(self):
         handler, calls = _counting_handler(lambda req, n: httpx.Response(503))
-        adapter = _adapter_with_transport(
-            handler, max_retries=2, retry_on_server_error=True
-        )
+        adapter = _adapter_with_transport(handler, max_retries=2, retry_on_server_error=True)
 
         with pytest.raises(RuntimeError, match="503"):
             await adapter._post_with_retry({"message": "hi"})
@@ -77,9 +73,7 @@ class TestRetryPolicy:
             return httpx.Response(200, json={"output": "ok"})
 
         handler, calls = _counting_handler(responder)
-        adapter = _adapter_with_transport(
-            handler, max_retries=2, retry_on_server_error=True
-        )
+        adapter = _adapter_with_transport(handler, max_retries=2, retry_on_server_error=True)
 
         assert await adapter._post_with_retry({"message": "hi"}) == {"output": "ok"}
         assert len(calls) == 2
@@ -117,9 +111,7 @@ class TestRetryPolicy:
             return httpx.Response(200, json={"output": "ok"})
 
         handler, calls = _counting_handler(responder)
-        adapter = _adapter_with_transport(
-            handler, max_retries=2, retry_on_server_error=True
-        )
+        adapter = _adapter_with_transport(handler, max_retries=2, retry_on_server_error=True)
 
         assert await adapter._post_with_retry({"message": "hi"}) == {"output": "ok"}
         assert len(calls) == 2
@@ -135,9 +127,7 @@ class TestRetryPolicy:
             def __init__(self, **kwargs):
                 created.update(kwargs)
 
-        monkeypatch.setattr(
-            "a2a_adapter.integrations.n8n.httpx.AsyncClient", FakeClient
-        )
+        monkeypatch.setattr("a2a_adapter.integrations.n8n.httpx.AsyncClient", FakeClient)
         await N8nAdapter(webhook_url=WEBHOOK)._get_client()
         assert created["limits"].keepalive_expiry < 5
 
@@ -222,21 +212,13 @@ class TestPayloadPrecedence:
         assert payload["metadata"] == {"context_id": "ctx-1", "tag": "x"}
 
     def test_client_metadata_context_id_overwritten_with_template_context_id(self):
-        adapter = N8nAdapter(
-            webhook_url=WEBHOOK, payload_template={"context_id": "fixed"}
-        )
-        payload = adapter._build_payload(
-            '{"metadata": {"context_id": "forged"}}', "ctx-1"
-        )
+        adapter = N8nAdapter(webhook_url=WEBHOOK, payload_template={"context_id": "fixed"})
+        payload = adapter._build_payload('{"metadata": {"context_id": "forged"}}', "ctx-1")
         assert payload["metadata"] == {"context_id": "ctx-1"}
 
     def test_template_metadata_wins_over_client_metadata(self):
-        adapter = N8nAdapter(
-            webhook_url=WEBHOOK, payload_template={"metadata": {"source": "op"}}
-        )
-        payload = adapter._build_payload(
-            '{"metadata": {"context_id": "forged"}}', "ctx-1"
-        )
+        adapter = N8nAdapter(webhook_url=WEBHOOK, payload_template={"metadata": {"source": "op"}})
+        payload = adapter._build_payload('{"metadata": {"context_id": "forged"}}', "ctx-1")
         assert payload["metadata"] == {"source": "op"}
         assert payload["context_id"] == "ctx-1"
 
@@ -251,9 +233,7 @@ class TestPayloadPrecedence:
         assert payload["n"] == 1
 
     def test_template_context_id_still_wins(self):
-        adapter = N8nAdapter(
-            webhook_url=WEBHOOK, payload_template={"context_id": "fixed"}
-        )
+        adapter = N8nAdapter(webhook_url=WEBHOOK, payload_template={"context_id": "fixed"})
         payload = adapter._build_payload('{"context_id": "forged"}', "ctx-1")
         assert payload["context_id"] == "fixed"
 

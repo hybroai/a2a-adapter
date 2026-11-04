@@ -18,13 +18,12 @@ from a2a_adapter import LangChainAdapter, serve_agent
 
 # --- Set up your LangChain chain (this is framework code, not adapter code) ---
 
-chain = (
-    ChatPromptTemplate.from_messages([
+chain = ChatPromptTemplate.from_messages(
+    [
         ("system", "You are a helpful AI assistant. Answer questions clearly and concisely."),
         ("user", "{input}"),
-    ])
-    | ChatOpenAI(model="gpt-4o-mini", streaming=True, temperature=0.7)
-)
+    ]
+) | ChatOpenAI(model="gpt-4o-mini", streaming=True, temperature=0.7)
 
 # --- A2A: 3 lines ---
 

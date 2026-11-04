@@ -20,7 +20,7 @@ class MockAdapter(BaseAgentAdapter):
         return Message(
             role=Role.ROLE_AGENT,
             message_id="test-response-id",
-            parts=[Part(text=framework_output["output"])]
+            parts=[Part(text=framework_output["output"])],
         )
 
 
@@ -39,11 +39,11 @@ def make_message_send_params(text: str) -> SendMessageRequest:
 async def test_adapter_handle():
     """Test basic adapter handle method."""
     adapter = MockAdapter()
-    
+
     params = make_message_send_params("test message")
-    
+
     result = await adapter.handle(params)
-    
+
     assert isinstance(result, Message)
     assert result.role == Role.ROLE_AGENT
     assert result.parts[0].text == "response"
@@ -59,9 +59,9 @@ def test_adapter_supports_streaming_default():
 async def test_adapter_handle_stream_not_implemented():
     """Test that handle_stream raises NotImplementedError by default."""
     adapter = MockAdapter()
-    
+
     params = make_message_send_params("test message")
-    
+
     with pytest.raises(NotImplementedError):
         await adapter.handle_stream(params)
 
@@ -76,7 +76,7 @@ def test_adapter_supports_async_tasks_default():
 async def test_adapter_get_task_not_implemented():
     """Test that get_task raises NotImplementedError by default."""
     adapter = MockAdapter()
-    
+
     with pytest.raises(NotImplementedError):
         await adapter.get_task("some-task-id")
 
@@ -85,6 +85,6 @@ async def test_adapter_get_task_not_implemented():
 async def test_adapter_cancel_task_not_implemented():
     """Test that cancel_task raises NotImplementedError by default."""
     adapter = MockAdapter()
-    
+
     with pytest.raises(NotImplementedError):
         await adapter.cancel_task("some-task-id")

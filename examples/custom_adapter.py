@@ -23,10 +23,10 @@ class SentimentAdapter(BaseA2AAdapter):
         neg = len(words & self.NEGATIVE)
 
         if pos > neg:
-            return f"Positive sentiment detected: \"{user_input}\""
+            return f'Positive sentiment detected: "{user_input}"'
         elif neg > pos:
-            return f"Negative sentiment detected: \"{user_input}\""
-        return f"Neutral sentiment detected: \"{user_input}\""
+            return f'Negative sentiment detected: "{user_input}"'
+        return f'Neutral sentiment detected: "{user_input}"'
 
     def get_metadata(self) -> AdapterMetadata:
         return AdapterMetadata(

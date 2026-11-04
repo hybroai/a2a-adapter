@@ -129,11 +129,15 @@ class LangChainAdapter(BaseA2AAdapter):
         """Invoke the runnable and return a text response."""
         inputs = self._build_inputs(user_input, context_id)
         result = await run_with_timeout(
-            self.runnable.ainvoke(inputs), self.timeout, "LangChain runnable",
+            self.runnable.ainvoke(inputs),
+            self.timeout,
+            "LangChain runnable",
         )
         return self._extract_output(result)
 
-    async def stream(self, user_input: str, context_id: str | None = None, **kwargs) -> AsyncIterator[str]:
+    async def stream(
+        self, user_input: str, context_id: str | None = None, **kwargs
+    ) -> AsyncIterator[str]:
         """Stream tokens from the runnable via astream()."""
         inputs = self._build_inputs(user_input, context_id)
         chunks = self.runnable.astream(inputs)
@@ -456,9 +460,7 @@ class LangChainAgentAdapter(BaseAgentAdapter):
 
     # ---------- Streaming support ----------
 
-    async def handle_stream(
-        self, params: MessageSendParams
-    ) -> AsyncIterator[Dict[str, Any]]:
+    async def handle_stream(self, params: MessageSendParams) -> AsyncIterator[Dict[str, Any]]:
         """
         Handle a streaming A2A message request.
 
@@ -488,10 +490,12 @@ class LangChainAgentAdapter(BaseAgentAdapter):
                 # Yield SSE-compatible event
                 yield {
                     "event": "message",
-                    "data": json.dumps({
-                        "type": "content",
-                        "content": text,
-                    }),
+                    "data": json.dumps(
+                        {
+                            "type": "content",
+                            "content": text,
+                        }
+                    ),
                 }
 
         # Send final message with complete response
@@ -505,10 +509,16 @@ class LangChainAgentAdapter(BaseAgentAdapter):
         # Send completion event
         yield {
             "event": "done",
-            "data": json.dumps({
-                "status": "completed",
-                "message": final_message.model_dump() if hasattr(final_message, "model_dump") else str(final_message),
-            }),
+            "data": json.dumps(
+                {
+                    "status": "completed",
+                    "message": (
+                        final_message.model_dump()
+                        if hasattr(final_message, "model_dump")
+                        else str(final_message)
+                    ),
+                }
+            ),
         }
 
         logger.debug("LangChain stream completed")

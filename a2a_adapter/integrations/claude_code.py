@@ -79,9 +79,10 @@ class ClaudeCodeAdapter(BaseA2AAdapter):
         if skip_permissions is not None:
             self.skip_permissions = skip_permissions
         else:
-            self.skip_permissions = os.getenv(
-                "A2A_CLAUDE_SKIP_PERMISSIONS", ""
-            ).lower() in ("1", "true")
+            self.skip_permissions = os.getenv("A2A_CLAUDE_SKIP_PERMISSIONS", "").lower() in (
+                "1",
+                "true",
+            )
         if self.skip_permissions:
             logger.warning(
                 "ClaudeCodeAdapter: --dangerously-skip-permissions is ENABLED. "
@@ -91,17 +92,13 @@ class ClaudeCodeAdapter(BaseA2AAdapter):
 
     # ──── Public Interface ────
 
-    async def invoke(
-        self, user_input: str, context_id: str | None = None, **kwargs
-    ) -> str:
+    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         context = kwargs.get("context")
         key = context_id or "_default"
         task_id = context.task_id if context else key
         lock = self._get_context_lock(key)
         async with lock:
-            return await self._run_subprocess(
-                key, task_id, user_input=user_input
-            )
+            return await self._run_subprocess(key, task_id, user_input=user_input)
 
     async def stream(
         self, user_input: str, context_id: str | None = None, **kwargs
@@ -111,9 +108,7 @@ class ClaudeCodeAdapter(BaseA2AAdapter):
         task_id = context.task_id if context else key
         lock = self._get_context_lock(key)
         async with lock:
-            async for chunk in self._run_subprocess_streaming(
-                key, task_id, user_input=user_input
-            ):
+            async for chunk in self._run_subprocess_streaming(key, task_id, user_input=user_input):
                 yield chunk
 
     def get_metadata(self) -> AdapterMetadata:
@@ -136,9 +131,11 @@ class ClaudeCodeAdapter(BaseA2AAdapter):
             # The prompt goes through stdin (see CommandResult.stdin): `claude -p`
             # reads it from there when no prompt argument is given.
             "-p",
-            "--output-format", "stream-json",
+            "--output-format",
+            "stream-json",
             "--verbose",
-            "--disallowedTools", "AskUserQuestion",
+            "--disallowedTools",
+            "AskUserQuestion",
         ]
         if self.skip_permissions:
             cmd.append("--dangerously-skip-permissions")
@@ -147,9 +144,7 @@ class ClaudeCodeAdapter(BaseA2AAdapter):
             cmd.extend(["--resume", session_id])
         return CommandResult(args=cmd, used_resume=bool(session_id), stdin=message)
 
-    def _parse_invoke_output(
-        self, stdout_text: str, context_key: str
-    ) -> ParseResult:
+    def _parse_invoke_output(self, stdout_text: str, context_key: str) -> ParseResult:
         accumulated: list[str] = []
         session_id: str | None = None
 

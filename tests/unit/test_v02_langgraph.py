@@ -362,12 +362,14 @@ def test_to_a2a_builds_app():
 
 
 def test_load_adapter_langgraph():
-    adapter = load_adapter({
-        "adapter": "langgraph",
-        "graph": MockGraph(),
-        "input_key": "messages",
-        "timeout": 120,
-    })
+    adapter = load_adapter(
+        {
+            "adapter": "langgraph",
+            "graph": MockGraph(),
+            "input_key": "messages",
+            "timeout": 120,
+        }
+    )
     assert isinstance(adapter, LangGraphAdapter)
     assert adapter.input_key == "messages"
     assert adapter.timeout == 120
@@ -379,6 +381,7 @@ def test_load_adapter_langgraph():
 def test_flat_import():
     """Verify from a2a_adapter import LangGraphAdapter works."""
     from a2a_adapter import LangGraphAdapter as LG
+
     assert LG is LangGraphAdapter
 
 
@@ -449,7 +452,9 @@ async def test_user_config_kept_and_merged():
 async def test_user_supplied_thread_id_wins():
     graph = ConfigRecordingGraph()
     adapter = LangGraphAdapter(
-        graph=graph, input_key="query", config={"configurable": {"thread_id": "fixed"}},
+        graph=graph,
+        input_key="query",
+        config={"configurable": {"thread_id": "fixed"}},
     )
     await adapter.invoke("hi", context_id="ctx-1")
     assert graph.configs == [{"configurable": {"thread_id": "fixed"}}]
@@ -530,41 +535,49 @@ async def test_stream_requests_updates_mode():
 async def test_stream_emits_each_ai_message_once():
     """A tool-using agent: AI messages stream once each, tool output and
     the user's input are not echoed as the reply."""
-    graph = UpdatesGraph([
-        {"agent": {"messages": [TypedMessage("Let me check.")]}},
-        {"tools": {"messages": [TypedMessage("42", type="tool")]}},
-        {"agent": {"messages": [TypedMessage("The answer is 42.")]}},
-    ])
+    graph = UpdatesGraph(
+        [
+            {"agent": {"messages": [TypedMessage("Let me check.")]}},
+            {"tools": {"messages": [TypedMessage("42", type="tool")]}},
+            {"agent": {"messages": [TypedMessage("The answer is 42.")]}},
+        ]
+    )
     chunks = await _collect(LangGraphAdapter(graph=graph))
     assert "".join(chunks) == "Let me check.\n\nThe answer is 42."
 
 
 @pytest.mark.asyncio
 async def test_stream_skips_human_and_empty_ai_messages():
-    graph = UpdatesGraph([
-        {"intake": {"messages": [TypedMessage("hi", type="human")]}},
-        {"agent": {"messages": [TypedMessage("")]}},  # tool-call-only message
-        {"agent": {"messages": [{"role": "assistant", "content": "done"}]}},
-    ])
+    graph = UpdatesGraph(
+        [
+            {"intake": {"messages": [TypedMessage("hi", type="human")]}},
+            {"agent": {"messages": [TypedMessage("")]}},  # tool-call-only message
+            {"agent": {"messages": [{"role": "assistant", "content": "done"}]}},
+        ]
+    )
     assert await _collect(LangGraphAdapter(graph=graph)) == ["done"]
 
 
 @pytest.mark.asyncio
 async def test_stream_skips_interrupts_and_empty_updates():
-    graph = UpdatesGraph([
-        {"noop": None},
-        {"__interrupt__": ("waiting",)},
-        {"writer": {"output": "draft"}},
-    ])
+    graph = UpdatesGraph(
+        [
+            {"noop": None},
+            {"__interrupt__": ("waiting",)},
+            {"writer": {"output": "draft"}},
+        ]
+    )
     assert await _collect(LangGraphAdapter(graph=graph)) == ["draft"]
 
 
 @pytest.mark.asyncio
 async def test_stream_state_key_on_node_updates():
-    graph = UpdatesGraph([
-        {"a": {"report": "part one", "output": "ignored"}},
-        {"b": {"report": "part two"}},
-    ])
+    graph = UpdatesGraph(
+        [
+            {"a": {"report": "part one", "output": "ignored"}},
+            {"b": {"report": "part two"}},
+        ]
+    )
     chunks = await _collect(LangGraphAdapter(graph=graph, state_key="report"))
     assert "".join(chunks) == "part one\n\npart two"
 
@@ -643,9 +656,11 @@ def test_streaming_flag_default_auto_detects():
 @pytest.mark.asyncio
 async def test_stream_fan_out_list_updates():
     """Send/map-reduce fan-out groups same-named node writes in a list."""
-    graph = UpdatesGraph([
-        {"worker": [{"output": "a"}, {"output": "b"}]},
-    ])
+    graph = UpdatesGraph(
+        [
+            {"worker": [{"output": "a"}, {"output": "b"}]},
+        ]
+    )
     assert "".join(await _collect(LangGraphAdapter(graph=graph))) == "a\n\nb"
 
 
@@ -666,10 +681,12 @@ async def test_stream_no_reducer_full_history_emits_only_latest_reply():
 @pytest.mark.asyncio
 async def test_stream_message_tuples_and_strings():
     """add_messages accepts (role, content) tuples and bare strings (human)."""
-    graph = UpdatesGraph([
-        {"intake": {"messages": [("user", "question"), "also human"]}},
-        {"agent": {"messages": [("assistant", "hi")]}},
-    ])
+    graph = UpdatesGraph(
+        [
+            {"intake": {"messages": [("user", "question"), "also human"]}},
+            {"agent": {"messages": [("assistant", "hi")]}},
+        ]
+    )
     assert await _collect(LangGraphAdapter(graph=graph)) == ["hi"]
 
 
@@ -698,11 +715,27 @@ class RoleMessage:
 
 @pytest.mark.asyncio
 async def test_stream_skips_non_ai_chunks_and_chat_messages():
-    graph = UpdatesGraph([
-        {"agent": {"messages": [TypedMessage("reply"), TypedMessage("raw", type="ToolMessageChunk")]}},
-        {"agent": {"messages": [TypedMessage("more", type="AIMessageChunk"), RoleMessage("q", "user")]}},
-        {"agent": {"messages": [RoleMessage("chat reply", "assistant")]}},
-    ])
+    graph = UpdatesGraph(
+        [
+            {
+                "agent": {
+                    "messages": [
+                        TypedMessage("reply"),
+                        TypedMessage("raw", type="ToolMessageChunk"),
+                    ]
+                }
+            },
+            {
+                "agent": {
+                    "messages": [
+                        TypedMessage("more", type="AIMessageChunk"),
+                        RoleMessage("q", "user"),
+                    ]
+                }
+            },
+            {"agent": {"messages": [RoleMessage("chat reply", "assistant")]}},
+        ]
+    )
     chunks = await _collect(LangGraphAdapter(graph=graph))
     assert "".join(chunks) == "reply\n\nmore\n\nchat reply"
 

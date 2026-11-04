@@ -140,10 +140,7 @@ class TestLangChainAdapterOutputExtraction:
     async def test_from_framework_extracts_dict_with_output_key(self):
         """Test extraction from dict using configured output_key."""
         mock_runnable = MagicMock()
-        adapter = LangChainAgentAdapter(
-            runnable=mock_runnable,
-            output_key="custom_output"
-        )
+        adapter = LangChainAgentAdapter(runnable=mock_runnable, output_key="custom_output")
 
         params = make_message_send_params("hello")
         framework_output = {"custom_output": "extracted value", "other": "ignored"}
@@ -237,6 +234,7 @@ class TestLangChainAdapterStreaming:
     @pytest.mark.asyncio
     async def test_handle_stream_yields_events(self):
         """Test that handle_stream yields proper SSE events."""
+
         # Create mock runnable with async generator
         async def mock_astream(input_dict):
             chunks = ["Hello", " ", "World"]

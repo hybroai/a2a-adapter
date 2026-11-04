@@ -53,6 +53,7 @@ def fail(msg: str) -> None:
 
 # ──── A2A JSON-RPC helpers ────
 
+
 def make_send_request(message: str) -> dict:
     """Build a JSON-RPC message/send request."""
     return {
@@ -93,6 +94,7 @@ def make_stream_request(message: str) -> dict:
 
 # ──── Server launcher ────
 
+
 async def start_server(app, port: int) -> asyncio.Task:
     """Start uvicorn in background, return the task."""
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
@@ -102,9 +104,7 @@ async def start_server(app, port: int) -> asyncio.Task:
     for _ in range(50):
         try:
             async with httpx.AsyncClient() as c:
-                r = await c.get(
-                    f"http://127.0.0.1:{port}/.well-known/agent-card.json", timeout=2
-                )
+                r = await c.get(f"http://127.0.0.1:{port}/.well-known/agent-card.json", timeout=2)
                 if r.status_code == 200:
                     return task, server
         except (httpx.ConnectError, httpx.ReadError):
@@ -114,6 +114,7 @@ async def start_server(app, port: int) -> asyncio.Task:
 
 
 # ──── Tests ────
+
 
 async def test_agent_card(base_url: str, name: str) -> None:
     step(f"GET {name} agent card")
@@ -237,6 +238,7 @@ async def test_message_stream(base_url: str, name: str, message: str, timeout: f
 
 # ──── Main ────
 
+
 async def main():
     working_dir = os.getcwd()
     claude_port = find_free_port()
@@ -300,9 +302,7 @@ async def main():
             claude_url, "Claude Code", simple_prompt, timeout=120
         )
 
-        codex_send_text = await test_message_send(
-            codex_url, "Codex", simple_prompt, timeout=120
-        )
+        codex_send_text = await test_message_send(codex_url, "Codex", simple_prompt, timeout=120)
 
         # ── Test message/stream (Claude only, Codex doesn't support streaming) ──
         header("5. message/stream (stream)")
