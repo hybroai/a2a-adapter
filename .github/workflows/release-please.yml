@@ -1,0 +1,95 @@
+name: Release Please
+
+# On every push to main, release-please opens or updates a release PR that
+# bumps the version (pyproject.toml, a2a_adapter/__init__.py) and CHANGELOG.md
+# from the Conventional Commits merged since the last release. The sync-lock
+# job then commits the matching uv.lock to the open release PR on every run:
+# release-please's TOML updater has not updated uv.lock in practice, and
+# release-please does not report the PR when it leaves it unchanged. Merging
+# the PR creates the v<version> tag and GitHub Release.
+#
+# release-please acts with GITHUB_TOKEN, and GitHub starts no workflow for a
+# release that token creates, so publish.yml would never see the release
+# event. It is dispatched on the new tag instead: workflow_dispatch is exempt
+# from that rule, and publish.yml stays the top-level workflow that PyPI
+# trusted publishing is registered for.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    if: github.repository == 'hybroai/a2a-adapter'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  sync-lock:
+    needs: release-please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Find the open release PR
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --label "autorelease: pending" --json headRefName \
+            --jq '.[0].headRefName // ""')
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.find.outputs.branch != ''
+        with:
+          ref: ${{ steps.find.outputs.branch }}
+
+      - name: Set up uv
+        if: steps.find.outputs.branch != ''
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: '0.7.13'
+
+      - name: Commit the bumped version to uv.lock
+        if: steps.find.outputs.branch != ''
+        run: |
+          uv lock
+          if git diff --quiet uv.lock; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: sync uv.lock with the release version" uv.lock
+          git push
+
+  publish:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch publish.yml on the release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"

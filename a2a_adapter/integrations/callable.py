@@ -131,7 +131,9 @@ class CallableAdapter(BaseA2AAdapter):
         result = await run_with_timeout(self._call(inputs), self.timeout, "callable")
         return self._extract_text(result)
 
-    async def stream(self, user_input: str, context_id: str | None = None, **kwargs) -> AsyncIterator[str]:
+    async def stream(
+        self, user_input: str, context_id: str | None = None, **kwargs
+    ) -> AsyncIterator[str]:
         """Stream chunks from an async generator function."""
         inputs = {"message": user_input, "context_id": context_id}
         async for chunk in iter_with_timeout(self.func(inputs), self.timeout, "callable"):
@@ -144,7 +146,8 @@ class CallableAdapter(BaseA2AAdapter):
     def get_metadata(self) -> AdapterMetadata:
         """Return adapter metadata for AgentCard generation."""
         return AdapterMetadata(
-            name=self._name or (self.func.__name__ if hasattr(self.func, "__name__") else "CallableAdapter"),
+            name=self._name
+            or (self.func.__name__ if hasattr(self.func, "__name__") else "CallableAdapter"),
             description=self._description,
             streaming=self._streaming,
             skills=self._skills,
@@ -370,9 +373,7 @@ class CallableAgentAdapter(BaseAgentAdapter):
 
     # ---------- Streaming support ----------
 
-    async def handle_stream(
-        self, params: MessageSendParams
-    ) -> AsyncIterator[Dict[str, Any]]:
+    async def handle_stream(self, params: MessageSendParams) -> AsyncIterator[Dict[str, Any]]:
         """
         Handle a streaming A2A message request.
 
@@ -411,10 +412,12 @@ class CallableAgentAdapter(BaseAgentAdapter):
                 # Yield SSE-compatible event
                 yield {
                     "event": "message",
-                    "data": json.dumps({
-                        "type": "content",
-                        "content": text,
-                    }),
+                    "data": json.dumps(
+                        {
+                            "type": "content",
+                            "content": text,
+                        }
+                    ),
                 }
 
         # Send final message with complete response
@@ -428,10 +431,16 @@ class CallableAgentAdapter(BaseAgentAdapter):
         # Send completion event
         yield {
             "event": "done",
-            "data": json.dumps({
-                "status": "completed",
-                "message": final_message.model_dump() if hasattr(final_message, "model_dump") else str(final_message),
-            }),
+            "data": json.dumps(
+                {
+                    "status": "completed",
+                    "message": (
+                        final_message.model_dump()
+                        if hasattr(final_message, "model_dump")
+                        else str(final_message)
+                    ),
+                }
+            ),
         }
 
         logger.debug("Streaming call completed")

@@ -18,7 +18,7 @@ adapter = N8nAdapter(
     name="N8n Math Agent",
     description="Math operations powered by an n8n workflow",
     timeout=30,
-    message_field="event",       # Field name your n8n webhook expects
+    message_field="event",  # Field name your n8n webhook expects
     headers={
         # "Authorization": "Bearer YOUR_TOKEN",
     },

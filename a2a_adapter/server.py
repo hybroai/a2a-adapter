@@ -20,7 +20,7 @@ import httpx
 import uvicorn
 from a2a.server.context import ServerCallContext
 from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes, create_rest_routes
+from a2a.server.routes import create_jsonrpc_routes, create_rest_routes
 from a2a.server.request_handlers.response_helpers import agent_card_to_dict
 from a2a.server.tasks import (
     BasePushNotificationSender,
@@ -35,7 +35,11 @@ from a2a.types import (
     AgentProvider,
     AgentSkill,
 )
-from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH, PROTOCOL_VERSION_CURRENT, TransportProtocol
+from a2a.utils.constants import (
+    AGENT_CARD_WELL_KNOWN_PATH,
+    PROTOCOL_VERSION_CURRENT,
+    TransportProtocol,
+)
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -150,9 +154,7 @@ def to_a2a(
 
     routes = []
     routes.extend(_create_compat_agent_card_routes(agent_card))
-    routes.extend(
-        create_jsonrpc_routes(handler, rpc_url="/", enable_v0_3_compat=True)
-    )
+    routes.extend(create_jsonrpc_routes(handler, rpc_url="/", enable_v0_3_compat=True))
     routes.extend(create_rest_routes(handler, enable_v0_3_compat=True))
 
     return Starlette(routes=routes, lifespan=_lifespan)
@@ -255,18 +257,22 @@ def build_agent_card(
                 protocol_version=PROTOCOL_VERSION_CURRENT,
             )
         ],
-        skills=[
-            AgentSkill(
-                id=s.get("id", f"skill-{i}"),
-                name=s.get("name", ""),
-                description=s.get("description", ""),
-                tags=s.get("tags", []),
-                examples=s.get("examples"),
-                input_modes=s.get("input_modes"),
-                output_modes=s.get("output_modes"),
-            )
-            for i, s in enumerate(meta.skills)
-        ] if meta.skills else [],
+        skills=(
+            [
+                AgentSkill(
+                    id=s.get("id", f"skill-{i}"),
+                    name=s.get("name", ""),
+                    description=s.get("description", ""),
+                    tags=s.get("tags", []),
+                    examples=s.get("examples"),
+                    input_modes=s.get("input_modes"),
+                    output_modes=s.get("output_modes"),
+                )
+                for i, s in enumerate(meta.skills)
+            ]
+            if meta.skills
+            else []
+        ),
         default_input_modes=meta.input_modes,
         default_output_modes=meta.output_modes,
         provider=provider,

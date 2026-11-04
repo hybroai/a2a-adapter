@@ -190,9 +190,7 @@ class TestAdapterWithClient:
 
     @pytest.mark.asyncio
     async def test_stream_delegates_to_client(self, adapter, mock_client):
-        mock_client.chat_stream = MagicMock(
-            return_value=_async_iter(["Hello", " world"])
-        )
+        mock_client.chat_stream = MagicMock(return_value=_async_iter(["Hello", " world"]))
         chunks = []
         async for chunk in adapter.stream("Hi"):
             chunks.append(chunk)

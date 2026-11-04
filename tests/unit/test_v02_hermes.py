@@ -1,6 +1,5 @@
 """Tests for HermesAdapter (v0.2)."""
 
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -402,26 +401,33 @@ class TestEnsureSessionDb:
 class TestMakeAgent:
     def test_make_agent_passes_correct_kwargs(self, adapter):
         mock_ai_agent_cls = MagicMock()
-        mock_load_config = MagicMock(return_value={
-            "model": {"default": "fallback-model", "provider": "fallback-prov"},
-        })
-        mock_resolve = MagicMock(return_value={
-            "provider": "resolved-prov",
-            "api_mode": "chat_completions",
-            "base_url": "http://localhost:4000/v1",
-            "api_key": "sk-test",
-            "command": None,
-            "args": None,
-        })
+        mock_load_config = MagicMock(
+            return_value={
+                "model": {"default": "fallback-model", "provider": "fallback-prov"},
+            }
+        )
+        mock_resolve = MagicMock(
+            return_value={
+                "provider": "resolved-prov",
+                "api_mode": "chat_completions",
+                "base_url": "http://localhost:4000/v1",
+                "api_key": "sk-test",
+                "command": None,
+                "args": None,
+            }
+        )
 
         with patch("a2a_adapter.integrations.hermes.HermesAdapter._ensure_session_db") as mock_db:
             mock_db.return_value = _make_mock_session_db()
-            with patch.dict("sys.modules", {
-                "run_agent": MagicMock(AIAgent=mock_ai_agent_cls),
-                "hermes_cli": MagicMock(),
-                "hermes_cli.config": MagicMock(load_config=mock_load_config),
-                "hermes_cli.runtime_provider": MagicMock(resolve_runtime_provider=mock_resolve),
-            }):
+            with patch.dict(
+                "sys.modules",
+                {
+                    "run_agent": MagicMock(AIAgent=mock_ai_agent_cls),
+                    "hermes_cli": MagicMock(),
+                    "hermes_cli.config": MagicMock(load_config=mock_load_config),
+                    "hermes_cli.runtime_provider": MagicMock(resolve_runtime_provider=mock_resolve),
+                },
+            ):
                 adapter._make_agent("sess-abc")
 
         mock_ai_agent_cls.assert_called_once()
@@ -439,17 +445,22 @@ class TestMakeAgent:
         a._session_db = _make_mock_session_db()
 
         mock_ai_agent_cls = MagicMock()
-        mock_load_config = MagicMock(return_value={
-            "model": {"default": "config-model"},
-        })
+        mock_load_config = MagicMock(
+            return_value={
+                "model": {"default": "config-model"},
+            }
+        )
         mock_resolve = MagicMock(side_effect=Exception("no provider"))
 
-        with patch.dict("sys.modules", {
-            "run_agent": MagicMock(AIAgent=mock_ai_agent_cls),
-            "hermes_cli": MagicMock(),
-            "hermes_cli.config": MagicMock(load_config=mock_load_config),
-            "hermes_cli.runtime_provider": MagicMock(resolve_runtime_provider=mock_resolve),
-        }):
+        with patch.dict(
+            "sys.modules",
+            {
+                "run_agent": MagicMock(AIAgent=mock_ai_agent_cls),
+                "hermes_cli": MagicMock(),
+                "hermes_cli.config": MagicMock(load_config=mock_load_config),
+                "hermes_cli.runtime_provider": MagicMock(resolve_runtime_provider=mock_resolve),
+            },
+        ):
             a._make_agent("sess-x")
 
         kwargs = mock_ai_agent_cls.call_args[1]
@@ -463,12 +474,15 @@ class TestMakeAgent:
         mock_load_config = MagicMock(return_value={"model": "string-model"})
         mock_resolve = MagicMock(side_effect=Exception("no provider"))
 
-        with patch.dict("sys.modules", {
-            "run_agent": MagicMock(AIAgent=mock_ai_agent_cls),
-            "hermes_cli": MagicMock(),
-            "hermes_cli.config": MagicMock(load_config=mock_load_config),
-            "hermes_cli.runtime_provider": MagicMock(resolve_runtime_provider=mock_resolve),
-        }):
+        with patch.dict(
+            "sys.modules",
+            {
+                "run_agent": MagicMock(AIAgent=mock_ai_agent_cls),
+                "hermes_cli": MagicMock(),
+                "hermes_cli.config": MagicMock(load_config=mock_load_config),
+                "hermes_cli.runtime_provider": MagicMock(resolve_runtime_provider=mock_resolve),
+            },
+        ):
             a._make_agent("sess-str")
 
         kwargs = mock_ai_agent_cls.call_args[1]
@@ -482,12 +496,15 @@ class TestMakeAgent:
         mock_load_config = MagicMock(return_value={})
         mock_resolve = MagicMock(side_effect=RuntimeError("provider down"))
 
-        with patch.dict("sys.modules", {
-            "run_agent": MagicMock(AIAgent=mock_ai_agent_cls),
-            "hermes_cli": MagicMock(),
-            "hermes_cli.config": MagicMock(load_config=mock_load_config),
-            "hermes_cli.runtime_provider": MagicMock(resolve_runtime_provider=mock_resolve),
-        }):
+        with patch.dict(
+            "sys.modules",
+            {
+                "run_agent": MagicMock(AIAgent=mock_ai_agent_cls),
+                "hermes_cli": MagicMock(),
+                "hermes_cli.config": MagicMock(load_config=mock_load_config),
+                "hermes_cli.runtime_provider": MagicMock(resolve_runtime_provider=mock_resolve),
+            },
+        ):
             a._make_agent("sess-y")
 
         kwargs = mock_ai_agent_cls.call_args[1]
@@ -503,28 +520,34 @@ class TestMakeAgent:
 class TestRegistration:
     def test_flat_import(self):
         from a2a_adapter import HermesAdapter as HA
+
         assert HA is HermesAdapter
 
     def test_integrations_import(self):
         from a2a_adapter.integrations import HermesAdapter as HA
+
         assert HA is HermesAdapter
 
     def test_load_adapter(self):
         from a2a_adapter import load_adapter
+
         adapter = load_adapter({"adapter": "hermes", "model": "test-m"})
         assert isinstance(adapter, HermesAdapter)
         assert adapter._model == "test-m"
 
     def test_load_adapter_with_all_params(self):
         from a2a_adapter import load_adapter
-        adapter = load_adapter({
-            "adapter": "hermes",
-            "model": "claude-opus-4.6",
-            "provider": "openrouter",
-            "enabled_toolsets": ["hermes-cli"],
-            "max_workers": 2,
-            "name": "Loaded Hermes",
-        })
+
+        adapter = load_adapter(
+            {
+                "adapter": "hermes",
+                "model": "claude-opus-4.6",
+                "provider": "openrouter",
+                "enabled_toolsets": ["hermes-cli"],
+                "max_workers": 2,
+                "name": "Loaded Hermes",
+            }
+        )
         assert isinstance(adapter, HermesAdapter)
         assert adapter._model == "claude-opus-4.6"
         assert adapter._provider_name == "openrouter"

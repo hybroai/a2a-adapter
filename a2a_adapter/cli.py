@@ -201,9 +201,7 @@ def _option_name(value: str) -> str:
     return value.split("=", 1)[0]
 
 
-def _managed_option(
-    value: str, managed: set[str], *, glued_short: bool
-) -> str | None:
+def _managed_option(value: str, managed: set[str], *, glued_short: bool) -> str | None:
     option_name = _option_name(value)
     if option_name in managed:
         return option_name
@@ -223,9 +221,7 @@ def _validate_agent_args(
 ) -> None:
     managed = _MANAGED_OPTIONS[agent]
     for value in agent_args:
-        option = _managed_option(
-            value, managed, glued_short=agent in _GLUED_SHORT_OPTION_AGENTS
-        )
+        option = _managed_option(value, managed, glued_short=agent in _GLUED_SHORT_OPTION_AGENTS)
         if option is not None:
             parser.error(
                 f"{agent} option {option!r} is managed by a2a-adapter and cannot be passed after '--'"
@@ -257,7 +253,9 @@ def _skill(value: str) -> dict:
     # A2A requires at least one tag per skill; a2a-sdk warns on a missing or empty list.
     tags = skill.get("tags")
     if not isinstance(tags, list) or not tags or not all(isinstance(t, str) and t for t in tags):
-        raise argparse.ArgumentTypeError("--skill needs 'tags': a non-empty list of non-empty strings")
+        raise argparse.ArgumentTypeError(
+            "--skill needs 'tags': a non-empty list of non-empty strings"
+        )
     examples = skill.get("examples", [])
     if not isinstance(examples, list) or not all(isinstance(e, str) for e in examples):
         raise argparse.ArgumentTypeError("--skill 'examples' must be a list of strings")

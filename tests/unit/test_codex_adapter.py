@@ -14,7 +14,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from a2a_adapter.integrations.codex import CodexAdapter
-from a2a_adapter.base_adapter import AdapterMetadata, CommandResult, ParseResult, default_state_dir
+from a2a_adapter.base_adapter import CommandResult, ParseResult, default_state_dir
 from a2a_adapter.exceptions import CancelledByAdapterError
 from a2a_adapter.loader import load_adapter
 from a2a_adapter.server import build_agent_card, to_a2a
@@ -240,6 +240,7 @@ class TestBuildCommand:
 
     def test_bypass_approvals_logs_warning(self, tmp_path, caplog):
         import logging
+
         with caplog.at_level(logging.WARNING):
             CodexAdapter(
                 working_dir=str(tmp_path),
@@ -250,6 +251,7 @@ class TestBuildCommand:
 
     def test_skip_git_check_logs_warning(self, tmp_path, caplog):
         import logging
+
         with caplog.at_level(logging.WARNING):
             CodexAdapter(
                 working_dir=str(tmp_path),
@@ -293,36 +295,44 @@ class TestBuildCommand:
 
 class TestParseResult:
     def test_thread_started_extracts_thread_id(self, adapter):
-        stdout = "\n".join([
-            json.dumps(_thread_started_event("thread-123")),
-            json.dumps(_item_completed_event("some output")),
-        ])
+        stdout = "\n".join(
+            [
+                json.dumps(_thread_started_event("thread-123")),
+                json.dumps(_item_completed_event("some output")),
+            ]
+        )
         result = adapter._parse_invoke_output(stdout, "ctx-1")
         assert isinstance(result, ParseResult)
         assert result.session_id == "thread-123"
         assert result.text == "some output"
 
     def test_thread_started_nested_id(self, adapter):
-        stdout = "\n".join([
-            json.dumps(_thread_started_nested_event("thread-nested-1")),
-            json.dumps(_item_completed_event("some output")),
-        ])
+        stdout = "\n".join(
+            [
+                json.dumps(_thread_started_nested_event("thread-nested-1")),
+                json.dumps(_item_completed_event("some output")),
+            ]
+        )
         result = adapter._parse_invoke_output(stdout, "ctx-1")
         assert result.session_id == "thread-nested-1"
 
     def test_item_completed_extracts_text(self, adapter):
-        stdout = "\n".join([
-            json.dumps(_item_completed_event("Hello from Codex")),
-        ])
+        stdout = "\n".join(
+            [
+                json.dumps(_item_completed_event("Hello from Codex")),
+            ]
+        )
         result = adapter._parse_invoke_output(stdout, "ctx-1")
         assert result.text == "Hello from Codex"
         assert result.session_id is None
 
     def test_multiple_item_completed(self, adapter):
-        stdout = "\n".join([
-            json.dumps(_item_completed_event("Part 1")),
-            json.dumps(_item_completed_event("Part 2")),
-        ])
+        stdout = "\n".join(
+            [
+                json.dumps(_item_completed_event("Part 1")),
+                json.dumps(_item_completed_event("Part 2")),
+            ]
+        )
         result = adapter._parse_invoke_output(stdout, "ctx-1")
         assert "Part 1" in result.text
         assert "Part 2" in result.text
@@ -335,10 +345,12 @@ class TestParseResult:
             adapter._parse_invoke_output(stdout, "ctx-1")
 
     def test_mixed_events_correct_output(self, adapter):
-        stdout = "\n".join([
-            json.dumps(_thread_started_event("thread-mix")),
-            json.dumps(_item_completed_event("Response text")),
-        ])
+        stdout = "\n".join(
+            [
+                json.dumps(_thread_started_event("thread-mix")),
+                json.dumps(_item_completed_event("Response text")),
+            ]
+        )
         result = adapter._parse_invoke_output(stdout, "ctx-1")
         assert result.session_id == "thread-mix"
         assert result.text == "Response text"
@@ -375,10 +387,12 @@ class TestInvoke:
     @pytest.mark.asyncio
     async def test_invoke_success_with_thread_persistence(self, adapter, mock_proc):
         """Successful invoke persists thread_id."""
-        stdout = "\n".join([
-            json.dumps(_thread_started_event("thread-inv")),
-            json.dumps(_item_completed_event("Codex says hello")),
-        ])
+        stdout = "\n".join(
+            [
+                json.dumps(_thread_started_event("thread-inv")),
+                json.dumps(_item_completed_event("Codex says hello")),
+            ]
+        )
         mock_proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
         mock_proc.returncode = 0
 
@@ -387,7 +401,8 @@ class TestInvoke:
             return_value=mock_proc,
         ):
             result = await adapter.invoke(
-                "say hello", context_id="ctx-1",
+                "say hello",
+                context_id="ctx-1",
                 context=_make_context("task-1"),
             )
 
@@ -418,7 +433,8 @@ class TestInvoke:
         ):
             with pytest.raises(RuntimeError) as exc_info:
                 await adapter.invoke(
-                    "fail", context_id="ctx-1",
+                    "fail",
+                    context_id="ctx-1",
                     context=_make_context("task-1"),
                 )
 
@@ -435,7 +451,8 @@ class TestInvoke:
         ):
             with pytest.raises(RuntimeError, match="exit code 1"):
                 await adapter.invoke(
-                    "fail", context_id="ctx-1",
+                    "fail",
+                    context_id="ctx-1",
                     context=_make_context("task-1"),
                 )
 
@@ -451,7 +468,8 @@ class TestInvoke:
         ):
             with pytest.raises(RuntimeError, match="empty output"):
                 await adapter.invoke(
-                    "test", context_id="ctx-1",
+                    "test",
+                    context_id="ctx-1",
                     context=_make_context("task-1"),
                 )
 
@@ -463,7 +481,8 @@ class TestInvoke:
         ):
             with pytest.raises(FileNotFoundError, match="Codex binary not found"):
                 await adapter.invoke(
-                    "test", context_id="ctx-1",
+                    "test",
+                    context_id="ctx-1",
                     context=_make_context("task-1"),
                 )
 
@@ -481,7 +500,8 @@ class TestInvoke:
         ):
             with pytest.raises(FileNotFoundError, match="Working directory does not exist"):
                 await a.invoke(
-                    "test", context_id="ctx-1",
+                    "test",
+                    context_id="ctx-1",
                     context=_make_context("task-1"),
                 )
 
@@ -547,7 +567,8 @@ class TestPerContextSerial:
         ):
             task1 = asyncio.create_task(
                 adapter.invoke(
-                    "first", context_id="shared-ctx",
+                    "first",
+                    context_id="shared-ctx",
                     context=_make_context("task-A"),
                 )
             )
@@ -555,7 +576,8 @@ class TestPerContextSerial:
 
             task2 = asyncio.create_task(
                 adapter.invoke(
-                    "second", context_id="shared-ctx",
+                    "second",
+                    context_id="shared-ctx",
                     context=_make_context("task-B"),
                 )
             )
@@ -599,13 +621,15 @@ class TestPerContextSerial:
         ):
             task1 = asyncio.create_task(
                 adapter.invoke(
-                    "a", context_id="ctx-A",
+                    "a",
+                    context_id="ctx-A",
                     context=_make_context("task-A"),
                 )
             )
             task2 = asyncio.create_task(
                 adapter.invoke(
-                    "b", context_id="ctx-B",
+                    "b",
+                    context_id="ctx-B",
                     context=_make_context("task-B"),
                 )
             )
@@ -637,7 +661,8 @@ class TestCancelRunning:
         ):
             with pytest.raises(CancelledByAdapterError, match="killed by cancel"):
                 await adapter.invoke(
-                    "test", context_id="ctx-k",
+                    "test",
+                    context_id="ctx-k",
                     context=_make_context("task-kill"),
                 )
 
@@ -688,7 +713,8 @@ class TestCancelQueued:
         ) as mock_exec:
             with pytest.raises(CancelledByAdapterError, match="cancelled before execution"):
                 await adapter.invoke(
-                    "test", context_id="ctx-q",
+                    "test",
+                    context_id="ctx-q",
                     context=_make_context("task-q"),
                 )
 
@@ -733,10 +759,12 @@ class TestStaleSessionRetry:
                 proc.returncode = 1
             else:
                 # Second call: success (no resume)
-                stdout = "\n".join([
-                    json.dumps(_thread_started_event("new-thread")),
-                    json.dumps(_item_completed_event("retry success")),
-                ])
+                stdout = "\n".join(
+                    [
+                        json.dumps(_thread_started_event("new-thread")),
+                        json.dumps(_item_completed_event("retry success")),
+                    ]
+                )
                 proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
                 proc.returncode = 0
             return proc
@@ -746,7 +774,8 @@ class TestStaleSessionRetry:
             side_effect=mock_create_subprocess,
         ):
             result = await adapter.invoke(
-                "retry me", context_id="ctx-stale",
+                "retry me",
+                context_id="ctx-stale",
                 context=_make_context("task-retry"),
             )
 
@@ -772,7 +801,8 @@ class TestStaleSessionRetry:
             # Should NOT retry — signal kill is a real failure, not a stale session
             with pytest.raises(RuntimeError, match="exit code -15"):
                 await adapter.invoke(
-                    "signal test", context_id="ctx-sig",
+                    "signal test",
+                    context_id="ctx-sig",
                     context=_make_context("task-sig"),
                 )
 
@@ -794,7 +824,8 @@ class TestStaleSessionRetry:
         ):
             with pytest.raises(RuntimeError, match="exit code 1"):
                 await adapter.invoke(
-                    "no retry", context_id="ctx-nr",
+                    "no retry",
+                    context_id="ctx-nr",
                     context=_make_context("task-nr"),
                 )
 
@@ -817,7 +848,8 @@ class TestStaleSessionRetry:
         ):
             with pytest.raises(RuntimeError, match="Authentication failed"):
                 await adapter.invoke(
-                    "test", context_id="ctx-stderr",
+                    "test",
+                    context_id="ctx-stderr",
                     context=_make_context("task-stderr"),
                 )
 
@@ -847,7 +879,8 @@ class TestStaleSessionRetry:
         ):
             with pytest.raises(RuntimeError, match="exit code 1"):
                 await adapter.invoke(
-                    "double fail", context_id="ctx-double",
+                    "double fail",
+                    context_id="ctx-double",
                     context=_make_context("task-df"),
                 )
 
@@ -955,34 +988,40 @@ class TestMetadata:
 
 class TestLoaderIntegration:
     def test_load_adapter_codex(self, tmp_path):
-        a = load_adapter({
-            "adapter": "codex",
-            "working_dir": str(tmp_path),
-            "session_store_path": str(tmp_path / "s.json"),
-        })
+        a = load_adapter(
+            {
+                "adapter": "codex",
+                "working_dir": str(tmp_path),
+                "session_store_path": str(tmp_path / "s.json"),
+            }
+        )
         assert isinstance(a, CodexAdapter)
         assert a.working_dir == str(tmp_path)
 
     def test_load_adapter_with_options(self, tmp_path):
-        a = load_adapter({
-            "adapter": "codex",
-            "working_dir": str(tmp_path),
-            "timeout": 300,
-            "codex_path": "/opt/codex",
-            "session_store_path": str(tmp_path / "s.json"),
-        })
+        a = load_adapter(
+            {
+                "adapter": "codex",
+                "working_dir": str(tmp_path),
+                "timeout": 300,
+                "codex_path": "/opt/codex",
+                "session_store_path": str(tmp_path / "s.json"),
+            }
+        )
         assert isinstance(a, CodexAdapter)
         assert a.timeout == 300
         assert a.codex_path == "/opt/codex"
 
     def test_load_adapter_with_dangerous_flags(self, tmp_path):
-        a = load_adapter({
-            "adapter": "codex",
-            "working_dir": str(tmp_path),
-            "bypass_approvals": True,
-            "skip_git_check": True,
-            "session_store_path": str(tmp_path / "s.json"),
-        })
+        a = load_adapter(
+            {
+                "adapter": "codex",
+                "working_dir": str(tmp_path),
+                "bypass_approvals": True,
+                "skip_git_check": True,
+                "session_store_path": str(tmp_path / "s.json"),
+            }
+        )
         assert isinstance(a, CodexAdapter)
         assert a.bypass_approvals is True
         assert a.skip_git_check is True
@@ -1007,6 +1046,7 @@ class TestServerIntegration:
 
 def test_flat_import():
     from a2a_adapter import CodexAdapter as CX
+
     assert CX is CodexAdapter
 
 

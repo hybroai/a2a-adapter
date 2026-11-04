@@ -199,9 +199,7 @@ def test_cli_rejects_adapter_managed_native_options(tmp_path, agent, managed_opt
 
 
 @pytest.mark.parametrize("native_option", ["-print", "-color", "-pignored"])
-def test_pi_cli_forwards_single_dash_words_that_start_with_managed_flags(
-    tmp_path, native_option
-):
+def test_pi_cli_forwards_single_dash_words_that_start_with_managed_flags(tmp_path, native_option):
     """Pi matches flags exactly, so -print is not its managed -p."""
     with patch("a2a_adapter.cli.serve_agent") as serve:
         main(["pi", "--cwd", str(tmp_path), "--", native_option])
@@ -292,7 +290,14 @@ def test_dsh_cli_fails_fast_without_the_sdk(tmp_path, monkeypatch, capsys):
         with pytest.raises(SystemExit, match="2"):
             main(["dsh", "--cwd", str(tmp_path)])
     serve.assert_not_called()
-    assert "a2a-adapter[deepseek-harness]" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    # One command per installer, since upgrading never adds an extra.
+    for command in [
+        'uv tool install "a2a-adapter[deepseek-harness]"',
+        'pipx install --force "a2a-adapter[deepseek-harness]"',
+        'pip install "a2a-adapter[deepseek-harness]"',
+    ]:
+        assert command in err
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "1.5"])

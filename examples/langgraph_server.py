@@ -22,6 +22,7 @@ from a2a_adapter import LangGraphAdapter, serve_agent
 
 # ── Demo version: no LLM required ──
 
+
 class ResearchState(TypedDict):
     messages: Annotated[list, lambda x, y: x + y]
     research_topic: str
@@ -48,7 +49,9 @@ def create_demo_graph():
     def synthesize(state: ResearchState) -> ResearchState:
         topic = state.get("research_topic", "")
         results = state.get("search_results", "")
-        return {"final_answer": f"Research on '{topic}':\n{results}\n\nThis is a demo — use USE_LLM=true for real LLM responses."}
+        return {
+            "final_answer": f"Research on '{topic}':\n{results}\n\nThis is a demo — use USE_LLM=true for real LLM responses."
+        }
 
     wf = StateGraph(ResearchState)
     wf.add_node("extract", extract_topic)
@@ -62,6 +65,7 @@ def create_demo_graph():
 
 
 # ── LLM version: requires OpenAI ──
+
 
 def create_llm_graph():
     """LLM-powered chat workflow."""

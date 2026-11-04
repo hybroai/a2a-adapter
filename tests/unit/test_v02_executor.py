@@ -213,10 +213,16 @@ async def test_execute_streaming_basic():
 
         # First chunk: append=False, rest: append=True
         calls = updater_instance.add_artifact.call_args_list
-        assert calls[0].kwargs.get("append", calls[0][1].get("append") if len(calls[0]) > 1 else None) is not True or calls[0] == calls[0]  # first call
+        assert (
+            calls[0].kwargs.get("append", calls[0][1].get("append") if len(calls[0]) > 1 else None)
+            is not True
+            or calls[0] == calls[0]
+        )  # first call
         # Verify first chunk has append=False (not True)
         first_call_kwargs = calls[0][1] if len(calls[0]) > 1 else calls[0].kwargs
-        assert first_call_kwargs.get("append") is False or first_call_kwargs.get("append") is not True
+        assert (
+            first_call_kwargs.get("append") is False or first_call_kwargs.get("append") is not True
+        )
 
 
 @pytest.mark.asyncio
@@ -369,7 +375,9 @@ async def test_invoke_only_adapter_routes_to_invoke():
         MockUpdater.return_value = AsyncMock(spec=TaskUpdater)
 
         with patch.object(executor, "_execute_invoke", new_callable=AsyncMock) as mock_invoke:
-            with patch.object(executor, "_execute_streaming", new_callable=AsyncMock) as mock_stream:
+            with patch.object(
+                executor, "_execute_streaming", new_callable=AsyncMock
+            ) as mock_stream:
                 await executor.execute(ctx, queue)
                 mock_invoke.assert_awaited_once()
                 mock_stream.assert_not_awaited()
@@ -390,7 +398,9 @@ async def test_streaming_adapter_routes_to_stream():
         MockUpdater.return_value = AsyncMock(spec=TaskUpdater)
 
         with patch.object(executor, "_execute_invoke", new_callable=AsyncMock) as mock_invoke:
-            with patch.object(executor, "_execute_streaming", new_callable=AsyncMock) as mock_stream:
+            with patch.object(
+                executor, "_execute_streaming", new_callable=AsyncMock
+            ) as mock_stream:
                 await executor.execute(ctx, queue)
                 mock_stream.assert_awaited_once()
                 mock_invoke.assert_not_awaited()

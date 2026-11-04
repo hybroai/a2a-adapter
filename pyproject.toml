@@ -64,6 +64,8 @@ packages = ["a2a_adapter", "a2a_adapter.integrations"]
 [tool.black]
 line-length = 100
 target-version = ['py312']
+# Local Claude Code worktrees are other checkouts of this repo.
+extend-exclude = '^/\.claude/'
 
 [tool.ruff]
 line-length = 100
