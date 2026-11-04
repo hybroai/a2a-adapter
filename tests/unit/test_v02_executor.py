@@ -11,6 +11,7 @@ import pytest
 from a2a.server.tasks.task_updater import TaskUpdater
 
 from a2a_adapter.base_adapter import BaseA2AAdapter
+from a2a_adapter.exceptions import CancelledByAdapterError
 from a2a_adapter.executor import AdapterAgentExecutor
 
 
@@ -57,6 +58,17 @@ class FailingStreamAdapter(BaseA2AAdapter):
     async def stream(self, user_input, context_id=None, **kwargs):
         yield "partial"
         raise RuntimeError("stream crashed")
+
+
+class CancelledStreamAdapter(BaseA2AAdapter):
+    """Adapter whose stream() is cancelled after one chunk."""
+
+    async def invoke(self, user_input, context_id=None, **kwargs):
+        return "should not reach"
+
+    async def stream(self, user_input, context_id=None, **kwargs):
+        yield "partial"
+        raise CancelledByAdapterError("task-1 was cancelled")
 
 
 class CancellableAdapter(BaseA2AAdapter):
@@ -272,6 +284,30 @@ async def test_execute_stream_error():
         await executor.execute(ctx, queue)
 
         updater_instance.failed.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_stream_cancelled_sends_nothing_more():
+    """A stream cancelled by the adapter must not flush its held-back chunk.
+
+    cancel() has already emitted the canceled state, so an artifact sent now
+    would follow the task's terminal state.
+    """
+    adapter = CancelledStreamAdapter()
+    executor = AdapterAgentExecutor(adapter)
+
+    ctx = make_mock_context()
+    queue = make_mock_event_queue()
+
+    with patch("a2a_adapter.executor.TaskUpdater") as MockUpdater:
+        updater_instance = AsyncMock(spec=TaskUpdater)
+        MockUpdater.return_value = updater_instance
+
+        await executor.execute(ctx, queue)
+
+        updater_instance.add_artifact.assert_not_awaited()
+        updater_instance.failed.assert_not_awaited()
+        updater_instance.complete.assert_not_awaited()
 
 
 # ──── Test: Cancellation ────
