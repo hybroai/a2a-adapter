@@ -908,7 +908,7 @@ class TestPerContextSerial:
 class TestCancelRunning:
     @pytest.mark.asyncio
     async def test_cancel_kills_running_process(self, adapter):
-        """Start a long-running invoke(), call cancel(), verify CancelledByAdapterError."""
+        """Start a long-running invoke(), call cancel(), verify the process is killed."""
         started = asyncio.Event()
 
         async def blocking_communicate(input=None):

@@ -130,6 +130,8 @@ class DeepSeekHarnessHeadlessAdapter(BaseA2AAdapter):
         return ParseResult(text=stdout_text.strip(), session_id=None)
 
     def _binary_not_found_message(self) -> str:
+        if self.dsh_path is not None:
+            return f"dsh binary not found at '{self._launched}'. Check dsh_path."
         return (
             f"dsh binary not found at '{self._launched}'. Pass dsh_path, or "
             f"install the runtime that ships with the extra.\n{_INSTALL_COMMANDS}"
