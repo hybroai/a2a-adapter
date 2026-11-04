@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter, CommandResult, ParseResult
-from .deepseek_harness import DeepSeekHarnessAdapter
+from .deepseek_harness import _INSTALL_COMMANDS, DeepSeekHarnessAdapter
 
 
 class DeepSeekHarnessHeadlessAdapter(BaseA2AAdapter):
@@ -131,7 +131,6 @@ class DeepSeekHarnessHeadlessAdapter(BaseA2AAdapter):
 
     def _binary_not_found_message(self) -> str:
         return (
-            f"dsh binary not found at '{self._launched}'. Install it with "
-            'pip install "a2a-adapter[deepseek-harness]" (it ships with '
-            "deepseek-harness-runtime-bin) or pass dsh_path."
+            f"dsh binary not found at '{self._launched}'. Pass dsh_path, or "
+            f"install the runtime that ships with the extra.\n{_INSTALL_COMMANDS}"
         )

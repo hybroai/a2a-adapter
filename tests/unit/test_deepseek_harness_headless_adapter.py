@@ -230,8 +230,14 @@ class TestInvoke:
             "a2a_adapter.base_adapter.create_subprocess_exec",
             side_effect=FileNotFoundError("dsh"),
         ):
-            with pytest.raises(FileNotFoundError, match=r"a2a-adapter\[deepseek-harness\]"):
+            with pytest.raises(FileNotFoundError) as raised:
                 await adapter.invoke("hi", context_id="ctx", context=_context())
+        for command in [
+            'uv tool install "a2a-adapter[deepseek-harness]"',
+            'pipx install --force "a2a-adapter[deepseek-harness]"',
+            'pip install "a2a-adapter[deepseek-harness]"',
+        ]:
+            assert command in str(raised.value)
 
 
 class TestMetadataAndRegistration:

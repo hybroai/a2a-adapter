@@ -135,8 +135,9 @@ A2A_PI_COMMAND='npx tsx /path/to/pi/packages/coding-agent/src/cli.ts' \
 ```
 
 DeepSeek Harness runs through its Python SDK rather than a CLI, so it needs
-the extra (`uv tool install "a2a-adapter[deepseek-harness]"`) and
-`DEEPSEEK_API_KEY` in the environment. It takes no native options after `--`;
+the extra (`uv tool install "a2a-adapter[deepseek-harness]"`; upgrading an
+install made without it does not add it) and `DEEPSEEK_API_KEY` in the
+environment. It takes no native options after `--`;
 use `--model`, `--provider`, `--profile`, `--dsh-home`, `--reasoning-effort`,
 `--max-tokens` and `--startup-timeout` instead. Each A2A conversation
 (`contextId`) gets its own durable dsh session under `--dsh-home` (default:
