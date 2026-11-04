@@ -422,7 +422,8 @@ a2a-adapter/
 ### Python Style
 
 - Follow PEP 8
-- Use Black for formatting (line length: 100)
+- Use Black for formatting (line length: 100) and keep Ruff clean; CI runs
+  `uv run ruff check .` and `uv run black --check .`
 - Use type hints where possible
 - Write docstrings for public APIs (Google style)
 
