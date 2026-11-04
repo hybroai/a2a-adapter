@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.17] - 2026-11-03
 
 ### Added
 
@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   on stdin. It does not use dsh's `--session-id` resume, so every request is a
   fresh session and `contextId` carries no history; prefer
   `DeepSeekHarnessAdapter`. Library only, no CLI subcommand
+
+### Fixed
+
+- A streaming task cancelled mid-stream no longer sends its held-back chunk
+  after the canceled state; the executor now stops on
+  `CancelledByAdapterError` without flushing it
 
 ## [0.2.16] - 2026-11-03
 
