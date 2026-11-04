@@ -76,7 +76,7 @@ class FakeSession:
             session_id=self.id,
             final_response=sdk.final_response,
             finish_reason=sdk.finish_reason,
-            events=[],
+            events=list(sdk.events),
             notifications=[],
         )
 
@@ -148,6 +148,7 @@ class FakeSdk:
         self.run_error: BaseException | None = None
         self.final_response = "hello world"
         self.finish_reason: str | None = "completed"
+        self.events: list[dict] = []
 
     def create(self, **kwargs) -> FakeHarness:
         harness = FakeHarness(self, **kwargs)
@@ -200,7 +201,23 @@ class TestSessionKey:
     @pytest.mark.parametrize("context_id", ["has space", "-leading", "trailing.", "a/b", "x" * 101])
     def test_unsafe_context_id_is_hashed(self, context_id):
         digest = hashlib.sha256(context_id.encode("utf-8")).hexdigest()[:16]
-        assert DeepSeekHarnessAdapter._session_key(context_id) == f"a2a-{digest}"
+        assert DeepSeekHarnessAdapter._session_key(context_id) == f"a2ah-{digest}"
+
+    def test_ids_differing_only_in_case_stay_distinct_after_case_folding(self):
+        # dsh names session directories after the id, and macOS and Windows
+        # filesystems are case-insensitive by default.
+        upper = DeepSeekHarnessAdapter._session_key("Foo")
+        lower = DeepSeekHarnessAdapter._session_key("foo")
+        assert lower == "a2a-foo"
+        assert upper.startswith("a2ah-")
+        assert upper.lower() != lower.lower()
+
+    def test_hashed_ids_cannot_collide_with_verbatim_ids(self):
+        context_id = "has space"
+        digest = hashlib.sha256(context_id.encode("utf-8")).hexdigest()[:16]
+        assert DeepSeekHarnessAdapter._session_key(digest) != DeepSeekHarnessAdapter._session_key(
+            context_id
+        )
 
     def test_missing_context_id_gets_a_one_off_id(self):
         first = DeepSeekHarnessAdapter._session_key(None)
@@ -400,6 +417,46 @@ class TestTurns:
             await adapter.invoke("one", context_id="ctx-1", context=_context("t1"))
 
     @pytest.mark.asyncio
+    async def test_failed_turn_reports_the_runtime_error(self, adapter, sdk, caplog):
+        sdk.final_response = ""
+        sdk.finish_reason = "error"
+        sdk.events = [
+            {"type": "turn/start", "data": {}},
+            {
+                "type": "turn/end",
+                "data": {
+                    "reason": {
+                        "kind": "error",
+                        "error": {
+                            "message": "DeepSeek Messages transport failed",
+                            "code": "TRANSPORT",
+                        },
+                    }
+                },
+            },
+        ]
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(RuntimeError, match="TRANSPORT: DeepSeek Messages transport failed"):
+                await adapter.invoke("one", context_id="ctx-1", context=_context("t1"))
+        assert "TRANSPORT: DeepSeek Messages transport failed" in caplog.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "events",
+        [
+            [],
+            [{"type": "turn/end", "data": {"reason": {"kind": "error"}}}],
+            [{"type": "turn/end", "data": {"reason": {"kind": "error", "error": "oops"}}}],
+        ],
+    )
+    async def test_failed_turn_without_error_detail_still_raises(self, adapter, sdk, events):
+        sdk.final_response = ""
+        sdk.finish_reason = "error"
+        sdk.events = events
+        with pytest.raises(RuntimeError, match=r"finish reason: 'error'\)$"):
+            await adapter.invoke("one", context_id="ctx-1", context=_context("t1"))
+
+    @pytest.mark.asyncio
     async def test_empty_completed_response_returns_empty(self, adapter, sdk):
         sdk.final_response = ""
         assert await adapter.invoke("one", context_id="ctx-1", context=_context("t1")) == ""
@@ -558,6 +615,31 @@ class TestCancel:
             await running
         assert harness.running is False
         assert sdk.run_calls == []
+
+    @pytest.mark.asyncio
+    async def test_close_during_launch_then_failed_resume_leaves_no_orphan(
+        self, adapter, sdk, monkeypatch
+    ):
+        await adapter._ensure_harness()
+        harness = sdk.harness
+        harness.launch_gate = threading.Event()
+
+        def occupied(session_id):
+            harness.start()
+            raise FakeJsonRpcError(-32603, f'session "{session_id}" is already owned')
+
+        monkeypatch.setattr(harness, "resume_session", occupied)
+        running = asyncio.create_task(
+            adapter.invoke("work", context_id="ctx-1", context=_context("t1"))
+        )
+        assert await asyncio.to_thread(harness.launch_entered.wait, 5)
+
+        await asyncio.wait_for(adapter.close(), 1)
+        harness.launch_gate.set()
+
+        with pytest.raises(Exception):
+            await running
+        assert harness.running is False
 
     @pytest.mark.asyncio
     async def test_retired_harness_is_never_relaunched(self, adapter, sdk):

@@ -29,7 +29,7 @@ from ..exceptions import CancelledByAdapterError
 
 logger = logging.getLogger(__name__)
 
-_SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+_SAFE_SESSION_ID = re.compile(r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?")
 _MAX_VERBATIM_CONTEXT_ID = 100
 
 _INSTALL_HINT = (
@@ -45,10 +45,13 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
     Each A2A ``context_id`` maps to a durable dsh session, so conversations
     continue across turns and across server restarts:
 
-    - an id matching ``[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?`` (up to 100
-      characters) becomes ``a2a-<context_id>``;
-    - any other id becomes ``a2a-<first 16 hex chars of its sha256>``;
-    - a request without a ``context_id`` gets a one-off ``a2a-<12 hex>`` session.
+    - an id matching ``[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?`` (up to 100
+      characters) becomes ``a2a-<context_id>``; ids with uppercase letters are
+      hashed, because dsh names session directories after the id and macOS
+      and Windows filesystems ignore case;
+    - any other id becomes ``a2ah-<first 16 hex chars of its sha256>``;
+    - a request without a ``context_id`` gets a one-off ``a2a-<12 hex>`` session,
+      which stays on disk under ``dsh_home`` like any other.
 
     The default ``sdk`` profile starts new sessions in dsh's
     ``workspace-write`` preset: shell commands and file writes are confined to
@@ -59,6 +62,11 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
     ``sdk-minimal`` is a best-effort notice, not a guarantee. Either way the
     agent executes tools for whoever can reach the A2A server, so keep the
     server on a trusted interface.
+
+    ``dsh_bin`` defaults to the runtime bundled with the SDK. On Windows, point
+    it at the runtime executable rather than the ``dsh`` console script, which
+    waits on the runtime instead of replacing itself, so closing it would
+    leave the runtime running.
 
     Sessions live under ``dsh_home``: the explicit argument, else a non-empty
     ``DSH_HOME`` environment variable, else a per-user, per-project state
@@ -173,8 +181,9 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
             return f"a2a-{uuid.uuid4().hex[:12]}"
         if len(context_id) <= _MAX_VERBATIM_CONTEXT_ID and _SAFE_SESSION_ID.fullmatch(context_id):
             return f"a2a-{context_id}"
+        # A separate prefix keeps a hashed id from matching a verbatim one.
         digest = hashlib.sha256(context_id.encode("utf-8")).hexdigest()[:16]
-        return f"a2a-{digest}"
+        return f"a2ah-{digest}"
 
     # ──── Required: invoke ────
 
@@ -390,17 +399,19 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
         if _runtime_exited(harness):
             raise _RuntimeExitedError("DeepSeek Harness runtime exited before the turn started")
         session = handles.get(session_id)
-        if session is None:
-            if resumable:
-                session = self._resume_or_start(harness, session_id)
-                handles[session_id] = session
-            else:
-                session = harness.start_session(session_id)
-        if harness in self._retired:
-            # Retired while this job was launching it: that close may have
-            # run before the launch and done nothing.
-            harness.close()
-            self._raise_if_retired(harness)
+        try:
+            if session is None:
+                if resumable:
+                    session = self._resume_or_start(harness, session_id)
+                    handles[session_id] = session
+                else:
+                    session = harness.start_session(session_id)
+        finally:
+            if harness in self._retired:
+                # Retired while this job was launching it: that close may
+                # have run before the launch and done nothing.
+                harness.close()
+        self._raise_if_retired(harness)
         # A close after this point makes run() fail: Session.run only writes
         # to a running runtime and never relaunches it.
         return session.run(prompt)
@@ -424,14 +435,19 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
         """Return the reply; raise only when the turn failed with nothing to show."""
         text = result.final_response or ""
         reason = result.finish_reason
+        detail = _turn_error(result.events) if reason != "completed" else ""
+        suffix = f": {detail}" if detail else ""
         if reason != "completed":
             logger.warning(
-                "DeepSeek Harness turn for session %s finished with %r", session_id, reason
+                "DeepSeek Harness turn for session %s finished with %r%s",
+                session_id,
+                reason,
+                suffix,
             )
         if text or reason == "completed":
             return text
         raise RuntimeError(
-            f"DeepSeek Harness turn produced no response (finish reason: {reason!r})"
+            f"DeepSeek Harness turn produced no response (finish reason: {reason!r}){suffix}"
         )
 
     def _raise_if_cancelled(self, task_id: str) -> None:
@@ -464,6 +480,22 @@ def _runtime_exited(harness: Any) -> bool:
     proc = getattr(getattr(harness, "client", None), "_proc", None)
     poll = getattr(proc, "poll", None)
     return callable(poll) and poll() is not None
+
+
+def _turn_error(events: list[Any]) -> str:
+    """Return ``code: message`` from the last ``turn/end`` error, or ``""``."""
+    for event in reversed(events or []):
+        if not isinstance(event, dict) or event.get("type") != "turn/end":
+            continue
+        data = event.get("data")
+        reason = data.get("reason") if isinstance(data, dict) else None
+        error = reason.get("error") if isinstance(reason, dict) else None
+        if not isinstance(error, dict):
+            return ""
+        message = str(error.get("message") or "")
+        code = str(error.get("code") or "")
+        return f"{code}: {message}" if code and message else code or message
+    return ""
 
 
 def _consume_result(future: asyncio.Future) -> None:

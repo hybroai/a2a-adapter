@@ -140,8 +140,11 @@ the extra (`uv tool install "a2a-adapter[deepseek-harness]"`) and
 use `--model`, `--provider`, `--profile`, `--dsh-home`, `--reasoning-effort`,
 `--max-tokens` and `--startup-timeout` instead. Each A2A conversation
 (`contextId`) gets its own durable dsh session under `--dsh-home` (default:
-`$DSH_HOME`, else the per-user state directory below), so it resumes after the
-server restarts.
+`$DSH_HOME`, else `a2a-adapter/deepseek-harness/<hash of --cwd>/` in the
+per-user state directory below), so it resumes after the server restarts.
+Turns run one at a time across all conversations, and `--timeout` counts only
+a turn's own run, not time spent waiting for earlier turns. On Windows, pass
+`--executable` the runtime executable rather than the `dsh` console script.
 
 ```bash
 a2a-adapter dsh --port 9013 --model <model>
