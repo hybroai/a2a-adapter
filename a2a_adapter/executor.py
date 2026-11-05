@@ -15,6 +15,7 @@ Design rationale:
 
 import logging
 import uuid
+from typing import Protocol
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
@@ -25,6 +26,28 @@ from .base_adapter import BaseA2AAdapter
 from .exceptions import CancelledByAdapterError
 
 logger = logging.getLogger(__name__)
+
+
+class TaskObserver(Protocol):
+    """Receives task lifecycle events, e.g. to print them in a terminal.
+
+    Observer errors are logged and swallowed: they never change what the
+    executor sends over A2A.
+    """
+
+    def task_submitted(
+        self, task_id: str, context_id: str, prompt: str, message_id: str | None = None
+    ) -> None: ...
+
+    def task_working(self, task_id: str, context_id: str) -> None: ...
+
+    def task_completed(
+        self, task_id: str, context_id: str, text: str, chunks: int | None
+    ) -> None: ...
+
+    def task_failed(self, task_id: str, context_id: str, error: str) -> None: ...
+
+    def task_canceled(self, task_id: str, context_id: str) -> None: ...
 
 
 class AdapterAgentExecutor(AgentExecutor):
@@ -43,8 +66,17 @@ class AdapterAgentExecutor(AgentExecutor):
         6. Handle cancellation by delegating to adapter.cancel()
     """
 
-    def __init__(self, adapter: BaseA2AAdapter) -> None:
+    def __init__(self, adapter: BaseA2AAdapter, observer: TaskObserver | None = None) -> None:
         self._adapter = adapter
+        self._observer = observer
+
+    def _notify(self, event: str, *args) -> None:
+        if self._observer is None:
+            return
+        try:
+            getattr(self._observer, event)(*args)
+        except Exception:
+            logger.debug("Task observer %s failed", event, exc_info=True)
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         """Execute the adapter and emit A2A events to the queue.
@@ -63,14 +95,25 @@ class AdapterAgentExecutor(AgentExecutor):
             if not user_input:
                 logger.warning("Empty user input for task %s", context.task_id)
 
-            await event_queue.enqueue_event(
-                Task(
-                    id=context.task_id,
-                    context_id=context.context_id,
-                    status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+            # A follow-up message to an existing task must not replace it;
+            # the SDK rejects that with an error log.
+            if context.current_task is None:
+                await event_queue.enqueue_event(
+                    Task(
+                        id=context.task_id,
+                        context_id=context.context_id,
+                        status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+                    )
                 )
+            self._notify(
+                "task_submitted",
+                context.task_id,
+                context.context_id,
+                user_input,
+                getattr(context.message, "message_id", None) or None,
             )
             await updater.start_work()
+            self._notify("task_working", context.task_id, context.context_id)
 
             if self._adapter.supports_streaming():
                 await self._execute_streaming(updater, user_input, context)
@@ -87,6 +130,10 @@ class AdapterAgentExecutor(AgentExecutor):
                 context.task_id,
                 e,
                 exc_info=True,
+                extra={"a2a_activity_reported": self._observer is not None},
+            )
+            self._notify(
+                "task_failed", context.task_id, context.context_id, f"{type(e).__name__}: {e}"
             )
             error_msg = updater.new_agent_message([Part(text=f"Agent execution failed: {e}")])
             await updater.failed(message=error_msg)
@@ -157,6 +204,7 @@ class AdapterAgentExecutor(AgentExecutor):
         # Part(text="") would also serialize to {} in the completion message.
         message = updater.new_agent_message([Part(text=response_text or "[Empty response]")])
         await updater.complete(message=message)
+        self._notify("task_completed", context.task_id, context.context_id, response_text, None)
 
     def _extract_text_from_parts(self, parts: list[Part]) -> str:
         """Extract text content from multimodal parts for completion message.
@@ -241,6 +289,7 @@ class AdapterAgentExecutor(AgentExecutor):
         full_text = self._concatenate_chunks(chunks)
         message = updater.new_agent_message([Part(text=full_text)])
         await updater.complete(message=message)
+        self._notify("task_completed", context.task_id, context.context_id, full_text, len(chunks))
 
     def _concatenate_chunks(self, chunks: list[str | Part]) -> str:
         """Concatenate text from streaming chunks for completion message.
@@ -282,3 +331,4 @@ class AdapterAgentExecutor(AgentExecutor):
             )
 
         await updater.cancel()
+        self._notify("task_canceled", context.task_id, context.context_id)
