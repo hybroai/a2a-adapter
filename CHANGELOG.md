@@ -8,6 +8,27 @@ Conventional Commits. Earlier entries follow
 [Keep a Changelog](https://keepachangelog.com/). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.18](https://github.com/hybroai/a2a-adapter/compare/v0.2.17...v0.2.18) (2026-11-05)
+
+
+### Features
+
+* **cli:** show a startup card and an A2A activity log in the terminal ([188297f](https://github.com/hybroai/a2a-adapter/commit/188297ffca0c5fe7a3ebc6632d839b5a4a31abe0))
+* **cli:** show a startup card and an A2A activity log in the terminal ([acfdbf4](https://github.com/hybroai/a2a-adapter/commit/acfdbf4a937f57d2e9270b8277c8a14838429a5f))
+* **cli:** show a startup card and an A2A activity log in the terminal ([a33a6aa](https://github.com/hybroai/a2a-adapter/commit/a33a6aae1fd75bbc8485534a98b831476881d1e4))
+
+
+### Bug Fixes
+
+* **deepseek-harness:** name the uv tool, pipx and pip install commands ([3fe624c](https://github.com/hybroai/a2a-adapter/commit/3fe624c1a0500816486481bab0afe025b7f6dc9f))
+* **deepseek-harness:** report a wrong dsh_path without install advice ([324482f](https://github.com/hybroai/a2a-adapter/commit/324482f2e337e2105270c2723c0f0f7efe947cb4))
+* **server:** pass the push sender a context only when the SDK requires one ([0f124ea](https://github.com/hybroai/a2a-adapter/commit/0f124ea6dcb1e7363c53b16fc06efa18dcdcdc80))
+
+
+### Documentation
+
+* add a terminal capture of the CLI startup card and activity log ([5ea6c70](https://github.com/hybroai/a2a-adapter/commit/5ea6c704a91eb5f1bd1891e17d85b6d7268f9cf9))
+
 ## [0.2.17] - 2026-11-03
 
 ### Added
