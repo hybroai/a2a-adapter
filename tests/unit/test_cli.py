@@ -2,7 +2,7 @@
 
 import json
 import logging
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 
@@ -13,6 +13,7 @@ from a2a_adapter.integrations.deepseek_harness import DeepSeekHarnessAdapter
 from a2a_adapter.integrations.openclaw import OpenClawAdapter
 from a2a_adapter.integrations.pi import PiAdapter
 from a2a_adapter.server import _agent_card_json, build_agent_card
+from a2a_adapter.terminal import TerminalDisplay, Verbosity
 
 
 @pytest.fixture(autouse=True)
@@ -46,7 +47,9 @@ def test_pi_cli_uses_current_contract_and_forwards_native_args(tmp_path, monkeyp
     assert adapter.working_dir == str(tmp_path.resolve())
     assert adapter.pi_command == ["npx", "tsx", "/opt/pi/src/cli.ts"]
     assert adapter.cli_args == ["--model", "anthropic/example", "--thinking", "high"]
-    serve.assert_called_once_with(adapter, host="127.0.0.1", port=9012, log_level="info")
+    serve.assert_called_once_with(
+        adapter, host="127.0.0.1", port=9012, log_level="warning", display=ANY
+    )
 
 
 def test_codex_cli_forwards_native_args_before_adapter_protocol_args(tmp_path):
@@ -249,7 +252,9 @@ def test_dsh_cli_maps_options_to_the_sdk_adapter(tmp_path):
     assert adapter.startup_timeout == 45
     assert adapter.timeout == 120
     assert adapter.dsh_bin == "/opt/dsh"
-    serve.assert_called_once_with(adapter, host="127.0.0.1", port=9000, log_level="info")
+    serve.assert_called_once_with(
+        adapter, host="127.0.0.1", port=9000, log_level="warning", display=ANY
+    )
 
 
 def test_dsh_cli_leaves_unset_options_to_the_sdk(tmp_path, monkeypatch):
@@ -451,3 +456,81 @@ def test_cli_rejects_invalid_skill(tmp_path, capsys, value, message):
     with pytest.raises(SystemExit):
         main(["claude", "--cwd", str(tmp_path), "--skill", value])
     assert message in capsys.readouterr().err
+
+
+# ── Terminal display ─────────────────────────────────────────
+
+
+def _display(argv):
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        main(argv)
+    display = serve.call_args.kwargs["display"]
+    assert isinstance(display, TerminalDisplay)
+    return display
+
+
+@pytest.mark.parametrize(
+    "flags, verbosity",
+    [
+        ([], Verbosity.NORMAL),
+        (["--quiet"], Verbosity.QUIET),
+        (["-q"], Verbosity.QUIET),
+        (["-v"], Verbosity.VERBOSE),
+        (["--verbose"], Verbosity.VERBOSE),
+        (["--debug"], Verbosity.DEBUG),
+    ],
+)
+def test_cli_verbosity_flags(tmp_path, flags, verbosity):
+    display = _display(["claude", "--cwd", str(tmp_path), *flags])
+    assert display.verbosity == verbosity
+
+
+@pytest.mark.parametrize("flags", [["-q", "-v"], ["--quiet", "--debug"], ["-v", "--debug"]])
+def test_cli_verbosity_flags_are_exclusive(tmp_path, capsys, flags):
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        with pytest.raises(SystemExit, match="2"):
+            main(["claude", "--cwd", str(tmp_path), *flags])
+    serve.assert_not_called()
+    assert "not allowed with" in capsys.readouterr().err
+
+
+def test_cli_prints_nothing_before_the_server_is_ready(tmp_path, capsys):
+    with patch("a2a_adapter.cli.serve_agent"):
+        main(["claude", "--cwd", str(tmp_path)])
+    assert capsys.readouterr().out == ""
+
+
+def test_cli_log_level_still_reaches_uvicorn(tmp_path):
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        main(["claude", "--cwd", str(tmp_path), "--log-level", "info"])
+    assert serve.call_args.kwargs["log_level"] == "info"
+
+
+@pytest.mark.parametrize(
+    "argv, command",
+    [
+        (
+            ["claude", "--executable", "/opt/claude", "--", "--model", "opus"],
+            "/opt/claude --model opus",
+        ),
+        (["codex"], "codex"),
+        (["openclaw", "--", "--verbose"], "openclaw --verbose"),
+    ],
+)
+def test_cli_backend_shows_executable_and_native_args(tmp_path, argv, command):
+    display = _display([argv[0], "--cwd", str(tmp_path), "--timeout", "90", *argv[1:]])
+    assert display.backend.command == command
+    assert display.backend.cwd == str(tmp_path.resolve())
+    assert display.backend.timeout == 90
+
+
+def test_cli_backend_for_pi_uses_the_pi_command(tmp_path, monkeypatch):
+    monkeypatch.setenv("A2A_PI_COMMAND", "npx tsx /opt/pi/cli.ts")
+    display = _display(["pi", "--cwd", str(tmp_path), "--", "--thinking", "high"])
+    assert display.backend.command == "npx tsx /opt/pi/cli.ts --thinking high"
+
+
+def test_cli_backend_for_dsh_names_the_binary_and_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr("a2a_adapter.cli.resolve_dsh_bin", lambda value: "/opt/bin/dsh")
+    display = _display(["dsh", "--cwd", str(tmp_path), "--model", "m1"])
+    assert display.backend.command == "/opt/bin/dsh · profile sdk · model m1"
