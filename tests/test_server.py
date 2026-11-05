@@ -123,3 +123,68 @@ class TestToA2a:
         data = resp.json()
         assert data["skills"] == []
         assert data["url"] == data["supportedInterfaces"][0]["url"]
+
+
+class TestPushSenderContext:
+    """a2a-sdk 1.0 requires the sender's context; 1.3 deprecates it and warns."""
+
+    def test_passes_a_context_when_the_sdk_requires_one(self, monkeypatch):
+        import a2a_adapter.server as server_module
+        from a2a.server.context import ServerCallContext
+
+        seen = []
+
+        class Sdk10Sender:
+            def __init__(self, httpx_client, config_store, context):
+                seen.append(context)
+
+        monkeypatch.setattr(server_module, "BasePushNotificationSender", Sdk10Sender)
+        to_a2a(StubAdapter())
+        assert len(seen) == 1 and isinstance(seen[0], ServerCallContext)
+
+    def test_omits_the_deprecated_context_when_it_is_optional(self, monkeypatch):
+        import a2a_adapter.server as server_module
+
+        seen = []
+
+        class Sdk13Sender:
+            def __init__(
+                self, httpx_client, config_store, context=None, *, push_url_validator=None
+            ):
+                seen.append(context)
+
+        monkeypatch.setattr(server_module, "BasePushNotificationSender", Sdk13Sender)
+        to_a2a(StubAdapter())
+        assert seen == [None], "a non-None context logs a deprecation warning in 1.3"
+
+    def test_installed_sdk_gets_a_context_only_if_it_requires_one(self, caplog):
+        import inspect
+
+        from a2a.server.context import ServerCallContext
+        from a2a.server.tasks import BasePushNotificationSender
+
+        import a2a_adapter.server as server_module
+
+        param = inspect.signature(BasePushNotificationSender).parameters.get("context")
+        required = param is not None and param.default is inspect.Parameter.empty
+        with caplog.at_level("WARNING"):
+            sender = server_module._push_sender(httpx.AsyncClient(), None)
+        assert isinstance(getattr(sender, "_call_context", None), ServerCallContext) is required
+        assert "no longer uses the context" not in caplog.text
+
+    def test_uninspectable_sender_is_built_without_a_context(self, monkeypatch):
+        import a2a_adapter.server as server_module
+
+        seen = []
+
+        class Opaque:
+            def __init__(self, httpx_client, config_store, context=None):
+                seen.append(context)
+
+        def no_signature(obj):
+            raise ValueError("no signature found for builtin")
+
+        monkeypatch.setattr(server_module, "BasePushNotificationSender", Opaque)
+        monkeypatch.setattr(server_module.inspect, "signature", no_signature)
+        server_module._push_sender(httpx.AsyncClient(), None)
+        assert seen == [None]

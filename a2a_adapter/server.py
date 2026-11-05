@@ -12,6 +12,7 @@ Design rationale:
 Replaces: client.py (deprecated in v0.2, removed in v0.3)
 """
 
+import inspect
 import logging
 import sys
 from contextlib import asynccontextmanager
@@ -97,6 +98,24 @@ def _create_compat_agent_card_routes(agent_card: AgentCard) -> list[Route]:
     return [Route(path=path, endpoint=_get_agent_card, methods=["GET"]) for path in paths]
 
 
+def _push_sender(
+    httpx_client: httpx.AsyncClient, config_store: InMemoryPushNotificationConfigStore
+) -> BasePushNotificationSender:
+    """Build the push sender for whichever a2a-sdk 1.x is installed.
+
+    1.0 requires a ``context``; from 1.3 it is ignored and logs a
+    deprecation warning unless it is None, so pass it only when required.
+    """
+    kwargs: dict[str, Any] = {"httpx_client": httpx_client, "config_store": config_store}
+    try:
+        context = inspect.signature(BasePushNotificationSender).parameters.get("context")
+    except (TypeError, ValueError):  # uninspectable: only 1.0 needs a context, and it's not
+        context = None
+    if context is not None and context.default is inspect.Parameter.empty:
+        kwargs["context"] = ServerCallContext()
+    return BasePushNotificationSender(**kwargs)
+
+
 def to_a2a(
     adapter: BaseA2AAdapter,
     agent_card: AgentCard | None = None,
@@ -138,11 +157,7 @@ def to_a2a(
     task_store = task_store or InMemoryTaskStore()
     push_config_store = _SafeInMemoryPushNotificationConfigStore()
     push_httpx_client = httpx.AsyncClient()
-    push_sender = BasePushNotificationSender(
-        httpx_client=push_httpx_client,
-        config_store=push_config_store,
-        context=ServerCallContext(),
-    )
+    push_sender = _push_sender(push_httpx_client, push_config_store)
 
     executor = AdapterAgentExecutor(adapter, observer=activity)
     handler = DefaultRequestHandler(
