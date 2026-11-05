@@ -106,7 +106,7 @@ Bridge between `BaseA2AAdapter` and A2A SDK's `AgentExecutor`:
 - Calls `adapter.invoke()` or `adapter.stream()`
 - Converts results to A2A events via `TaskUpdater`
 - Handles errors → `TaskUpdater.failed()`
-- Handles cancellation → `adapter.cancel()` + `TaskUpdater.cancel()`
+- Handles cancellation → `adapter.cancel()` + `TaskUpdater.cancel()`; if `adapter.cancel()` raises, the error propagates and the SDK marks the task failed instead of canceled
 
 ### Server Layer (`server.py`)
 

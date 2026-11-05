@@ -314,6 +314,9 @@ class AdapterAgentExecutor(AgentExecutor):
 
         Called by DefaultRequestHandler when a tasks/cancel request arrives.
         Delegates to the adapter's cancel() method, then emits canceled state.
+        If adapter.cancel() raises, the work may still be running, so the
+        task is not reported canceled: the error propagates and the SDK marks
+        the task failed and returns the error to the caller.
 
         Args:
             context: Request context for the task being canceled.
@@ -325,10 +328,17 @@ class AdapterAgentExecutor(AgentExecutor):
             await self._adapter.cancel(context=context)
         except Exception as e:
             logger.warning(
-                "Adapter cancel() raised for task %s: %s",
+                "Adapter cancel() raised for task %s; not marking it canceled: %s",
                 context.task_id,
                 e,
             )
+            self._notify(
+                "task_failed",
+                context.task_id,
+                context.context_id,
+                f"cancel failed: {type(e).__name__}: {e}",
+            )
+            raise
 
         await updater.cancel()
         self._notify("task_canceled", context.task_id, context.context_id)

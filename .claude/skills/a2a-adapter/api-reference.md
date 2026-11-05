@@ -557,7 +557,7 @@ The `AdapterAgentExecutor` bridge handles:
 - Routing to `stream()` when `adapter.supports_streaming()`, else `invoke()`
 - Converting text/multimodal responses to A2A events via `TaskUpdater`
 - Error handling (exception -> Task with state=failed, error message preserved)
-- Cancellation (`adapter.cancel()` -> Task with state=canceled)
+- Cancellation (`adapter.cancel()` -> Task with state=canceled; if `adapter.cancel()` raises -> Task with state=failed and the cancel request returns the error)
 
 Users never interact with the bridge layer directly.
 
@@ -595,6 +595,7 @@ HTTP POST / (JSON-RPC) -> DefaultRequestHandler
   -> executor.cancel(ctx, queue)
     -> adapter.cancel(context=ctx)
     -> TaskUpdater.cancel()
+       (if adapter.cancel() raises: the error propagates, the SDK marks the task failed)
 ```
 
 ## Decision Guide
