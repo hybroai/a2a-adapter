@@ -8,6 +8,13 @@ Conventional Commits. Earlier entries follow
 [Keep a Changelog](https://keepachangelog.com/). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.19](https://github.com/hybroai/a2a-adapter/compare/v0.2.18...v0.2.19) (2026-11-06)
+
+
+### Bug Fixes
+
+* fail the task instead of reporting it canceled when adapter cancel raises ([#79](https://github.com/hybroai/a2a-adapter/issues/79)) ([fd597e6](https://github.com/hybroai/a2a-adapter/commit/fd597e60b13951129682b75cc2a88fe31589309e))
+
 ## [0.2.18](https://github.com/hybroai/a2a-adapter/compare/v0.2.17...v0.2.18) (2026-11-05)
 
 
