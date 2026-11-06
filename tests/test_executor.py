@@ -380,24 +380,62 @@ class TestCancel:
         with pytest.raises(RuntimeError, match="cancel failed"):
             await executor.cancel(request_context, event_queue)
 
-        assert await _collect_events(event_queue) == []
+        events = await _collect_events(event_queue)
+        assert [e.status.state for e in events] == [TaskState.TASK_STATE_FAILED]
+        assert events[0].status.message.parts[0].text == "Cancel failed: cancel failed"
         observer.task_canceled.assert_not_called()
         assert "cancel failed" in observer.task_failed.call_args.args[2]
+
+    async def test_an_interrupted_execute_waits_for_the_cancel(self, request_context, event_queue):
+        """The SDK cancels execute() before it calls cancel() and closes the
+        queue when execute() returns, so execute() must outlast cancel()."""
+        started, release = asyncio.Event(), asyncio.Event()
+
+        class Adapter(StubAdapter):
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                started.set()
+                await asyncio.Event().wait()
+
+            async def cancel(self, **kwargs):
+                await release.wait()
+
+        executor = AdapterAgentExecutor(Adapter())
+        run = asyncio.create_task(executor.execute(request_context, event_queue))
+        await started.wait()
+
+        async def sdk_cancel():  # ActiveTask.cancel: cancel the run, then call cancel()
+            run.cancel()
+            await executor.cancel(request_context, event_queue)
+
+        cancel = asyncio.create_task(sdk_cancel())
+        await asyncio.sleep(0.05)
+        assert not run.done()
+
+        release.set()
+        await cancel
+        with pytest.raises(asyncio.CancelledError):
+            await run
+        events = await _collect_events(event_queue)
+        states = [e.status.state for e in events if e.HasField("status")]
+        assert states[-1] == TaskState.TASK_STATE_CANCELED
 
 
 class TestCancelOverJsonRpc:
     """tasks/cancel through the SDK request handler."""
 
     class Hanging(BaseA2AAdapter):
-        def __init__(self, cancel_error=None):
+        def __init__(self, cancel_error=None, cancel_awaits=False):
             self.started = asyncio.Event()
             self.cancel_error = cancel_error
+            self.cancel_awaits = cancel_awaits
 
         async def invoke(self, user_input, context_id=None, **kwargs):
             self.started.set()
             await asyncio.Event().wait()
 
         async def cancel(self, context_id=None, **kwargs):
+            if self.cancel_awaits:  # e.g. a round trip to the robot
+                await asyncio.sleep(0.05)
             if self.cancel_error:
                 raise self.cancel_error
 
@@ -434,12 +472,20 @@ class TestCancelOverJsonRpc:
                 await asyncio.sleep(0.01)
             return cancelled, task
 
-    async def test_cancel_reports_the_task_canceled(self):
-        cancelled, task = await self._cancel(self.Hanging())
+    @pytest.mark.parametrize("cancel_awaits", [False, True])
+    async def test_cancel_reports_the_task_canceled(self, cancel_awaits):
+        cancelled, task = await self._cancel(self.Hanging(cancel_awaits=cancel_awaits))
         assert cancelled["result"]["status"]["state"] == "canceled"
         assert task["status"]["state"] == "canceled"
 
-    async def test_a_failed_adapter_cancel_fails_the_task(self):
-        cancelled, task = await self._cancel(self.Hanging(RuntimeError("robot did not stop")))
+    @pytest.mark.parametrize("cancel_awaits", [False, True])
+    async def test_a_failed_adapter_cancel_fails_the_task(self, cancel_awaits):
+        adapter = self.Hanging(RuntimeError("robot did not stop"), cancel_awaits=cancel_awaits)
+        cancelled, task = await self._cancel(adapter)
         assert "error" in cancelled
         assert task["status"]["state"] == "failed"
+        # The SDK adds its own failed status after this one, so the message
+        # may have moved to history.
+        messages = [*task.get("history", []), task["status"].get("message", {})]
+        texts = [part["text"] for m in messages for part in m.get("parts", [])]
+        assert "Cancel failed: robot did not stop" in texts

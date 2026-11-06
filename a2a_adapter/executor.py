@@ -13,6 +13,7 @@ Design rationale:
     - If not, we call invoke() and emit a single artifact + completion.
 """
 
+import asyncio
 import logging
 import uuid
 from typing import Protocol
@@ -69,6 +70,11 @@ class AdapterAgentExecutor(AgentExecutor):
     def __init__(self, adapter: BaseA2AAdapter, observer: TaskObserver | None = None) -> None:
         self._adapter = adapter
         self._observer = observer
+        # tasks/cancel calls in progress, by task id. The SDK cancels the
+        # running execute() before it calls cancel(), and closes the event
+        # queue once execute() returns, so execute() waits for these: the
+        # terminal state that cancel() sends would otherwise be dropped.
+        self._cancelling: dict[str, asyncio.Future[None]] = {}
 
     def _notify(self, event: str, *args) -> None:
         if self._observer is None:
@@ -88,6 +94,14 @@ class AdapterAgentExecutor(AgentExecutor):
             context: Request context with user input, task_id, context_id.
             event_queue: Queue for publishing A2A lifecycle events.
         """
+        try:
+            await self._execute(context, event_queue)
+        finally:
+            cancelling = self._cancelling.get(context.task_id)
+            if cancelling is not None:
+                await asyncio.shield(cancelling)
+
+    async def _execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)
 
         try:
@@ -315,13 +329,28 @@ class AdapterAgentExecutor(AgentExecutor):
         Called by DefaultRequestHandler when a tasks/cancel request arrives.
         Delegates to the adapter's cancel() method, then emits canceled state.
         If adapter.cancel() raises, the work may still be running, so the
-        task is not reported canceled: the error propagates and the SDK marks
-        the task failed and returns the error to the caller.
+        task is not reported canceled: it is marked failed and the error
+        propagates, so the SDK returns it to the caller.
+
+        The interrupted execute() waits until this returns, so the event
+        queue is still open for the terminal state even when
+        adapter.cancel() awaits.
 
         Args:
             context: Request context for the task being canceled.
             event_queue: Queue for publishing the cancellation event.
         """
+        # Registered before the first await, so execute() sees it.
+        cancelling = asyncio.get_running_loop().create_future()
+        self._cancelling[context.task_id] = cancelling
+        try:
+            await self._cancel(context, event_queue)
+        finally:
+            if self._cancelling.get(context.task_id) is cancelling:
+                del self._cancelling[context.task_id]
+            cancelling.set_result(None)
+
+    async def _cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)
 
         try:
@@ -338,6 +367,8 @@ class AdapterAgentExecutor(AgentExecutor):
                 context.context_id,
                 f"cancel failed: {type(e).__name__}: {e}",
             )
+            message = updater.new_agent_message([Part(text=f"Cancel failed: {e}")])
+            await updater.failed(message=message)
             raise
 
         await updater.cancel()
