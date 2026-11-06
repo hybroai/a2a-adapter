@@ -1,8 +1,10 @@
 """Tests for AdapterAgentExecutor — the bridge between adapters and A2A SDK."""
 
 import asyncio
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
@@ -10,6 +12,7 @@ from a2a.types import Part, TaskState
 
 from a2a_adapter.base_adapter import BaseA2AAdapter
 from a2a_adapter.executor import AdapterAgentExecutor
+from a2a_adapter.server import to_a2a
 
 from .conftest import (
     FailingAdapter,
@@ -352,9 +355,137 @@ class TestCancel:
         await executor.cancel(request_context, event_queue)
         adapter.cancel.assert_awaited_once()
 
-    async def test_cancel_handles_adapter_error(self, request_context, event_queue):
+    async def test_cancel_emits_canceled(self, request_context, event_queue):
         adapter = StubAdapter()
-        adapter.cancel = AsyncMock(side_effect=RuntimeError("cancel failed"))
-        executor = AdapterAgentExecutor(adapter)
+        adapter.cancel = AsyncMock()
+        observer = MagicMock()
+        executor = AdapterAgentExecutor(adapter, observer=observer)
 
         await executor.cancel(request_context, event_queue)
+
+        events = await _collect_events(event_queue)
+        assert [e.status.state for e in events] == [TaskState.TASK_STATE_CANCELED]
+        observer.task_canceled.assert_called_once()
+
+    async def test_a_failed_adapter_cancel_is_not_reported_canceled(
+        self, request_context, event_queue
+    ):
+        """The work may still be running, so the error propagates and the
+        SDK marks the task failed instead of canceled."""
+        adapter = StubAdapter()
+        adapter.cancel = AsyncMock(side_effect=RuntimeError("cancel failed"))
+        observer = MagicMock()
+        executor = AdapterAgentExecutor(adapter, observer=observer)
+
+        with pytest.raises(RuntimeError, match="cancel failed"):
+            await executor.cancel(request_context, event_queue)
+
+        events = await _collect_events(event_queue)
+        assert [e.status.state for e in events] == [TaskState.TASK_STATE_FAILED]
+        assert events[0].status.message.parts[0].text == "Cancel failed: cancel failed"
+        observer.task_canceled.assert_not_called()
+        assert "cancel failed" in observer.task_failed.call_args.args[2]
+
+    async def test_an_interrupted_execute_waits_for_the_cancel(self, request_context, event_queue):
+        """The SDK cancels execute() before it calls cancel() and closes the
+        queue when execute() returns, so execute() must outlast cancel()."""
+        started, release = asyncio.Event(), asyncio.Event()
+
+        class Adapter(StubAdapter):
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                started.set()
+                await asyncio.Event().wait()
+
+            async def cancel(self, **kwargs):
+                await release.wait()
+
+        executor = AdapterAgentExecutor(Adapter())
+        run = asyncio.create_task(executor.execute(request_context, event_queue))
+        await started.wait()
+
+        async def sdk_cancel():  # ActiveTask.cancel: cancel the run, then call cancel()
+            run.cancel()
+            await executor.cancel(request_context, event_queue)
+
+        cancel = asyncio.create_task(sdk_cancel())
+        await asyncio.sleep(0.05)
+        assert not run.done()
+
+        release.set()
+        await cancel
+        with pytest.raises(asyncio.CancelledError):
+            await run
+        events = await _collect_events(event_queue)
+        states = [e.status.state for e in events if e.HasField("status")]
+        assert states[-1] == TaskState.TASK_STATE_CANCELED
+
+
+class TestCancelOverJsonRpc:
+    """tasks/cancel through the SDK request handler."""
+
+    class Hanging(BaseA2AAdapter):
+        def __init__(self, cancel_error=None, cancel_awaits=False):
+            self.started = asyncio.Event()
+            self.cancel_error = cancel_error
+            self.cancel_awaits = cancel_awaits
+
+        async def invoke(self, user_input, context_id=None, **kwargs):
+            self.started.set()
+            await asyncio.Event().wait()
+
+        async def cancel(self, context_id=None, **kwargs):
+            if self.cancel_awaits:  # e.g. a round trip to the robot
+                await asyncio.sleep(0.05)
+            if self.cancel_error:
+                raise self.cancel_error
+
+    async def _cancel(self, adapter):
+        app = to_a2a(adapter)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://agent"
+        ) as client:
+
+            async def rpc(method, params):
+                body = {
+                    "jsonrpc": "2.0",
+                    "id": uuid.uuid4().hex,
+                    "method": method,
+                    "params": params,
+                }
+                return (await client.post("/", json=body)).json()
+
+            message = {
+                "role": "user",
+                "messageId": uuid.uuid4().hex,
+                "parts": [{"kind": "text", "text": "hi"}],
+            }
+            sent = await rpc(
+                "message/send", {"message": message, "configuration": {"blocking": False}}
+            )
+            task_id = sent["result"]["id"]
+            await asyncio.wait_for(adapter.started.wait(), 2)
+            cancelled = await rpc("tasks/cancel", {"id": task_id})
+            for _ in range(100):  # the failed state is stored after the cancel reply
+                task = (await rpc("tasks/get", {"id": task_id}))["result"]
+                if task["status"]["state"] in ("canceled", "failed"):
+                    break
+                await asyncio.sleep(0.01)
+            return cancelled, task
+
+    @pytest.mark.parametrize("cancel_awaits", [False, True])
+    async def test_cancel_reports_the_task_canceled(self, cancel_awaits):
+        cancelled, task = await self._cancel(self.Hanging(cancel_awaits=cancel_awaits))
+        assert cancelled["result"]["status"]["state"] == "canceled"
+        assert task["status"]["state"] == "canceled"
+
+    @pytest.mark.parametrize("cancel_awaits", [False, True])
+    async def test_a_failed_adapter_cancel_fails_the_task(self, cancel_awaits):
+        adapter = self.Hanging(RuntimeError("robot did not stop"), cancel_awaits=cancel_awaits)
+        cancelled, task = await self._cancel(adapter)
+        assert "error" in cancelled
+        assert task["status"]["state"] == "failed"
+        # The SDK adds its own failed status after this one, so the message
+        # may have moved to history.
+        messages = [*task.get("history", []), task["status"].get("message", {})]
+        texts = [part["text"] for m in messages for part in m.get("parts", [])]
+        assert "Cancel failed: robot did not stop" in texts

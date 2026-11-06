@@ -75,10 +75,12 @@ A2A Client → HTTP POST /
 ```
 A2A Client → HTTP POST / (tasks/cancel)
   → DefaultRequestHandler.on_cancel_task()
-    → cancels asyncio.Task (raises CancelledError)
-      → AdapterAgentExecutor catches CancelledError
-        → adapter.cancel()
-        → TaskUpdater.cancel()
+    → cancels the running execute() (CancelledError)
+      → execute() waits for the cancel below before it returns,
+        so the event queue stays open for the terminal state
+    → AdapterAgentExecutor.cancel()
+      → adapter.cancel()          (may await)
+      → TaskUpdater.cancel()      (or failed, if adapter.cancel() raised)
 ```
 
 ## Core Components
@@ -106,7 +108,7 @@ Bridge between `BaseA2AAdapter` and A2A SDK's `AgentExecutor`:
 - Calls `adapter.invoke()` or `adapter.stream()`
 - Converts results to A2A events via `TaskUpdater`
 - Handles errors → `TaskUpdater.failed()`
-- Handles cancellation → `adapter.cancel()` + `TaskUpdater.cancel()`
+- Handles cancellation → `adapter.cancel()` + `TaskUpdater.cancel()`; if `adapter.cancel()` raises, the task is marked failed with a "Cancel failed" message and the error propagates to the caller. The interrupted `execute()` waits for the cancel to finish, so this holds when `adapter.cancel()` awaits
 
 ### Server Layer (`server.py`)
 
