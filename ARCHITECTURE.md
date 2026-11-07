@@ -77,7 +77,9 @@ A2A Client → HTTP POST / (tasks/cancel)
   → DefaultRequestHandler.on_cancel_task()
     → cancels the running execute() (CancelledError)
       → execute() waits for the cancel below before it returns,
-        so the event queue stays open for the terminal state
+        so the event queue stays open for the terminal state; until
+        then it sends no terminal state or late artifact of its own
+        (an open streaming artifact is left open)
     → AdapterAgentExecutor.cancel()
       → adapter.cancel()          (may await; CLI adapters kill the CLI's
                                    process group on POSIX)
@@ -128,7 +130,7 @@ Bridge between `BaseA2AAdapter` and A2A SDK's `AgentExecutor`:
 - Calls `adapter.invoke()` or `adapter.stream()`
 - Converts results to A2A events via `TaskUpdater`
 - Handles errors → `TaskUpdater.failed()`
-- Handles cancellation → `adapter.cancel()` + `TaskUpdater.cancel()`; if `adapter.cancel()` raises, the executor sends a single failed state with a "Cancel failed: …" message and does not re-raise, so `tasks/cancel` returns that failed task rather than a JSON-RPC error. The interrupted `execute()` waits for the cancel to finish, so this holds when `adapter.cancel()` awaits
+- Handles cancellation → `adapter.cancel()` + `TaskUpdater.cancel()`; if `adapter.cancel()` raises, the executor sends a single failed state with a "Cancel failed: …" message and does not re-raise, so `tasks/cancel` returns that failed task rather than a JSON-RPC error. The interrupted `execute()` waits for the cancel to finish, so this holds when `adapter.cancel()` awaits. While a cancel is in progress, `execute()` sends no terminal state and no late artifact (an error, or a result the adapter returns after `CancelledError`, is dropped); if `execute()` already sent its terminal state, the cancel sends none. Each run sends at most one terminal state
 
 ### Server Layer (`server.py`)
 
