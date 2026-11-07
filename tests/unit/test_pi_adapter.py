@@ -240,3 +240,75 @@ class TestPiA2AIntegration:
             if part.get("kind") == "text"
         )
         assert artifact_text == "hello world"
+
+
+class _LostPiRpcProcess(FakePiRpcProcess):
+    """Pi dies mid-turn: the prompt fails (or just ends) and it stops running."""
+
+    def __init__(self, raise_lost: bool) -> None:
+        super().__init__()
+        self.raise_lost = raise_lost
+        self.adapter: PiAdapter | None = None
+        self.rpc_held_during_close = False
+
+    async def close(self) -> None:
+        self.rpc_held_during_close = self.adapter is not None and self.adapter._rpc is self
+        await super().close()
+
+    async def prompt(self, message: str) -> AsyncIterator[str]:
+        from a2a_adapter.integrations.pi import PiProcessLostError
+
+        yield "partial"
+        self.running = False
+        if self.raise_lost:
+            raise PiProcessLostError("Pi exited", accepted=True)
+
+
+@pytest.mark.parametrize("raise_lost", [True, False])
+async def test_stream_closes_a_dead_rpc_before_dropping_it(tmp_path, raise_lost):
+    """Closing kills what Pi left in its process group; dropping it would leak them."""
+    from a2a_adapter.integrations.pi import PiProcessLostError
+
+    lost = _LostPiRpcProcess(raise_lost)
+    fresh = FakePiRpcProcess(["ok"])
+    rpcs = iter([lost, fresh])
+    adapter = PiAdapter(working_dir=str(tmp_path), session_id="s", _rpc_factory=lambda: next(rpcs))
+    lost.adapter = adapter
+    if raise_lost:
+        with pytest.raises(PiProcessLostError):
+            await adapter.invoke("hi")
+    else:
+        assert await adapter.invoke("hi") == "partial"
+    assert lost.close_calls == 1
+    assert lost.rpc_held_during_close, "kill_children_now() must still reach it while closing"
+    assert adapter._rpc is None
+    assert await adapter.invoke("again") == "ok"
+
+
+async def test_stream_cancelled_while_closing_a_dead_rpc_still_closes_it(tmp_path):
+    """Cancelling the stream while it closes a lost Pi must not abandon that close."""
+    closed = asyncio.Event()
+
+    class SlowClosingLost(_LostPiRpcProcess):
+        def __init__(self) -> None:
+            super().__init__(raise_lost=True)
+            self.close_started = asyncio.Event()
+            self.close_finished = False
+
+        async def close(self) -> None:
+            self.close_started.set()
+            await asyncio.sleep(0.3)  # the SIGTERM grace
+            self.close_finished = True
+            closed.set()
+            await super().close()
+
+    lost = SlowClosingLost()
+    adapter = PiAdapter(working_dir=str(tmp_path), session_id="s", _rpc_factory=lambda: lost)
+    lost.adapter = adapter
+    task = asyncio.create_task(adapter.invoke("hi"))
+    await asyncio.wait_for(lost.close_started.wait(), 5)
+    task.cancel()
+    with pytest.raises(BaseException):
+        await task
+    await asyncio.wait_for(closed.wait(), 5)
+    assert lost.close_finished

@@ -80,7 +80,7 @@ class TestRenderCard:
         assert "http://127.0.0.1:9000/.well-known/agent-card.json" in text
         assert re.search(r"json-rpc\s+http://127\.0\.0\.1:9000/\s", text)
         assert re.search(r"rest\s+http://127\.0\.0\.1:9000/", text)
-        assert "✓ streaming" in text and "✓ push notifications" in text
+        assert "✓ streaming" in text and "✗ push notifications" in text
         assert re.search(r"skills\s+general", text)
         assert re.search(r"command\s+claude --model opus", text)
         assert re.search(r"cwd\s+/Users/you/proj", text)
@@ -813,3 +813,11 @@ def test_verbose_keeps_indentation_and_spacing():
     nested = next(i for i, line in enumerate(lines) if line.startswith("  - nested word"))
     assert lines[nested + 1].startswith("  word")
     assert all(_cell_width(line) <= 86 for line in lines)
+
+
+def test_rejected_request_row_cuts_long_paths():
+    log, stream, _ = _log(width=120)
+    log.request_rejected("GET", "/" + "a" * 5000)
+    output = stream.getvalue()
+    assert "401 GET /" in output
+    assert len(output.splitlines()[-1]) < 300

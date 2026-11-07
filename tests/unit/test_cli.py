@@ -17,6 +17,12 @@ from a2a_adapter.terminal import TerminalDisplay, Verbosity
 
 
 @pytest.fixture(autouse=True)
+def no_auth_token_env(monkeypatch):
+    """main() pops $A2A_AUTH_TOKEN; never let it touch the real environment."""
+    monkeypatch.delenv("A2A_AUTH_TOKEN", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def dsh_sdk_installed(monkeypatch):
     """CI has no deepseek-harness-sdk; dsh tests below opt out where it matters."""
     monkeypatch.setattr("a2a_adapter.cli._dsh_sdk_installed", lambda: True)
@@ -48,7 +54,7 @@ def test_pi_cli_uses_current_contract_and_forwards_native_args(tmp_path, monkeyp
     assert adapter.pi_command == ["npx", "tsx", "/opt/pi/src/cli.ts"]
     assert adapter.cli_args == ["--model", "anthropic/example", "--thinking", "high"]
     serve.assert_called_once_with(
-        adapter, host="127.0.0.1", port=9012, log_level="warning", display=ANY
+        adapter, host="127.0.0.1", port=9012, log_level="warning", display=ANY, auth_token=None
     )
 
 
@@ -253,7 +259,7 @@ def test_dsh_cli_maps_options_to_the_sdk_adapter(tmp_path):
     assert adapter.timeout == 120
     assert adapter.dsh_bin == "/opt/dsh"
     serve.assert_called_once_with(
-        adapter, host="127.0.0.1", port=9000, log_level="warning", display=ANY
+        adapter, host="127.0.0.1", port=9000, log_level="warning", display=ANY, auth_token=None
     )
 
 
@@ -534,3 +540,112 @@ def test_cli_backend_for_dsh_names_the_binary_and_profile(tmp_path, monkeypatch)
     monkeypatch.setattr("a2a_adapter.cli.resolve_dsh_bin", lambda value: "/opt/bin/dsh")
     display = _display(["dsh", "--cwd", str(tmp_path), "--model", "m1"])
     assert display.backend.command == "/opt/bin/dsh · profile sdk · model m1"
+
+
+# ── --auth-token (Fix 4) ─────────────────────────────────────
+
+
+def _serve_kwargs(argv):
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        main(argv)
+    return serve.call_args.kwargs
+
+
+def test_cli_auth_token_flag(tmp_path, monkeypatch):
+    monkeypatch.delenv("A2A_AUTH_TOKEN", raising=False)
+    kwargs = _serve_kwargs(["claude", "--cwd", str(tmp_path), "--auth-token", "flag-token"])
+    assert kwargs["auth_token"] == "flag-token"
+
+
+def test_cli_auth_token_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("A2A_AUTH_TOKEN", "  env-token \n")
+    assert _serve_kwargs(["claude", "--cwd", str(tmp_path)])["auth_token"] == "env-token"
+
+
+def test_cli_no_auth_token_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("A2A_AUTH_TOKEN", raising=False)
+    assert _serve_kwargs(["claude", "--cwd", str(tmp_path)])["auth_token"] is None
+
+
+@pytest.mark.parametrize("value", ["", "   ", "\t"])
+def test_cli_empty_or_whitespace_env_token_is_unset(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("A2A_AUTH_TOKEN", value)
+    assert _serve_kwargs(["claude", "--cwd", str(tmp_path)])["auth_token"] is None
+
+
+def test_cli_auth_token_flag_beats_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("A2A_AUTH_TOKEN", "env-token")
+    kwargs = _serve_kwargs(["codex", "--cwd", str(tmp_path), "--auth-token", "flag-token"])
+    assert kwargs["auth_token"] == "flag-token"
+
+
+@pytest.mark.parametrize("value", ["", "  "])
+def test_cli_rejects_empty_auth_token_flag(tmp_path, capsys, value):
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        with pytest.raises(SystemExit) as exit_info:
+            main(["claude", "--cwd", str(tmp_path), "--auth-token", value])
+    assert exit_info.value.code == 2
+    serve.assert_not_called()
+    assert "auth-token" in capsys.readouterr().err
+
+
+def test_cli_removes_token_from_environ(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setenv("A2A_AUTH_TOKEN", "env-token")
+    _serve_kwargs(["claude", "--cwd", str(tmp_path)])
+    assert "A2A_AUTH_TOKEN" not in os.environ
+
+
+def test_cli_auth_token_flag_is_stripped(tmp_path):
+    kwargs = _serve_kwargs(["claude", "--cwd", str(tmp_path), "--auth-token", " tok\n"])
+    assert kwargs["auth_token"] == "tok"
+
+
+@pytest.mark.parametrize("source", ["flag", "env"])
+def test_cli_rejects_non_ascii_token_as_usage_error(tmp_path, monkeypatch, capsys, source):
+    argv = ["claude", "--cwd", str(tmp_path)]
+    if source == "flag":
+        argv += ["--auth-token", "tök"]
+    else:
+        monkeypatch.setenv("A2A_AUTH_TOKEN", "tök")
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        with pytest.raises(SystemExit) as exit_info:
+            main(argv)
+    assert exit_info.value.code == 2
+    serve.assert_not_called()
+    assert "printable ASCII" in capsys.readouterr().err
+
+
+def test_cli_push_flags_left_to_the_sdk_by_default(tmp_path):
+    kwargs = _serve_kwargs(["claude", "--cwd", str(tmp_path)])
+    assert "push_notifications" not in kwargs
+    assert "allow_private_push_urls" not in kwargs
+
+
+@pytest.mark.parametrize(
+    "flags, expected",
+    [
+        (["--push-notifications"], {"push_notifications": True}),
+        (["--no-push-notifications"], {"push_notifications": False}),
+        (
+            ["--push-notifications", "--allow-private-push-urls"],
+            {"push_notifications": True, "allow_private_push_urls": True},
+        ),
+        (
+            ["--push-notifications", "--no-allow-private-push-urls"],
+            {"push_notifications": True, "allow_private_push_urls": False},
+        ),
+    ],
+)
+def test_cli_push_flags_reach_serve_agent(tmp_path, flags, expected):
+    kwargs = _serve_kwargs(["claude", "--cwd", str(tmp_path), *flags])
+    for key in ("push_notifications", "allow_private_push_urls"):
+        assert kwargs.get(key) == expected.get(key), key
+
+
+@pytest.mark.parametrize("push", [[], ["--no-push-notifications"]])
+def test_cli_allow_private_without_push_warns_and_is_ignored(tmp_path, capsys, push):
+    kwargs = _serve_kwargs(["claude", "--cwd", str(tmp_path), *push, "--allow-private-push-urls"])
+    assert "allow_private_push_urls" not in kwargs
+    assert "--allow-private-push-urls" in capsys.readouterr().err

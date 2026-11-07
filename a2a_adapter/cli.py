@@ -104,6 +104,27 @@ def _positive_int(value: str) -> int:
     return number
 
 
+_AUTH_TOKEN_ENV = "A2A_AUTH_TOKEN"
+
+
+def _token(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("token must not be empty")
+    return value.strip()
+
+
+def _auth_token(flag: str | None) -> str | None:
+    """--auth-token, else $A2A_AUTH_TOKEN (stripped; empty means unset).
+
+    The variable is removed from this process's environment either way, so
+    it never reaches the agent or the tools it runs.
+    """
+    from_env = os.environ.pop(_AUTH_TOKEN_ENV, None)
+    if flag is not None:
+        return flag
+    return from_env.strip() if from_env and from_env.strip() else None
+
+
 def _add_help(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-h", "--help", "-help", action="help", help="show this help message")
 
@@ -115,7 +136,32 @@ def _add_server_options(
     parser.add_argument(
         "--cwd", default=".", help="Agent working directory (default: current directory)"
     )
-    parser.add_argument("--host", default="127.0.0.1", help="A2A server bind host")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="A2A server bind host (use 0.0.0.0 with --auth-token for remote clients)",
+    )
+    parser.add_argument(
+        "--auth-token",
+        type=_token,
+        metavar="TOKEN",
+        help=(
+            f"Require 'Authorization: Bearer TOKEN' on every request except the agent card "
+            f"(default: ${_AUTH_TOKEN_ENV}; prefer the variable, argv is visible in ps)"
+        ),
+    )
+    parser.add_argument(
+        "--push-notifications",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Accept push-notification configs and POST task updates to them (default: off)",
+    )
+    parser.add_argument(
+        "--allow-private-push-urls",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Also allow push URLs on localhost and private networks (default: rejected)",
+    )
     parser.add_argument("--port", type=_port, default=9000, help="A2A server port")
     parser.add_argument(
         "--timeout", type=_positive_float, default=600.0, help="Agent timeout in seconds"
@@ -329,6 +375,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     wrapper_args, agent_args = _split_agent_args(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(wrapper_args)
+    auth_token = _auth_token(args.auth_token)
+    if auth_token is not None and not all(" " <= char <= "~" for char in auth_token):
+        parser.error(f"--auth-token / ${_AUTH_TOKEN_ENV} must be printable ASCII")
     _validate_agent_args(parser, args.agent, agent_args)
     working_dir = _working_directory(parser, args.cwd)
     name, description = _card_identity(args.agent, working_dir, args.name, args.description)
@@ -425,8 +474,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         port=args.port,
         log_level=args.log_level,
         display=display,
+        auth_token=auth_token,
+        **_push_options(args),
     )
     return 0
+
+
+def _push_options(args: argparse.Namespace) -> dict[str, bool]:
+    """The push flags the user set; unset ones keep the SDK defaults."""
+    options = {}
+    if args.push_notifications is not None:
+        options["push_notifications"] = args.push_notifications
+    if args.allow_private_push_urls is not None:
+        if args.push_notifications:
+            options["allow_private_push_urls"] = args.allow_private_push_urls
+        elif args.allow_private_push_urls:
+            print(
+                "a2a-adapter: warning: --allow-private-push-urls has no effect "
+                "without --push-notifications",
+                file=sys.stderr,
+            )
+    return options
 
 
 if __name__ == "__main__":  # pragma: no cover

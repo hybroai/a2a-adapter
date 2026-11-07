@@ -13,12 +13,15 @@ Design philosophy:
 """
 
 import asyncio
+import atexit
 import contextlib
 import hashlib
 import json
 import logging
 import os
+import signal
 import tempfile
+import weakref
 from abc import ABC, abstractmethod
 from asyncio import wait_for
 from asyncio.subprocess import DEVNULL, PIPE, Process, create_subprocess_exec
@@ -30,6 +33,158 @@ from a2a.types import Part
 from .exceptions import CancelledByAdapterError
 
 logger = logging.getLogger(__name__)
+
+# ──── Process-tree management ────
+#
+# CLI agents (claude, codex, pi, ...) start their own children: shells, MCP
+# servers, tool processes. Signalling only the direct child leaves those
+# running and holding its stdout/stderr pipes. On POSIX each CLI therefore
+# starts in a new session, so it leads its own process group and the whole
+# tree can be signalled at once with ``os.killpg``. A CLI helper that moves
+# itself into yet another session escapes the group; Windows keeps the
+# single-process kill.
+
+# Server secrets that must not reach the agent or the tools it runs. Removed
+# from a CLI's environment unless the adapter's own env_vars set them.
+_SERVER_SECRET_ENV = ("A2A_AUTH_TOKEN",)
+
+
+def _child_env(env_vars: dict[str, str]) -> dict[str, str]:
+    """Environment for a CLI child: os.environ minus server secrets, plus ``env_vars``."""
+    env = os.environ.copy()
+    for name in _SERVER_SECRET_ENV:
+        env.pop(name, None)
+    env.update(env_vars)
+    return env
+
+
+_SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+_POST_KILL_WAIT = 5.0  # seconds to wait for a killed process to be reaped
+_MIN_TAIL_WAIT = 0.1  # seconds a streaming run gets to exit after its output ends
+
+# Processes this module spawned as process-group leaders. Only these are ever
+# passed to ``os.killpg``; anything else (mocks with fake PIDs, processes
+# spawned elsewhere) gets the single-process path.
+_OWN_GROUPS: "weakref.WeakSet[Process]" = weakref.WeakSet()
+_atexit_registered = False
+
+
+def _register_own_group(proc: Process) -> None:
+    """Record ``proc`` as a process-group leader we may ``killpg``.
+
+    Only a real ``asyncio.subprocess.Process`` that leads its own group
+    (``pgid == pid``) is recorded.
+    """
+    global _atexit_registered
+    if os.name != "posix" or not isinstance(proc, Process):
+        return
+    try:
+        if os.getpgid(proc.pid) != proc.pid:
+            return
+    except (ProcessLookupError, PermissionError):
+        return
+    _OWN_GROUPS.add(proc)
+    if not _atexit_registered:
+        atexit.register(_kill_own_groups_at_exit)
+        _atexit_registered = True
+
+
+def _forget_own_group(proc: Process) -> None:
+    """Stop treating ``proc``'s group as ours (its run is over and reaped)."""
+    _OWN_GROUPS.discard(proc)
+
+
+def _owns_group(proc: Process) -> bool:
+    return proc in _OWN_GROUPS
+
+
+def _forget_own_group_if_empty(proc: Process) -> None:
+    """Forget ``proc``'s group once its reaped leader left no member behind.
+
+    A child that moved its stdio off the CLI's pipes keeps the group alive
+    after ``wait()`` returns; the group stays ours (and killable by cancel,
+    close and the exit hook) until it is empty. While any member lives, the
+    group ID cannot be reused.
+    """
+    if not _owns_group(proc) or proc.returncode is None:
+        return
+    try:
+        os.killpg(proc.pid, 0)
+    except (ProcessLookupError, PermissionError):  # empty, or the ID is someone else's
+        _forget_own_group(proc)
+    except OSError:
+        pass
+
+
+async def _spawn_cli(factory, *args, **kwargs) -> Process:
+    """Spawn a CLI with ``factory`` (a ``create_subprocess_exec``) in its own group.
+
+    Callers pass their module's own ``create_subprocess_exec`` so tests that
+    patch that name keep working.
+    """
+    if os.name == "posix":
+        kwargs["start_new_session"] = True
+    proc = await factory(*args, **kwargs)
+    _register_own_group(proc)
+    return proc
+
+
+def _kill_process_tree(proc: Process, sig: int = _SIGKILL) -> None:
+    """Signal ``proc`` and, on POSIX, every process in its group.
+
+    The group is signalled even when the leader already exited, because its
+    children can outlive it. Call this only on abnormal paths (cancel,
+    timeout, error, close, shutdown), never after a clean exit, and forget the
+    process once it is reaped: a group ID can be reused once all its members
+    are gone. Uses only calls that are safe inside a signal handler.
+    """
+    if _owns_group(proc):
+        try:
+            os.killpg(proc.pid, sig)
+            return
+        except ProcessLookupError:
+            return  # the whole group is already gone
+        except PermissionError as error:
+            logger.debug("killpg(%s) failed (%s); signalling the process only", proc.pid, error)
+    if proc.returncode is not None:
+        return
+    try:
+        if sig == _SIGKILL:
+            proc.kill()
+        elif sig == signal.SIGTERM:
+            proc.terminate()
+        else:
+            proc.send_signal(sig)
+    except ProcessLookupError:
+        pass
+
+
+async def _wait_reaped(proc: Process, timeout: float = _POST_KILL_WAIT) -> None:
+    """Wait for a killed process, bounded.
+
+    ``Process.wait()`` returns only once the process exited and all its pipes
+    closed, so a process outside the group that still holds a pipe would
+    block it forever. The leader is dead either way.
+    """
+    try:
+        await asyncio.wait_for(proc.wait(), timeout)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Process %s was killed but its pipes are still open after %ss; moving on",
+            getattr(proc, "pid", "?"),
+            timeout,
+        )
+
+
+def _kill_own_groups_at_exit() -> None:
+    """Last resort at interpreter exit: SIGKILL every group still registered.
+
+    Including groups whose leader already exited, as cancel() and close() do:
+    their other members may still run.
+    """
+    for proc in list(_OWN_GROUPS):
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, _SIGKILL)
 
 
 def default_state_dir(agent: str, working_dir: str) -> str:
@@ -279,27 +434,43 @@ class BaseA2AAdapter(ABC):
         task_id = context.task_id
 
         proc = self._active_processes.get(task_id)
-        if proc and proc.returncode is None:
+        # A group we spawned is killed even if the CLI itself already exited:
+        # its children may still be running and holding the pipes.
+        if proc and (proc.returncode is None or _owns_group(proc)):
             self._killed_tasks.add(task_id)
-            logger.debug("Killing subprocess for task %s", task_id)
-            proc.kill()
+            logger.debug("Killing subprocess tree for task %s", task_id)
+            _kill_process_tree(proc)
         else:
             self._cancelled_tasks.add(task_id)
             logger.debug("Queued cancellation for task %s", task_id)
 
+    def kill_children_now(self) -> None:
+        """SIGKILL every running CLI process tree, synchronously.
+
+        Called from the server's signal handler on Ctrl+C, so it does no
+        awaiting and clears no state; in-flight requests then fail promptly
+        and ``close()`` does the rest. No-op for non-CLI adapters.
+        """
+        if not getattr(self, "_cli_runtime_enabled", False):
+            return
+        for proc in list(self._active_processes.values()):
+            try:
+                _kill_process_tree(proc)
+            except Exception:  # never let one failure stop the others
+                logger.debug("Could not kill subprocess %s", getattr(proc, "pid", "?"))
+
     async def close(self) -> None:
-        """Kill all active subprocesses. No-op if super().__init__() wasn't called."""
+        """Kill all active subprocess trees. No-op if super().__init__() wasn't called."""
         if not getattr(self, "_cli_runtime_enabled", False):
             return
 
         for task_id, proc in list(self._active_processes.items()):
-            if proc.returncode is None:
-                logger.debug("Killing subprocess %s during close", task_id)
-                proc.kill()
-                try:
-                    await proc.wait()
-                except Exception:
-                    pass
+            logger.debug("Killing subprocess tree %s during close", task_id)
+            _kill_process_tree(proc)
+            try:
+                await _wait_reaped(proc)
+            except Exception:
+                pass
         self._active_processes.clear()
         self._cancelled_tasks.clear()
         self._killed_tasks.clear()
@@ -325,7 +496,8 @@ class BaseA2AAdapter(ABC):
 
         # 3. Spawn
         try:
-            proc = await create_subprocess_exec(
+            proc = await _spawn_cli(
+                create_subprocess_exec,
                 *cmd_result.args,
                 stdin=PIPE if stdin_bytes is not None else DEVNULL,
                 stdout=PIPE,
@@ -341,6 +513,7 @@ class BaseA2AAdapter(ABC):
 
         # 4. Track
         self._active_processes[task_id] = proc
+        aborted = False
         try:
             try:
                 communicate = (
@@ -350,52 +523,48 @@ class BaseA2AAdapter(ABC):
                 )
                 stdout_bytes, stderr_bytes = await wait_for(communicate, timeout=self.timeout)
             except asyncio.TimeoutError:
-                if proc.returncode is None:
-                    proc.kill()
-                    await proc.wait()
+                aborted = True
+                _kill_process_tree(proc)
+                await _wait_reaped(proc)
                 raise RuntimeError(f"Command timed out after {self.timeout} seconds")
             except asyncio.CancelledError:
-                # Task cancelled (tasks/cancel or shutdown): don't orphan the child
-                self._killed_tasks.discard(task_id)
-                if proc.returncode is None:
-                    proc.kill()
-                    await proc.wait()
+                # Task cancelled (tasks/cancel or shutdown): don't orphan the tree
+                aborted = True
+                _kill_process_tree(proc)
+                await _wait_reaped(proc)
                 raise
         finally:
             self._active_processes.pop(task_id, None)
-
-        # 5. Kill detection
-        if proc.returncode is not None and proc.returncode < 0:
-            if task_id in self._killed_tasks:
+            _forget_own_group(proc)
+            if aborted:
+                # After the pop, so a cancel() racing the reap can't re-add a
+                # marker that would mark a later run with this ID cancelled.
                 self._killed_tasks.discard(task_id)
-                raise CancelledByAdapterError(f"Task {task_id} was killed by cancel request")
+
+        # 5. Kill detection (the CLI may have exited on its own before cancel()
+        # killed the rest of its group, so don't require a negative exit code)
+        if task_id in self._killed_tasks:
+            self._killed_tasks.discard(task_id)
+            raise CancelledByAdapterError(f"Task {task_id} was killed by cancel request")
 
         stdout_text = stdout_bytes.decode("utf-8", errors="replace")
         stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
 
-        # 6. Stale retry — only when BOTH stdout and stderr are empty.
-        # If stderr has content, it signals a real error (auth, env, CLI bug)
-        # and the session may still be valid. Don't mask the real failure.
+        # 6. Stale retry. A resumed run that fails with no output at all is
+        # treated as a stale session; so is one whose output the adapter's
+        # _is_stale_session_error() hook recognises. Any other stderr is a
+        # real error (auth, env, CLI bug) and the session may still be valid.
+        retryable = allow_retry and cmd_result.used_resume
         if (
-            allow_retry
+            retryable
             and proc.returncode is not None
             and proc.returncode > 0
-            and not stdout_text.strip()
-            and not stderr_text
-            and cmd_result.used_resume
+            and (
+                (not stdout_text.strip() and not stderr_text)
+                or self._is_stale_session_error(stdout_text, stderr_text)
+            )
         ):
-            logger.info(
-                "Stale session for context %s, retrying without resume",
-                context_key,
-            )
-            self._sessions.pop(context_key, None)
-            self._save_sessions()
-            return await self._run_subprocess(
-                context_key,
-                task_id,
-                user_input=user_input,
-                allow_retry=False,
-            )
+            return await self._retry_without_resume(context_key, task_id, user_input)
 
         # 7. Non-zero exit — prefer the CLI's structured error over stderr noise
         if proc.returncode != 0:
@@ -406,8 +575,14 @@ class BaseA2AAdapter(ABC):
         if not output_text.strip():
             raise RuntimeError("Command returned empty output")
 
-        # 8. Parse (subclass hook)
-        result = self._parse_invoke_output(output_text, context_key)
+        # 8. Parse (subclass hook). A CLI may exit 0 and report the missing
+        # session only as a failed turn, so the hook is checked here too.
+        try:
+            result = self._parse_invoke_output(output_text, context_key)
+        except Exception:
+            if retryable and self._is_stale_session_error(stdout_text, stderr_text):
+                return await self._retry_without_resume(context_key, task_id, user_input)
+            raise
 
         # 9. Persist session
         if result.session_id:
@@ -415,6 +590,18 @@ class BaseA2AAdapter(ABC):
             self._save_sessions()
 
         return result.text
+
+    async def _retry_without_resume(self, context_key: str, task_id: str, user_input: str) -> str:
+        self._forget_stale_session(context_key)
+        return await self._run_subprocess(
+            context_key, task_id, user_input=user_input, allow_retry=False
+        )
+
+    def _forget_stale_session(self, context_key: str) -> None:
+        """Drop the stored session for ``context_key`` (memory and disk)."""
+        logger.warning("Stale session for context %s, retrying once without resume", context_key)
+        self._sessions.pop(context_key, None)
+        self._save_sessions()
 
     async def _run_subprocess_streaming(
         self,
@@ -436,7 +623,8 @@ class BaseA2AAdapter(ABC):
 
         # 3. Spawn
         try:
-            proc = await create_subprocess_exec(
+            proc = await _spawn_cli(
+                create_subprocess_exec,
                 *cmd_result.args,
                 stdin=PIPE if cmd_result.stdin is not None else DEVNULL,
                 stdout=PIPE,
@@ -450,9 +638,22 @@ class BaseA2AAdapter(ABC):
                 raise FileNotFoundError(f"Working directory does not exist: '{self.working_dir}'")
             raise FileNotFoundError(self._binary_not_found_message())
 
-        # 4. Track
+        # 4. Track. ``self.timeout`` bounds the whole run, not each line: a
+        # CLI that keeps printing must still stop at the deadline. Each await
+        # gets the time that is left instead of one asyncio.timeout() around
+        # the loop, which would fire while the generator is suspended at
+        # ``yield`` and cancel the consumer at an unrelated await. Time the
+        # consumer spends between chunks counts toward the deadline.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout
         self._active_processes[task_id] = proc
         yielded_any = False
+
+        def _remaining() -> float:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            return remaining
 
         stderr_chunks: list[bytes] = []
 
@@ -472,12 +673,24 @@ class BaseA2AAdapter(ABC):
             if cmd_result.stdin is not None
             else None
         )
+        helpers = [task for task in (stderr_task, stdin_task) if task is not None]
+
+        async def _stop_after_kill() -> None:
+            for task in helpers:
+                task.cancel()
+            # return_exceptions: a helper that failed (or was cancelled) must
+            # not skip the others or the reap.
+            await asyncio.gather(*helpers, return_exceptions=True)
+            await _wait_reaped(proc)
+
         aborted = False
+        tail_timed_out = False
+        stale = False
 
         try:
             assert proc.stdout is not None
             while True:
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout=self.timeout)
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=_remaining())
                 if not line:
                     break
                 text = line.decode("utf-8", errors="replace").strip()
@@ -489,6 +702,18 @@ class BaseA2AAdapter(ABC):
                     continue
 
                 if event.error:
+                    if (
+                        allow_retry
+                        and cmd_result.used_resume
+                        and not yielded_any
+                        and self._is_stale_session_error(text, "")
+                    ):
+                        # Retry below. Kill the CLI first so a process (or MCP
+                        # child) that keeps running can't hold the tail wait
+                        # for the whole deadline.
+                        stale = True
+                        _kill_process_tree(proc)
+                        break
                     raise RuntimeError(event.error)
                 if event.session_id:
                     self._sessions[context_key] = event.session_id
@@ -499,62 +724,78 @@ class BaseA2AAdapter(ABC):
 
         except asyncio.TimeoutError:
             aborted = True
-            if proc.returncode is None:
-                proc.kill()
+            _kill_process_tree(proc)
             raise RuntimeError(f"Command timed out after {self.timeout} seconds")
         except (GeneratorExit, asyncio.CancelledError):
             aborted = True
-            if proc.returncode is None:
-                proc.kill()
+            _kill_process_tree(proc)
             raise
         except Exception:
             aborted = True
-            if proc.returncode is None:
-                proc.kill()
+            _kill_process_tree(proc)
             raise
         finally:
-            self._active_processes.pop(task_id, None)
-
-            if aborted:
-                for task in (stderr_task, stdin_task):
-                    if task is None:
-                        continue
-                    task.cancel()
+            try:
+                if aborted:
+                    await _stop_after_kill()
+                else:
+                    # stdout closed; the CLI (or a child holding stderr) may
+                    # still run, so the tail is bounded by the same deadline.
                     try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                await proc.wait()
-            else:
-                await proc.wait()
-                await stderr_task
-                if stdin_task is not None:
-                    await stdin_task
+                        await asyncio.wait_for(
+                            asyncio.gather(proc.wait(), *helpers),
+                            # A floor, so output that ended right at the
+                            # deadline isn't reported as a timeout.
+                            timeout=max(deadline - loop.time(), _MIN_TAIL_WAIT),
+                        )
+                    except asyncio.TimeoutError:
+                        tail_timed_out = True
+                        _kill_process_tree(proc)
+                        await _stop_after_kill()
+                    except BaseException:  # consumer cancelled, or a helper failed
+                        aborted = True
+                        _kill_process_tree(proc)
+                        await _stop_after_kill()
+                        raise
+            finally:
+                # Popped only now, so cancel() and kill_children_now() still
+                # reach a CLI that closed stdout but keeps running.
+                self._active_processes.pop(task_id, None)
+                _forget_own_group(proc)
+                if aborted or tail_timed_out:
+                    # After the pop, so a cancel() racing the reap can't re-add
+                    # a marker that would mark a later run with this ID cancelled.
+                    self._killed_tasks.discard(task_id)
+
+        if tail_timed_out:
+            raise RuntimeError(f"Command timed out after {self.timeout} seconds")
 
         stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
 
-        # Kill detection
-        if proc.returncode is not None and proc.returncode < 0:
-            if task_id in self._killed_tasks:
-                self._killed_tasks.discard(task_id)
-                raise CancelledByAdapterError(f"Task {task_id} was killed by cancel request")
+        # Kill detection (see _run_subprocess)
+        if task_id in self._killed_tasks:
+            self._killed_tasks.discard(task_id)
+            raise CancelledByAdapterError(f"Task {task_id} was killed by cancel request")
 
-        # Stale retry — only when BOTH no output yielded and stderr empty.
-        # If stderr has content, it signals a real error; don't mask it.
+        # Stale retry — never after output reached the client. A resumed run
+        # that failed with no output and no stderr, or whose error line or
+        # stderr the hook recognises, is treated as a stale session.
         if (
             allow_retry
-            and proc.returncode is not None
-            and proc.returncode > 0
-            and not yielded_any
-            and not stderr_text
             and cmd_result.used_resume
-        ):
-            logger.info(
-                "Stale session for context %s (stream), retrying",
-                context_key,
+            and not yielded_any
+            and (
+                stale
+                or (proc.returncode is not None and proc.returncode > 0 and not stderr_text)
+                or (
+                    proc.returncode is not None
+                    and proc.returncode >= 0
+                    and self._is_stale_session_error("", stderr_text)
+                )
             )
-            self._sessions.pop(context_key, None)
-            self._save_sessions()
+        ):
+            self._forget_stale_session(context_key)
+            # The retry gets a fresh timeout budget, as in _run_subprocess.
             async for chunk in self._run_subprocess_streaming(
                 context_key,
                 task_id,
@@ -597,10 +838,8 @@ class BaseA2AAdapter(ABC):
         return self._context_locks[context_key]
 
     def _build_env(self) -> dict[str, str]:
-        """Build subprocess environment: os.environ + self.env_vars."""
-        env = os.environ.copy()
-        env.update(self.env_vars)
-        return env
+        """Build subprocess environment: os.environ (minus server secrets) + self.env_vars."""
+        return _child_env(self.env_vars)
 
     def _load_sessions(self) -> None:
         """Load session mapping from disk. Missing/corrupt -> empty dict."""
@@ -687,6 +926,18 @@ class BaseA2AAdapter(ABC):
         result to stderr instead.
         """
         return stdout_text
+
+    def _is_stale_session_error(self, stdout_text: str, stderr_text: str) -> bool:
+        """Whether a failed resumed run says its session no longer exists. Optional.
+
+        When True, the stored session is dropped and the run is retried once
+        without resume (never after streamed output reached the client).
+        Defaults to False: only a resumed run with no output at all counts.
+        Match the CLI's own error messages, not the whole transcript: model
+        text or tool output may quote the same words. ``stdout_text`` is the
+        run's stdout (or one error line when streaming).
+        """
+        return False
 
     def _extract_error(self, stdout_text: str) -> str | None:
         """Return the CLI's own error message from stdout of a failed run. Optional.

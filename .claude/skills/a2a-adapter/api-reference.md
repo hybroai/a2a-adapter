@@ -267,7 +267,8 @@ Run it from the project directory the agent should work in. Options before `--` 
 | Server option | Default | Purpose |
 |---|---|---|
 | `--cwd` | current directory | Directory the agent works in |
-| `--host` / `--port` | `127.0.0.1` / `9000` | Bind address; `--host 0.0.0.0` accepts remote connections |
+| `--host` / `--port` | `127.0.0.1` / `9000` | Bind address; `--host 0.0.0.0` with `--auth-token` accepts remote connections |
+| `--auth-token` | none, or `$A2A_AUTH_TOKEN` | Require `Authorization: Bearer <token>` on every request except the Agent Card |
 | `--name` | `<Agent> (<folder>)` | Agent Card display name |
 | `--description` | `<Agent> agent working in <folder>` | Agent Card description |
 | `--skill` | one skill from the card name and description | Agent Card skill as JSON (`id`, `name`, `description`, at least one `tags` entry, optional `examples`); repeatable |
@@ -295,12 +296,15 @@ Agent-specific options:
 serve_agent(
     adapter: BaseA2AAdapter,
     agent_card: AgentCard | None = None,   # Override auto-generated card
-    host: str = "0.0.0.0",                 # All interfaces; use "127.0.0.1" for local-only
+    host: str = "127.0.0.1",               # This machine only; "0.0.0.0" for remote clients
     port: int = 9000,
     log_level: str = "info",
     *,
     display: TerminalDisplay | None = None,  # CLI startup card + activity log
-    **kwargs,                              # Passed to uvicorn.run()
+    auth_token: str | None = None,         # Bearer token for every route but the card
+    push_notifications: bool | None = None,  # Default off
+    allow_private_push_urls: bool = False, # Allow localhost/private push receivers
+    **kwargs,                              # Passed to uvicorn.Config
 )
 ```
 
@@ -311,8 +315,12 @@ app = to_a2a(
     adapter: BaseA2AAdapter,
     agent_card: AgentCard | None = None,
     task_store: TaskStore | None = None,   # Default: InMemoryTaskStore
+    auth_token: str | None = None,         # Bearer token for every route but the card
+    push_notifications: bool | None = None,  # Default off; a given card decides
+    allow_private_push_urls: bool = False, # Allow localhost/private push receivers
     **card_overrides,                      # name=, description=, url=, version=, streaming=,
-                                           # provider=, documentation_url=, icon_url=
+                                           # provider=, documentation_url=, icon_url=,
+                                           # bearer_auth= (declare the bearer scheme)
 )
 # Deploy with any ASGI server:
 # gunicorn app:app -k uvicorn.workers.UvicornWorker
@@ -322,7 +330,7 @@ app = to_a2a(
 
 `streaming=False` does not disable auto-detection; override `supports_streaming()` to turn streaming off.
 
-The app serves JSON-RPC at `/` (A2A 1.0 methods plus the v0.3 names for older clients), REST routes, and the AgentCard at `/.well-known/agent-card.json` (also the legacy `/.well-known/agent.json`). Auto-enabled capabilities on the generated AgentCard: `streaming` (auto-detected) and `push_notifications=True`.
+The app serves JSON-RPC at `/` (A2A 1.0 methods plus the v0.3 names for older clients), REST routes, and the AgentCard at `/.well-known/agent-card.json` (also the legacy `/.well-known/agent.json`). On the generated AgentCard, `streaming` is auto-detected and `push_notifications` is off unless you pass `push_notifications=True`. With push on, URLs on localhost and private or non-public addresses are rejected unless `allow_private_push_urls=True` (JSON-RPC `-32602` on A2A 1.0 methods, HTTP 400 on REST, `-32603` on the v0.3 method names under a2a-sdk 1.0).
 
 ### `build_agent_card()` -- generate AgentCard
 
@@ -330,7 +338,9 @@ The app serves JSON-RPC at `/` (A2A 1.0 methods plus the v0.3 names for older cl
 card = build_agent_card(
     adapter: BaseA2AAdapter,
     **overrides,     # name=, description=, url=, version=, streaming=,
-                     # provider=, documentation_url=, icon_url=
+                     # provider=, documentation_url=, icon_url=,
+                     # bearer_auth= (declare the bearer scheme),
+                     # push_notifications= (default False)
 )
 ```
 

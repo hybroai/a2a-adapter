@@ -22,6 +22,16 @@ from ..base_adapter import (
 
 logger = logging.getLogger(__name__)
 
+# What Codex can print when `exec resume <id>` names an unknown thread (found
+# in the Codex 0.162.1 binary; which one, and on which stream, is unconfirmed).
+# Lowercase; matched against stdout and stderr.
+_STALE_SESSION_PATTERNS = (
+    "no saved session found with id ",
+    "no rollout found for thread id ",
+    "no rollout found for conversation id ",
+    "thread not found: ",
+)
+
 
 class CodexAdapter(BaseA2AAdapter):
     """Adapter for the OpenAI Codex CLI.
@@ -190,6 +200,31 @@ class CodexAdapter(BaseA2AAdapter):
             elif event.get("type") == "error" and event.get("message") and error_msg is None:
                 error_msg = str(event["message"])
         return self._unwrap_api_error(error_msg) if error_msg else None
+
+    def _is_stale_session_error(self, stdout_text: str, stderr_text: str) -> bool:
+        # Only Codex's own error events and stderr: the rest of stdout is the
+        # transcript, where agent text or command output may quote a pattern.
+        errors = [*self._error_records(stdout_text), stderr_text]
+        output = "\n".join(errors).lower()
+        return any(pattern in output for pattern in _STALE_SESSION_PATTERNS)
+
+    @staticmethod
+    def _error_records(stdout_text: str) -> list[str]:
+        """Messages of ``error`` and ``turn.failed`` events in ``--json`` output."""
+        records = []
+        for line in stdout_text.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == "error":
+                records.append(str(event.get("message", "")))
+            elif event.get("type") == "turn.failed":
+                error = event.get("error")
+                records.append(str(error.get("message", "") if isinstance(error, dict) else error))
+        return records
 
     def _binary_not_found_message(self) -> str:
         return (
