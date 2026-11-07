@@ -8,6 +8,27 @@ Conventional Commits. Earlier entries follow
 [Keep a Changelog](https://keepachangelog.com/). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0](https://github.com/hybroai/a2a-adapter/compare/v0.2.19...v0.3.0) (2026-11-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **server:** push notifications are off by default. Pass push_notifications=True (--push-notifications) to re-enable; private and loopback receivers also need allow_private_push_urls=True.
+* **server:** serve_agent() now binds 127.0.0.1 instead of 0.0.0.0. Pass host="0.0.0.0" (with auth_token) for Docker or LAN access.
+
+### Features
+
+* **server:** add optional bearer-token auth and bind 127.0.0.1 by default ([0ff2395](https://github.com/hybroai/a2a-adapter/commit/0ff239568f4957b3c52a5148d39e88feb37dedc3))
+* **server:** make push notifications opt-in and reject private push URLs ([ade4d62](https://github.com/hybroai/a2a-adapter/commit/ade4d6274344fb8879d223fe7057a890af04dac4))
+
+
+### Bug Fixes
+
+* **adapter:** bound streaming CLI runs by the total timeout ([73bc199](https://github.com/hybroai/a2a-adapter/commit/73bc199bbbed54630049e26d2e2c3abaa8acb73b))
+* **adapter:** drop a stale resume session the CLI reports on stderr ([3a892bd](https://github.com/hybroai/a2a-adapter/commit/3a892bd38d30abf8bc0dac1705e037e95e7911e7))
+* **adapter:** keep killing a process group until it is empty ([b015e74](https://github.com/hybroai/a2a-adapter/commit/b015e7455164083a010582e7552993131007d050))
+* **adapter:** kill the CLI's whole process tree on cancel, timeout and close ([86e30f9](https://github.com/hybroai/a2a-adapter/commit/86e30f997f41220e68a597f39297a9e225b16f5d))
+
 ## [0.2.19](https://github.com/hybroai/a2a-adapter/compare/v0.2.18...v0.2.19) (2026-11-06)
 
 
