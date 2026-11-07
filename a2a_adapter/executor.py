@@ -353,6 +353,10 @@ class AdapterAgentExecutor(AgentExecutor):
         try:
             async with closing:
                 async for chunk in stream:
+                    if self._cancel_owns(context.task_id, run):
+                        # A stream that ignored the cancel: stop reading it
+                        # (it is closed below) and send nothing more.
+                        break
                     if self._is_empty_chunk(chunk):
                         continue
 
@@ -438,8 +442,9 @@ class AdapterAgentExecutor(AgentExecutor):
         The interrupted execute() waits until this returns, so the event
         queue is still open for the terminal state even when
         adapter.cancel() awaits. While a cancel is in progress, execute()
-        sends no terminal state and no late artifact of its own; if it had
-        already sent one, this sends nothing.
+        sends no terminal state and no late artifact of its own. If the
+        in-flight execute() had already sent one, this sends nothing; a
+        cancel that arrives after execute() returned is not covered.
 
         Args:
             context: Request context for the task being canceled.

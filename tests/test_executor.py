@@ -806,6 +806,45 @@ class TestCancelThroughHandler:
             ("status", FAILED, "Cancel failed: robot did not stop"),
         ]
 
+    @pytest.mark.parametrize("cancel_error", [None, RuntimeError("robot did not stop")])
+    async def test_a_stream_that_ignores_the_cancel_sends_nothing_after_it(
+        self, cancel_error, monkeypatch
+    ):
+        monkeypatch.setattr(executor_module, "_CANCEL_SETTLE_TIMEOUT", 0.05)
+
+        class StubbornStream(BaseA2AAdapter):
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                raise NotImplementedError
+
+            async def stream(self, user_input, context_id=None, **kwargs):
+                yield "a"
+                self.started.set()
+                while not self.release.is_set():
+                    try:
+                        await self.release.wait()
+                    except asyncio.CancelledError:
+                        continue
+                yield "late1"
+                yield "late2"
+
+            async def cancel(self, context_id=None, **kwargs):
+                if cancel_error is not None:
+                    raise cancel_error
+
+        adapter = StubbornStream()
+        result, payloads, stream, _ = await _run_and_cancel(adapter, wait_stream=False)
+        try:
+            expected = CANCELED if cancel_error is None else FAILED
+            assert result.status.state == expected
+        finally:
+            await _finish(adapter, stream)
+        assert stream.exception() is None
+        assert _states(payloads) == [("task", SUBMITTED), ("status", WORKING), ("status", expected)]
+
 
 class _BlockingQueue:
     """An event queue whose enqueue blocks on ``gate`` for matching events."""
