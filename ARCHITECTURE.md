@@ -111,6 +111,13 @@ only the direct child.
 that keeps printing still stops at the deadline). The stale-session retry
 gets a fresh budget.
 
+A resumed run whose session no longer exists is retried once without resume
+and the stored session is dropped. By default that is detected only when the
+run failed with no output at all; an adapter can override
+`_is_stale_session_error(stdout_text, stderr_text)` to recognise its CLI's
+own message (Claude Code and Codex do). A streaming run is never retried after
+output reached the client.
+
 ### AdapterAgentExecutor (`executor.py`)
 
 Bridge between `BaseA2AAdapter` and A2A SDK's `AgentExecutor`:

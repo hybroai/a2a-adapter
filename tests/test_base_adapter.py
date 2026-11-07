@@ -851,3 +851,248 @@ class TestStreamingDeadline:
 
 async def _collect_chunks(stream):
     return [chunk async for chunk in stream]
+
+
+# ── Stale resume session reported by the CLI (Fix 3) ─────────
+
+
+class _StaleHookAdapter(BaseA2AAdapter):
+    """CLI adapter whose hook treats ``marker`` in stdout/stderr as a stale session."""
+
+    def __init__(self, tmp_path, *, marker: str = "session gone", scripts=None):
+        super().__init__(
+            working_dir=str(tmp_path),
+            timeout=60,
+            session_store_path=str(tmp_path / "sessions.json"),
+        )
+        self.marker = marker
+        self.commands: list[list[str]] = []
+        self._scripts = scripts  # optional real ``python -c`` scripts, one per run
+
+    async def invoke(self, user_input, context_id=None, **kwargs):
+        return await self._run_subprocess("ctx", "task-1", user_input=user_input)
+
+    async def stream(self, user_input, context_id=None, **kwargs):
+        async for chunk in self._run_subprocess_streaming("ctx", "task-1", user_input=user_input):
+            yield chunk
+
+    def _build_command(self, message, context_key):
+        import sys
+
+        session = self._sessions.get(context_key)
+        resume = ["--resume", session] if session else []
+        if self._scripts is not None:
+            args = [sys.executable, "-c", self._scripts[len(self.commands)], *resume]
+        else:
+            args = ["cli", *resume]
+        self.commands.append(args)
+        return CommandResult(args=args, used_resume=bool(session))
+
+    def _parse_invoke_output(self, stdout_text, context_key):
+        return ParseResult(text=stdout_text.strip(), session_id="new-session")
+
+    def _handle_stream_line(self, line):
+        from a2a_adapter.base_adapter import StreamEvent
+
+        if line.startswith("ERR "):
+            return StreamEvent(error=line[4:])
+        if line.startswith("SID "):
+            return StreamEvent(session_id=line[4:])
+        return StreamEvent(text=line)
+
+    def _is_stale_session_error(self, stdout_text, stderr_text):
+        return self.marker in stdout_text or self.marker in stderr_text
+
+
+def _invoke_proc(stdout: bytes, stderr: bytes, returncode: int):
+    from unittest.mock import AsyncMock, MagicMock
+
+    proc = MagicMock(pid=4242, returncode=returncode)
+    proc.communicate = AsyncMock(return_value=(stdout, stderr))
+    proc.wait = AsyncMock(return_value=returncode)
+    return proc
+
+
+def _stream_proc(lines: list[bytes], stderr: bytes, returncode: int):
+    from unittest.mock import AsyncMock, MagicMock
+
+    proc = MagicMock(pid=4242, returncode=returncode)
+    proc.stdout.readline = AsyncMock(side_effect=[*lines, b""])
+    proc.stderr.read = AsyncMock(side_effect=[stderr, b""] if stderr else [b""])
+    proc.wait = AsyncMock(return_value=returncode)
+    return proc
+
+
+def _spawning(monkeypatch, procs):
+    from unittest.mock import AsyncMock
+
+    spawn = AsyncMock(side_effect=list(procs))
+    monkeypatch.setattr("a2a_adapter.base_adapter.create_subprocess_exec", spawn)
+    return spawn
+
+
+def _stale_adapter(tmp_path, **kwargs):
+    adapter = _StaleHookAdapter(tmp_path, **kwargs)
+    adapter._sessions["ctx"] = "old-session"
+    return adapter
+
+
+class TestStaleSessionHook:
+    def test_default_hook_is_false(self):
+        assert BaseA2AAdapter._is_stale_session_error(ConcreteAdapter(), "x", "y") is False
+
+    async def test_invoke_retries_when_hook_matches_stderr(self, tmp_path, monkeypatch):
+        import json
+
+        adapter = _stale_adapter(tmp_path)
+        _spawning(
+            monkeypatch,
+            [_invoke_proc(b"", b"session gone", 1), _invoke_proc(b"ok", b"", 0)],
+        )
+        assert await adapter.invoke("hi") == "ok"
+        assert adapter.commands == [["cli", "--resume", "old-session"], ["cli"]]
+        assert adapter._sessions["ctx"] == "new-session"
+        stored = json.loads((tmp_path / "sessions.json").read_text())
+        assert stored == {"ctx": "new-session"}
+
+    async def test_stream_retries_when_hook_matches_stderr(self, tmp_path, monkeypatch):
+        import json
+
+        adapter = _stale_adapter(tmp_path)
+        _spawning(
+            monkeypatch,
+            [
+                _stream_proc([], b"session gone", 1),
+                _stream_proc([b"SID new-session\n", b"ok\n"], b"", 0),
+            ],
+        )
+        assert [c async for c in adapter.stream("hi")] == ["ok"]
+        assert adapter.commands[1] == ["cli"]
+        assert adapter._sessions["ctx"] == "new-session"
+        stored = json.loads((tmp_path / "sessions.json").read_text())
+        assert stored == {"ctx": "new-session"}
+
+    async def test_stream_retries_when_hook_matches_error_line(self, tmp_path, monkeypatch):
+        adapter = _stale_adapter(tmp_path)
+        _spawning(
+            monkeypatch,
+            [
+                _stream_proc([b"ERR session gone\n"], b"", 1),
+                _stream_proc([b"ok\n"], b"", 0),
+            ],
+        )
+        assert [c async for c in adapter.stream("hi")] == ["ok"]
+        assert adapter.commands[1] == ["cli"]
+        assert "ctx" not in adapter._sessions
+
+    @posix_only
+    async def test_stream_stale_line_retries_even_if_cli_keeps_running(self, tmp_path):
+        import signal
+
+        pidfile = tmp_path / "stale.pid"
+        stale = (
+            "import os, time\n"
+            f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+            "print('ERR session gone', flush=True)\n"
+            "time.sleep(30)\n"
+        )
+        adapter = _stale_adapter(tmp_path, scripts=[stale, "print('ok')"])
+        try:
+            chunks = await asyncio.wait_for(_collect(adapter.stream("hi")), 5)
+            assert chunks == ["ok"]
+            assert len(adapter.commands) == 2
+            assert "--resume" not in adapter.commands[1]
+        finally:
+            if pidfile.exists():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+    async def test_no_retry_when_hook_does_not_match(self, tmp_path, monkeypatch):
+        adapter = _stale_adapter(tmp_path)
+        _spawning(monkeypatch, [_invoke_proc(b"", b"auth failed", 1)])
+        with pytest.raises(RuntimeError, match="auth failed"):
+            await adapter.invoke("hi")
+        assert adapter._sessions["ctx"] == "old-session"
+        assert len(adapter.commands) == 1
+
+    async def test_no_retry_after_output_was_streamed(self, tmp_path, monkeypatch):
+        adapter = _stale_adapter(tmp_path)
+        _spawning(monkeypatch, [_stream_proc([b"chunk\n"], b"session gone", 1)])
+        chunks = []
+        with pytest.raises(RuntimeError, match="exit code 1"):
+            async for chunk in adapter.stream("hi"):
+                chunks.append(chunk)
+        assert chunks == ["chunk"]
+        assert len(adapter.commands) == 1
+
+    async def test_hook_retry_happens_once(self, tmp_path, monkeypatch):
+        adapter = _stale_adapter(tmp_path)
+        _spawning(
+            monkeypatch,
+            [_invoke_proc(b"", b"session gone", 1), _invoke_proc(b"", b"session gone", 1)],
+        )
+        with pytest.raises(RuntimeError, match="session gone"):
+            await adapter.invoke("hi")
+        assert adapter.commands == [["cli", "--resume", "old-session"], ["cli"]]
+
+    async def test_stream_session_seen_before_stale_line_is_dropped(self, tmp_path, monkeypatch):
+        import json
+
+        adapter = _stale_adapter(tmp_path)
+        _spawning(
+            monkeypatch,
+            [
+                _stream_proc([b"SID half-made\n", b"ERR session gone\n"], b"", 1),
+                _stream_proc([b"ok\n"], b"", 0),
+            ],
+        )
+        assert [c async for c in adapter.stream("hi")] == ["ok"]
+        assert "ctx" not in adapter._sessions
+        assert json.loads((tmp_path / "sessions.json").read_text()) == {}
+
+    async def test_stream_stale_retry_happens_once(self, tmp_path, monkeypatch):
+        adapter = _stale_adapter(tmp_path)
+        adapter._sessions["ctx"] = "old-session"
+        _spawning(
+            monkeypatch,
+            [
+                _stream_proc([b"ERR session gone\n"], b"", 1),
+                _stream_proc([b"ERR session gone\n"], b"", 1),
+            ],
+        )
+
+        # The retry runs without --resume, so a second stale line is an error.
+        with pytest.raises(RuntimeError, match="session gone"):
+            async for _ in adapter.stream("hi"):
+                pass
+        assert len(adapter.commands) == 2
+
+    async def test_stream_retries_on_matching_stderr_with_exit_zero(self, tmp_path, monkeypatch):
+        adapter = _stale_adapter(tmp_path)
+        _spawning(
+            monkeypatch,
+            [_stream_proc([], b"session gone", 0), _stream_proc([b"ok\n"], b"", 0)],
+        )
+        assert [c async for c in adapter.stream("hi")] == ["ok"]
+        assert adapter.commands[1] == ["cli"]
+
+    async def test_cancel_during_stale_kill_wins_over_retry(self, tmp_path, monkeypatch):
+        from a2a_adapter.exceptions import CancelledByAdapterError
+
+        adapter = _stale_adapter(tmp_path)
+
+        def hook_then_cancel(stdout_text, stderr_text):
+            # A tasks/cancel lands while the stale run is being killed.
+            adapter._killed_tasks.add("task-1")
+            return True
+
+        adapter._is_stale_session_error = hook_then_cancel
+        _spawning(monkeypatch, [_stream_proc([b"ERR session gone\n"], b"", -9)])
+        with pytest.raises(CancelledByAdapterError):
+            async for _ in adapter.stream("hi"):
+                pass
+        assert len(adapter.commands) == 1
+
+
+async def _collect(stream):
+    return [chunk async for chunk in stream]

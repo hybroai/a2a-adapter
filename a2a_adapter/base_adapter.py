@@ -515,29 +515,21 @@ class BaseA2AAdapter(ABC):
         stdout_text = stdout_bytes.decode("utf-8", errors="replace")
         stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
 
-        # 6. Stale retry — only when BOTH stdout and stderr are empty.
-        # If stderr has content, it signals a real error (auth, env, CLI bug)
-        # and the session may still be valid. Don't mask the real failure.
+        # 6. Stale retry. A resumed run that fails with no output at all is
+        # treated as a stale session; so is one whose output the adapter's
+        # _is_stale_session_error() hook recognises. Any other stderr is a
+        # real error (auth, env, CLI bug) and the session may still be valid.
+        retryable = allow_retry and cmd_result.used_resume
         if (
-            allow_retry
+            retryable
             and proc.returncode is not None
             and proc.returncode > 0
-            and not stdout_text.strip()
-            and not stderr_text
-            and cmd_result.used_resume
+            and (
+                (not stdout_text.strip() and not stderr_text)
+                or self._is_stale_session_error(stdout_text, stderr_text)
+            )
         ):
-            logger.info(
-                "Stale session for context %s, retrying without resume",
-                context_key,
-            )
-            self._sessions.pop(context_key, None)
-            self._save_sessions()
-            return await self._run_subprocess(
-                context_key,
-                task_id,
-                user_input=user_input,
-                allow_retry=False,
-            )
+            return await self._retry_without_resume(context_key, task_id, user_input)
 
         # 7. Non-zero exit — prefer the CLI's structured error over stderr noise
         if proc.returncode != 0:
@@ -548,8 +540,14 @@ class BaseA2AAdapter(ABC):
         if not output_text.strip():
             raise RuntimeError("Command returned empty output")
 
-        # 8. Parse (subclass hook)
-        result = self._parse_invoke_output(output_text, context_key)
+        # 8. Parse (subclass hook). A CLI may exit 0 and report the missing
+        # session only as a failed turn, so the hook is checked here too.
+        try:
+            result = self._parse_invoke_output(output_text, context_key)
+        except Exception:
+            if retryable and self._is_stale_session_error(stdout_text, stderr_text):
+                return await self._retry_without_resume(context_key, task_id, user_input)
+            raise
 
         # 9. Persist session
         if result.session_id:
@@ -557,6 +555,20 @@ class BaseA2AAdapter(ABC):
             self._save_sessions()
 
         return result.text
+
+    async def _retry_without_resume(self, context_key: str, task_id: str, user_input: str) -> str:
+        self._forget_stale_session(context_key)
+        return await self._run_subprocess(
+            context_key, task_id, user_input=user_input, allow_retry=False
+        )
+
+    def _forget_stale_session(self, context_key: str) -> None:
+        """Drop the stored session for ``context_key`` (memory and disk)."""
+        logger.warning(
+            "Stale session for context %s, retrying once without resume", context_key
+        )
+        self._sessions.pop(context_key, None)
+        self._save_sessions()
 
     async def _run_subprocess_streaming(
         self,
@@ -640,6 +652,7 @@ class BaseA2AAdapter(ABC):
 
         aborted = False
         tail_timed_out = False
+        stale = False
 
         try:
             assert proc.stdout is not None
@@ -656,6 +669,18 @@ class BaseA2AAdapter(ABC):
                     continue
 
                 if event.error:
+                    if (
+                        allow_retry
+                        and cmd_result.used_resume
+                        and not yielded_any
+                        and self._is_stale_session_error(text, "")
+                    ):
+                        # Retry below. Kill the CLI first so a process (or MCP
+                        # child) that keeps running can't hold the tail wait
+                        # for the whole deadline.
+                        stale = True
+                        _kill_process_tree(proc)
+                        break
                     raise RuntimeError(event.error)
                 if event.session_id:
                     self._sessions[context_key] = event.session_id
@@ -719,22 +744,24 @@ class BaseA2AAdapter(ABC):
             self._killed_tasks.discard(task_id)
             raise CancelledByAdapterError(f"Task {task_id} was killed by cancel request")
 
-        # Stale retry — only when BOTH no output yielded and stderr empty.
-        # If stderr has content, it signals a real error; don't mask it.
+        # Stale retry — never after output reached the client. A resumed run
+        # that failed with no output and no stderr, or whose error line or
+        # stderr the hook recognises, is treated as a stale session.
         if (
             allow_retry
-            and proc.returncode is not None
-            and proc.returncode > 0
-            and not yielded_any
-            and not stderr_text
             and cmd_result.used_resume
-        ):
-            logger.info(
-                "Stale session for context %s (stream), retrying",
-                context_key,
+            and not yielded_any
+            and (
+                stale
+                or (proc.returncode is not None and proc.returncode > 0 and not stderr_text)
+                or (
+                    proc.returncode is not None
+                    and proc.returncode >= 0
+                    and self._is_stale_session_error("", stderr_text)
+                )
             )
-            self._sessions.pop(context_key, None)
-            self._save_sessions()
+        ):
+            self._forget_stale_session(context_key)
             # The retry gets a fresh timeout budget, as in _run_subprocess.
             async for chunk in self._run_subprocess_streaming(
                 context_key,
@@ -868,6 +895,18 @@ class BaseA2AAdapter(ABC):
         result to stderr instead.
         """
         return stdout_text
+
+    def _is_stale_session_error(self, stdout_text: str, stderr_text: str) -> bool:
+        """Whether a failed resumed run says its session no longer exists. Optional.
+
+        When True, the stored session is dropped and the run is retried once
+        without resume (never after streamed output reached the client).
+        Defaults to False: only a resumed run with no output at all counts.
+        Match the CLI's own error messages, not the whole transcript: model
+        text or tool output may quote the same words. ``stdout_text`` is the
+        run's stdout (or one error line when streaming).
+        """
+        return False
 
     def _extract_error(self, stdout_text: str) -> str | None:
         """Return the CLI's own error message from stdout of a failed run. Optional.

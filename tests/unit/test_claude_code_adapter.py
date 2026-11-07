@@ -1264,6 +1264,144 @@ class TestStaleSessionRetry:
         # Session should NOT have been cleared
         assert adapter._sessions.get("ctx-sig-s") == "old-session"
 
+    @pytest.mark.asyncio
+    async def test_invoke_retries_on_no_conversation_found_stderr(self, adapter):
+        adapter._sessions["ctx-gone"] = "old-session"
+        calls = []
+
+        async def mock_create_subprocess(*args, **kwargs):
+            calls.append(args)
+            proc = AsyncMock()
+            proc.pid = len(calls)
+            if len(calls) == 1:
+                proc.communicate = AsyncMock(
+                    return_value=(b"", b"No conversation found with session ID: old-session")
+                )
+                proc.returncode = 1
+            else:
+                stdout = "\n".join(
+                    [
+                        json.dumps(_assistant_event("fresh start")),
+                        json.dumps(_result_event("metadata", "new-sess")),
+                    ]
+                ).encode()
+                proc.communicate = AsyncMock(return_value=(stdout, b""))
+                proc.returncode = 0
+            return proc
+
+        with patch(
+            "a2a_adapter.base_adapter.create_subprocess_exec",
+            side_effect=mock_create_subprocess,
+        ):
+            result = await adapter.invoke(
+                "hi", context_id="ctx-gone", context=_make_context("task-gone")
+            )
+
+        assert result == "fresh start"
+        assert len(calls) == 2
+        assert "--resume" in calls[0] and "--resume" not in calls[1]
+        assert adapter._sessions.get("ctx-gone") == "new-sess"
+
+    @pytest.mark.asyncio
+    async def test_stream_retries_on_no_conversation_found_stderr(self, adapter):
+        adapter._sessions["ctx-gone-s"] = "old-session"
+        calls = []
+
+        async def mock_create_subprocess(*args, **kwargs):
+            calls.append(args)
+            proc = AsyncMock()
+            proc.pid = len(calls)
+            proc.kill = MagicMock()
+            proc.wait = AsyncMock()
+            proc.stdin = _stdin_stub()
+            if len(calls) == 1:
+                proc.stdout = AsyncLineIterator([])
+                proc.stderr = AsyncChunkReader(
+                    b"No conversation found with session ID: old-session"
+                )
+                proc.returncode = 1
+            else:
+                proc.stdout = AsyncLineIterator(
+                    [
+                        _json_line(_assistant_event("fresh stream")),
+                        _json_line(_result_event("metadata", "new-sess-s")),
+                    ]
+                )
+                proc.stderr = AsyncChunkReader(b"")
+                proc.returncode = 0
+            return proc
+
+        with patch(
+            "a2a_adapter.base_adapter.create_subprocess_exec",
+            side_effect=mock_create_subprocess,
+        ):
+            chunks = [
+                c
+                async for c in adapter.stream(
+                    "hi", context_id="ctx-gone-s", context=_make_context("task-gone-s")
+                )
+            ]
+
+        assert "fresh stream" in chunks
+        assert len(calls) == 2
+        assert "--resume" not in calls[1]
+        assert adapter._sessions.get("ctx-gone-s") == "new-sess-s"
+
+    def test_stale_hook_ignores_transcript_text(self, adapter):
+        """Model text or tool output that quotes the message is not a stale session."""
+        transcript = "\n".join(
+            [
+                json.dumps(_assistant_event("grep found: No conversation found with session ID:")),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "content": "No conversation found with session ID: x",
+                                }
+                            ]
+                        },
+                    }
+                ),
+                json.dumps({"type": "result", "is_error": True, "result": "Max turns reached"}),
+            ]
+        )
+        assert adapter._is_stale_session_error(transcript, "") is False
+        assert adapter._is_stale_session_error(transcript, "rate limited") is False
+
+    def test_stale_hook_matches_error_event(self, adapter):
+        line = json.dumps(_error_event("No conversation found with session ID: abc"))
+        assert adapter._is_stale_session_error(line, "") is True
+
+    def test_stale_hook_matches_stdout_result_error(self, adapter):
+        line = json.dumps(
+            {
+                "type": "result",
+                "is_error": True,
+                "result": "No conversation found with session ID: abc",
+            }
+        )
+        assert adapter._is_stale_session_error(line, "") is True
+        assert adapter._is_stale_session_error("", "no conversation found with session id: x")
+
+    @pytest.mark.asyncio
+    async def test_unrelated_stderr_still_fails(self, adapter):
+        adapter._sessions["ctx-key"] = "valid-session"
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b"Invalid API key"))
+        mock_proc.returncode = 1
+        mock_proc.pid = 1
+        with patch(
+            "a2a_adapter.base_adapter.create_subprocess_exec",
+            return_value=mock_proc,
+        ) as spawn:
+            with pytest.raises(RuntimeError, match="Invalid API key"):
+                await adapter.invoke("hi", context_id="ctx-key", context=_make_context("task-key"))
+        assert spawn.call_count == 1
+        assert adapter._sessions.get("ctx-key") == "valid-session"
+
 
 # ──── Test: Session persistence (D4) ────
 
