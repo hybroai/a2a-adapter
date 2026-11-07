@@ -164,6 +164,10 @@ class AdapterAgentExecutor(AgentExecutor):
             with contextlib.suppress(Exception, asyncio.CancelledError):
                 await asyncio.wait_for(asyncio.shield(enqueue), _CANCEL_SETTLE_TIMEOUT)
             raise
+        except Exception:
+            # Nothing was enqueued: let the caller report the failure.
+            run.terminal = False
+            raise
 
     async def _execute(self, context: RequestContext, event_queue: EventQueue, run: _Run) -> None:
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)
@@ -463,12 +467,35 @@ class AdapterAgentExecutor(AgentExecutor):
             if not decision.done():
                 with contextlib.suppress(Exception, asyncio.CancelledError):
                     await asyncio.wait_for(asyncio.shield(decision), _CANCEL_SETTLE_TIMEOUT)
+            if not decision.done():
+                self._abandon(context.task_id, decision)
             if self._cancelling.get(context.task_id) is cancelling:
                 del self._cancelling[context.task_id]
             cancelling.set_result(None)
             # With an execute() in flight, it releases once it has returned.
             if context.task_id not in self._runs:
                 self._release(context.task_id)
+
+    def _abandon(self, task_id: str, decision: asyncio.Future[None]) -> None:
+        """Stop waiting for a cancel decision that outlasted the bounded wait.
+
+        The decision may still send its terminal state, so the run in
+        flight must send none of its own from here on; the markers that
+        adapter.cancel() may still queue are released when it finishes.
+        """
+        logger.warning("Cancel of task %s did not finish in time; left running", task_id)
+        run = self._runs.get(task_id)
+        if run is not None:
+            run.terminal = True
+
+        def done(future: asyncio.Future[None]) -> None:
+            if not future.cancelled() and future.exception() is not None:
+                logger.warning(
+                    "Abandoned cancel of task %s failed: %s", task_id, future.exception()
+                )
+            self._release(task_id)
+
+        decision.add_done_callback(done)
 
     async def _cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)

@@ -1014,3 +1014,63 @@ class TestReleaseTask:
 
         events = await _collect_events(event_queue)
         assert [e.status.state for e in events] == [CANCELED]
+
+
+class TestCancelEdgeCases:
+    async def test_a_failing_completed_enqueue_is_not_mistaken_for_a_cancel(
+        self, request_context, caplog
+    ):
+        """Outside a cancel, a failed terminal enqueue still propagates (the
+        SDK then marks the task failed), as before; it is not swallowed as
+        "raised during cancel"."""
+
+        class RefusesCompleted(_BlockingQueue):
+            async def enqueue_event(self, event):
+                if _is_status(COMPLETED)(event):
+                    raise RuntimeError("store refused")
+                self.events.append(event)
+
+        queue = RefusesCompleted(lambda e: False)
+        with caplog.at_level("INFO", logger="a2a_adapter.executor"):
+            with pytest.raises(RuntimeError):
+                await AdapterAgentExecutor(StubAdapter()).execute(request_context, queue)
+
+        assert "store refused" in caplog.text
+        assert "cancel in progress" not in caplog.text
+
+    async def test_a_cancel_given_up_on_drops_the_late_result(self, request_context, monkeypatch):
+        """cancel() is cancelled and its decision outlasts the bounded wait:
+        the stuck run must not send completed when it finally returns."""
+        monkeypatch.setattr(executor_module, "_CANCEL_SETTLE_TIMEOUT", 0.05)
+        adapter = Stubborn()
+        cancel_gate = asyncio.Event()
+
+        async def slow_cancel(**kwargs):
+            await cancel_gate.wait()
+
+        adapter.cancel = slow_cancel
+        observer = MagicMock()
+        executor = AdapterAgentExecutor(adapter, observer=observer)
+        queue = _BlockingQueue(lambda e: False)
+
+        run = asyncio.create_task(executor.execute(request_context, queue))
+        await asyncio.wait_for(adapter.started.wait(), 5)
+        run.cancel()
+        cancel = asyncio.create_task(executor.cancel(request_context, queue))
+        await asyncio.sleep(0.01)
+        cancel.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(cancel, 5)
+
+        adapter.release.set()  # the stuck run returns "late"
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(run, 5)
+        cancel_gate.set()  # the abandoned decision finishes
+        for _ in range(100):
+            if not executor._cancelling and len(queue.events) > 2:
+                break
+            await asyncio.sleep(0.01)
+
+        states = [e.status.state for e in queue.events if isinstance(e, TaskStatusUpdateEvent)]
+        assert COMPLETED not in states
+        observer.task_completed.assert_not_called()
