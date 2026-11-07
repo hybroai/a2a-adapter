@@ -161,9 +161,15 @@ IPv4-embedding IPv6 forms such as mapped and NAT64, site-local, multicast)
 unless `allow_private_push_urls=True`. The client gets one generic
 "Rejected push notification URL" error (`-32602` on A2A 1.0 JSON-RPC, 400 on
 REST, `-32603` on the v0.3 names, which a2a-sdk 1.0 maps that way); the reason
-and any resolved address go only to the server log. The push HTTP client re-checks the host before
-every POST (DNS rebinding) and does not follow redirects. A window remains
-between that check and httpx's own DNS lookup; the IP is not pinned.
+and any resolved address go only to the server log. Against DNS rebinding, the
+push client's network backend resolves each new connection's host once,
+rejects it if any address is non-public, and connects to the checked IP while
+keeping the hostname for the `Host` header, SNI and certificate checks.
+Redirects are not followed (and a followed hop would open a new, re-checked
+connection). The push client does not use `HTTP(S)_PROXY` env vars unless
+private URLs are allowed. Checked addresses are tried one at a time in resolver
+order within one connect timeout (no happy-eyeballs racing), so a host whose
+first address silently drops packets can time out instead of falling back.
 
 ### CLI Entry Point (`cli.py`)
 

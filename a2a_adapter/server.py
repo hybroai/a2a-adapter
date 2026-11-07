@@ -26,6 +26,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+import httpcore
 import httpx
 import uvicorn
 from a2a.server.context import ServerCallContext
@@ -112,8 +113,9 @@ async def _validate_push_url(url: str, allow_private: bool) -> None:
     """Raise ValueError unless the server may POST push notifications to ``url``.
 
     Without ``allow_private`` the host must not be localhost and every
-    address it resolves to must be public. DNS can still change between this
-    check and the connection (no IP pinning).
+    address it resolves to must be public. This is the early check when a
+    config is stored; the push client checks again for each connection and
+    connects only to an address it checked (:class:`_PinnedPushBackend`).
     """
     parts = urlsplit(url)
     await _validate_push_target(parts.scheme, parts.hostname, parts.port, allow_private)
@@ -129,16 +131,27 @@ async def _validate_push_target(
         raise ValueError("push URL has no host")
     if allow_private:
         return
+    await _push_addresses(host, port or (443 if scheme == "https" else 80))
+
+
+async def _push_addresses(host: str, port: int) -> list[str]:
+    """Public addresses for ``host`` (resolved once), or ValueError.
+
+    Rejects localhost names, and the whole host if any address it resolves
+    to is not public. Returns the addresses in resolver order, deduplicated.
+    """
     host = host.lower()
-    if host == "localhost" or host.endswith(".localhost"):
+    name = host[:-1] if host.endswith(".") else host
+    if name == "localhost" or name.endswith(".localhost"):
         raise ValueError(f"push URL host {host!r} is not public")
     try:
         ipaddress.ip_address(host.split("%", 1)[0])
     except ValueError:
         try:
-            addresses = await _resolve(host, port or (443 if scheme == "https" else 80))
+            resolved = await _resolve(host, port)
         except (OSError, asyncio.TimeoutError, ValueError, UnicodeError) as exc:
             raise ValueError(f"push URL host {host!r} does not resolve") from exc
+        addresses = list(dict.fromkeys(resolved))
         if not addresses:
             raise ValueError(f"push URL host {host!r} does not resolve")
     else:
@@ -146,6 +159,70 @@ async def _validate_push_target(
     for address in addresses:
         if not _public_ip(address):
             raise ValueError(f"push URL host {host!r} is not public ({address})")
+    return addresses
+
+
+class _PinnedPushBackend(httpcore.AsyncNetworkBackend):
+    """Resolve once, require every address be public, connect to the IP.
+
+    The URL, ``Host`` header, pool key and TLS ``server_hostname`` all keep
+    the hostname; only the socket is opened to a checked address, so DNS
+    cannot change between the check and the connection.
+    """
+
+    def __init__(self, delegate: httpcore.AsyncNetworkBackend) -> None:
+        self._delegate = delegate
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.AsyncNetworkStream:
+        try:
+            addresses = await _push_addresses(host, port)
+        except ValueError as exc:
+            logger.info("Blocked push connection: %s", exc)
+            raise httpcore.ConnectError(str(exc)) from exc
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
+        last: Exception | None = None
+        for ip in addresses:
+            remaining = None if deadline is None else deadline - loop.time()
+            if remaining is not None and remaining <= 0:
+                break
+            try:
+                return await self._delegate.connect_tcp(
+                    ip, port, remaining, local_address, socket_options
+                )
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                last = exc
+        raise last or httpcore.ConnectTimeout("push connect timed out")
+
+    async def connect_unix_socket(self, *args: Any, **kwargs: Any) -> httpcore.AsyncNetworkStream:
+        raise httpcore.ConnectError("push client does not use unix sockets")
+
+    async def sleep(self, seconds: float) -> None:
+        await self._delegate.sleep(seconds)
+
+
+def _push_network_backend() -> httpcore.AsyncNetworkBackend:
+    """Delegate for the pinned backend (a seam: tests return a fake)."""
+    return httpcore.AnyIOBackend()
+
+
+def _make_pinned_push_transport() -> httpx.AsyncHTTPTransport:
+    """An httpx transport whose new connections go through _PinnedPushBackend."""
+    transport = httpx.AsyncHTTPTransport()
+    pool = getattr(transport, "_pool", None)
+    # `type() is`, not isinstance: the proxy pools subclass
+    # AsyncConnectionPool, and pinning through a proxy would be wrong.
+    if type(pool) is not httpcore.AsyncConnectionPool or not hasattr(pool, "_network_backend"):
+        raise RuntimeError("unsupported httpx/httpcore: cannot pin push connections")
+    pool._network_backend = _PinnedPushBackend(_push_network_backend())
+    return transport
 
 
 def _make_push_client(**kwargs: Any) -> httpx.AsyncClient:
@@ -353,8 +430,9 @@ def to_a2a(
         allow_private_push_urls: Also accept push URLs on localhost, private
             networks and other non-public addresses (default False: those
             are rejected with invalid params, -32602 on the A2A 1.0 JSON-RPC
-            methods and -32603 on the v0.3 names under a2a-sdk 1.0, and the
-            host is checked again before each POST).
+            methods and -32603 on the v0.3 names under a2a-sdk 1.0; each
+            push connection is checked again and pinned to a checked
+            address, and ``HTTP(S)_PROXY`` env vars are not used for pushes).
         **card_overrides: Override individual AgentCard fields
             (name, description, url, version, streaming).
 
@@ -386,18 +464,12 @@ def to_a2a(
         push_config_store = _SafeInMemoryPushNotificationConfigStore(
             allow_private_urls=allow_private_push_urls
         )
-
-        async def _recheck_host(request: httpx.Request) -> None:
-            # DNS may have changed since the config was stored. Check the
-            # host httpx itself parsed, since that is the one it connects to.
-            url = request.url
-            await _validate_push_target(
-                url.scheme, url.raw_host.decode("ascii"), url.port, allow_private_push_urls
-            )
-
-        push_httpx_client = _make_push_client(
-            event_hooks={"request": [_recheck_host]}, follow_redirects=False
-        )
+        push_kwargs: dict[str, Any] = {}
+        if not allow_private_push_urls:
+            # Each new connection re-checks the host and is pinned to a
+            # checked address. httpx ignores env proxies with a transport.
+            push_kwargs["transport"] = _make_pinned_push_transport()
+        push_httpx_client = _make_push_client(follow_redirects=False, **push_kwargs)
         push_sender = _push_sender(push_httpx_client, push_config_store)
 
     executor = AdapterAgentExecutor(adapter, observer=activity)
@@ -538,7 +610,8 @@ def serve_agent(
             :func:`to_a2a`). Enabling them without ``auth_token`` logs a
             warning.
         allow_private_push_urls: Accept push URLs on private and loopback
-            addresses (see :func:`to_a2a`); logs a warning.
+            addresses (see :func:`to_a2a`); logs a warning. Without it,
+            pushes do not use ``HTTP(S)_PROXY`` env vars.
         display: Optional TerminalDisplay. When given, Uvicorn's own
             startup and access lines are replaced by the display's card
             (shown once the socket is listening) and activity rail.
