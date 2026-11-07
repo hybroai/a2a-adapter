@@ -22,6 +22,10 @@ from ..base_adapter import (
 
 logger = logging.getLogger(__name__)
 
+# What Claude Code prints when --resume names an unknown session (found in
+# Claude Code 2.1.296). Lowercase; matched against stdout and stderr.
+_STALE_SESSION_PATTERNS = ("no conversation found with session id",)
+
 
 class ClaudeCodeAdapter(BaseA2AAdapter):
     """Adapter for Claude Code via the ``claude`` CLI.
@@ -210,6 +214,31 @@ class ClaudeCodeAdapter(BaseA2AAdapter):
                     return str(obj["result"])
                 return None
         return None
+
+    def _is_stale_session_error(self, stdout_text: str, stderr_text: str) -> bool:
+        # Only the CLI's own error records and stderr: the rest of stdout is
+        # the transcript, where model text or tool output may quote the phrase.
+        errors = [*self._error_records(stdout_text), stderr_text]
+        output = "\n".join(errors).lower()
+        return any(pattern in output for pattern in _STALE_SESSION_PATTERNS)
+
+    @staticmethod
+    def _error_records(stdout_text: str) -> list[str]:
+        """Messages of ``error`` events and ``is_error`` results in stream-json output."""
+        records = []
+        for line in stdout_text.splitlines():
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("type") == "error":
+                error = obj.get("error")
+                records.append(str(error.get("message", "") if isinstance(error, dict) else error))
+            elif obj.get("type") == "result" and obj.get("is_error"):
+                records.append(str(obj.get("result", "")))
+        return records
 
     def _binary_not_found_message(self) -> str:
         return (

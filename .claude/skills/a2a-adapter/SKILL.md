@@ -30,7 +30,7 @@ a2a-adapter dsh --port 9013    # needs [deepseek-harness] and DEEPSEEK_API_KEY
 a2a-adapter openclaw --port 9008
 ```
 
-The CLI binds to `127.0.0.1` by default; pass `--host 0.0.0.0` only for trusted networks, since the agent runs tools for anyone who can reach it.
+The CLI binds to `127.0.0.1` by default. The agent runs tools for anyone who can reach it, so pass `--host 0.0.0.0` only together with `--auth-token` (or `A2A_AUTH_TOKEN`), which requires `Authorization: Bearer <token>` on every request except the Agent Card.
 
 ## Core Pattern (3 lines)
 
@@ -41,7 +41,7 @@ adapter = XxxAdapter(...)                         # Create adapter
 serve_agent(adapter, host="127.0.0.1", port=9000) # Start A2A server
 ```
 
-`serve_agent()` starts uvicorn with an auto-generated AgentCard at `/.well-known/agent-card.json`. Its default `host` is `0.0.0.0` (all interfaces).
+`serve_agent()` starts uvicorn with an auto-generated AgentCard at `/.well-known/agent-card.json`. Its default `host` is `127.0.0.1` (this machine only); for remote clients pass `host="0.0.0.0"` and `auth_token=...`.
 
 ## Decision Guide
 

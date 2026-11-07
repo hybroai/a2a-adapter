@@ -79,7 +79,8 @@ A2A Client → HTTP POST / (tasks/cancel)
       → execute() waits for the cancel below before it returns,
         so the event queue stays open for the terminal state
     → AdapterAgentExecutor.cancel()
-      → adapter.cancel()          (may await)
+      → adapter.cancel()          (may await; CLI adapters kill the CLI's
+                                   process group on POSIX)
       → TaskUpdater.cancel()      (or failed, if adapter.cancel() raised)
 ```
 
@@ -100,6 +101,23 @@ class BaseA2AAdapter(ABC):
     def get_metadata(self) -> AdapterMetadata: ...
 ```
 
+CLI adapters built on the subprocess runtime (`_run_subprocess` /
+`_run_subprocess_streaming`) start the CLI in its own session on POSIX, so
+cancel, timeout, `close()` and shutdown kill the CLI's whole process group
+(shells, MCP servers, tool processes), not only the direct child. A helper
+that moves itself into a new session escapes the group; Windows still kills
+only the direct child.
+`timeout` bounds the whole run for both invoke and stream (a streaming CLI
+that keeps printing still stops at the deadline). The stale-session retry
+gets a fresh budget.
+
+A resumed run whose session no longer exists is retried once without resume
+and the stored session is dropped. By default that is detected only when the
+run failed with no output at all; an adapter can override
+`_is_stale_session_error(stdout_text, stderr_text)` to recognise its CLI's
+own message (Claude Code and Codex do). A streaming run is never retried after
+output reached the client.
+
 ### AdapterAgentExecutor (`executor.py`)
 
 Bridge between `BaseA2AAdapter` and A2A SDK's `AgentExecutor`:
@@ -115,8 +133,37 @@ Bridge between `BaseA2AAdapter` and A2A SDK's `AgentExecutor`:
 Three public functions:
 
 - **`to_a2a(adapter)`** — adapter → ASGI app (wires executor + handler + Starlette)
-- **`serve_agent(adapter, port)`** — `to_a2a()` + `uvicorn.run()`
+- **`serve_agent(adapter, port)`** — `to_a2a()` + an in-process `uvicorn.Server`.
+  Ctrl+C (or a terminal hangup, SIGHUP) stops running CLI agents and everything they started immediately
+  (`adapter.kill_children_now()` from the signal handler); SIGTERM lets
+  in-flight requests finish within uvicorn's graceful timeout, then the
+  lifespan's `adapter.close()` stops them. Apps served by another ASGI server
+  get only the lifespan `close()` and an `atexit` fallback.
 - **`build_agent_card(adapter)`** — `adapter.get_metadata()` → `AgentCard`
+
+`serve_agent()` binds `127.0.0.1` by default. `to_a2a(auth_token=...)` /
+`serve_agent(auth_token=...)` add a pure-ASGI bearer-token middleware,
+outermost (before the activity middleware, which buffers and may log request
+bodies). Only GET/HEAD of the two agent-card paths stay public; every other
+route, including ones the SDK adds later, needs `Authorization: Bearer
+<token>` and gets 401 otherwise. The generated card declares the bearer
+scheme. Serving a non-loopback host without a token logs a warning. The
+token never reaches CLI children: `A2A_AUTH_TOKEN` is removed from their
+environment unless the adapter's own `env_vars` set it.
+
+Push notifications are opt-in (`push_notifications=True`). The card's
+`capabilities.push_notifications` is the single switch: when it is off,
+`to_a2a` passes the SDK no push store and no sender (the SDK stores inline
+configs whenever a store exists). When it is on, the adapter's config store
+rejects URLs that are not http(s), point at `localhost`, or resolve to any
+non-public address (loopback, private, link-local/metadata, CGNAT,
+IPv4-embedding IPv6 forms such as mapped and NAT64, site-local, multicast)
+unless `allow_private_push_urls=True`. The client gets one generic
+"Rejected push notification URL" error (`-32602` on A2A 1.0 JSON-RPC, 400 on
+REST, `-32603` on the v0.3 names, which a2a-sdk 1.0 maps that way); the reason
+and any resolved address go only to the server log. The push HTTP client re-checks the host before
+every POST (DNS rebinding) and does not follow redirects. A window remains
+between that check and httpx's own DNS lookup; the IP is not pinned.
 
 ### CLI Entry Point (`cli.py`)
 
@@ -127,6 +174,10 @@ The `a2a-adapter` console script is intentionally thin:
 - Passes native agent arguments after `--` into the selected adapter
 - Rejects protocol/session flags owned by the adapter
 - Calls the same `serve_agent()` used by Python SDK consumers
+- `--auth-token` (or `$A2A_AUTH_TOKEN`, which the CLI then removes from its
+  own environment) turns on bearer-token auth
+- `--push-notifications` / `--allow-private-push-urls` turn on push and allow
+  private receivers; unset flags keep the SDK defaults
 
 Hermes is not a v1 CLI target because `HermesAdapter` is an in-process gateway
 adapter rather than a local CLI subprocess adapter. `dsh` is a target because
@@ -174,7 +225,7 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 | Concurrent request handling | `asyncio.create_task()` per request |
 | Task persistence | `InMemoryTaskStore` (pluggable) |
 | AgentCard serving | `A2AStarletteApplication` at `/.well-known/agent-card.json` |
-| Push notifications | `PushNotificationSender` |
+| Push notifications (opt-in; URL checks are ours, in the config store) | `PushNotificationSender` |
 | Task resubscription | `DefaultRequestHandler.on_resubscribe` |
 
 ## Directory Structure

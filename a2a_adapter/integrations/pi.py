@@ -7,19 +7,34 @@ import json
 import logging
 import os
 import re
+import signal
 from asyncio.subprocess import PIPE, Process, create_subprocess_exec
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import suppress
 from typing import Any
 
-from ..base_adapter import AdapterMetadata, BaseA2AAdapter, default_state_dir
+from ..base_adapter import (
+    AdapterMetadata,
+    BaseA2AAdapter,
+    _child_env,
+    _forget_own_group,
+    _forget_own_group_if_empty,
+    _kill_process_tree,
+    _owns_group,
+    _spawn_cli,
+    _wait_reaped,
+    default_state_dir,
+)
 from ..exceptions import CancelledByAdapterError
 
 
 logger = logging.getLogger(__name__)
 
 _BLOCKING_EXTENSION_UI_METHODS = {"select", "confirm", "input", "editor"}
+
+
+_GROUP_POLL_INTERVAL = 0.5  # how often to check whether Pi's exited group is empty
 
 
 class PiRpcError(RuntimeError):
@@ -105,8 +120,10 @@ class PiRpcProcess:
         self._stdout_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._watch_task: asyncio.Task[None] | None = None
+        self._group_task: asyncio.Task[None] | None = None
         self._failure: BaseException | None = None
         self._closing = False
+        self._close_task: asyncio.Task[None] | None = None
         self._turn_active = False
         self._turn_settled = asyncio.Event()
         self._turn_settled.set()
@@ -146,11 +163,11 @@ class PiRpcProcess:
         if self.model:
             args.extend(["--model", self.model])
 
-        env = os.environ.copy()
-        env.update(self.env_vars)
+        env = _child_env(self.env_vars)
 
         try:
-            self._process = await create_subprocess_exec(
+            self._process = await _spawn_cli(
+                create_subprocess_exec,
                 *args,
                 stdin=PIPE,
                 stdout=PIPE,
@@ -168,6 +185,7 @@ class PiRpcProcess:
         self._stdout_task = asyncio.create_task(self._read_stdout())
         self._stderr_task = asyncio.create_task(self._read_stderr())
         self._watch_task = asyncio.create_task(self._watch_process())
+        self._group_task = asyncio.create_task(self._watch_group())
 
         try:
             response = await self.request({"type": "get_state"}, timeout=self.startup_timeout)
@@ -295,22 +313,37 @@ class PiRpcProcess:
             await self._terminate_process()
 
     async def close(self) -> None:
-        """Close the process and all background protocol tasks."""
-        if self._closing:
-            return
-        self._closing = True
+        """Close the process and all background protocol tasks.
 
-        if self._process is not None and self._process.returncode is None:
+        The close runs once, as its own task: cancelling a caller (or a
+        repeat call) does not cut it short, and every caller waits for it.
+        """
+        if self._close_task is None:
+            self._closing = True
+            self._close_task = asyncio.create_task(self._close(asyncio.current_task()))
+        await asyncio.shield(self._close_task)
+
+    async def _close(self, caller: asyncio.Task | None) -> None:
+        # A registered process group is signalled even after Pi exited on its
+        # own: Pi's tool children can outlive it.
+        if self._process is not None and (
+            self._process.returncode is None or _owns_group(self._process)
+        ):
             self._signal_failure(PiRpcError("Pi RPC process is closing"))
-            await self._terminate_process()
+            try:
+                await self._terminate_process()
+            except BaseException:
+                # Cancelled during the SIGTERM grace (e.g. loop shutdown):
+                # don't leave the group half-stopped.
+                self.kill_now()
+                raise
 
-        current = asyncio.current_task()
-        tasks = [self._stdout_task, self._stderr_task, self._watch_task]
+        tasks = [self._stdout_task, self._stderr_task, self._watch_task, self._group_task]
         for task in tasks:
-            if task is not None and task is not current and not task.done():
+            if task is not None and task is not caller and not task.done():
                 task.cancel()
         for task in tasks:
-            if task is not None and task is not current:
+            if task is not None and task is not caller:
                 with suppress(asyncio.CancelledError):
                     await task
 
@@ -380,6 +413,8 @@ class PiRpcProcess:
     async def _watch_process(self) -> None:
         process = self._process
         assert process is not None
+        # Known gap: wait() returns only once all of Pi's pipes close, so while
+        # a grandchild still holds them Pi's own death goes unnoticed here.
         return_code = await process.wait()
         if not self._closing:
             stderr = b"".join(self._stderr_tail).decode("utf-8", errors="replace")[-2000:].strip()
@@ -387,6 +422,20 @@ class PiRpcProcess:
             if stderr:
                 logger.error("%s; stderr tail: %s", message, stderr)
             self._signal_failure(_ProcessExitedError(message))
+
+    async def _watch_group(self) -> None:
+        """Forget Pi's process group once Pi exited and the group is empty.
+
+        Pi's tool children may outlive it: until then the group stays ours,
+        so close(), kill_now() and the exit hook still kill them. Runs apart
+        from _watch_process, whose wait() also waits for every pipe to close
+        (a child in its own session can hold them long after the group empties).
+        """
+        process = self._process
+        assert process is not None
+        while _owns_group(process):
+            await asyncio.sleep(_GROUP_POLL_INTERVAL)
+            _forget_own_group_if_empty(process)
 
     async def _write_payload(self, payload: dict[str, Any]) -> None:
         process = self._process
@@ -415,17 +464,43 @@ class PiRpcProcess:
         self._events.put_nowait(error)
         self._turn_settled.set()
 
+    def kill_now(self) -> None:
+        """SIGKILL Pi and its process group immediately (signal-handler safe)."""
+        if self._process is not None:
+            _kill_process_tree(self._process)
+            # SIGKILL can't be ignored: the group is done, and its ID must not
+            # be signalled again once it is reused.
+            _forget_own_group(self._process)
+
     async def _terminate_process(self) -> None:
+        """SIGTERM Pi's process group, wait the grace period, then SIGKILL it.
+
+        For a group we spawned, the group is signalled even when Pi already
+        exited, since its tool children may not have; only the waits are
+        skipped then.
+        """
         process = self._process
-        if process is None or process.returncode is not None:
+        if process is None:
+            return
+        owned = _owns_group(process)
+        if process.returncode is not None and not owned:
             return
 
-        process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=self.cancel_grace_timeout)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+        leader_running = process.returncode is None
+        _kill_process_tree(process, signal.SIGTERM)
+        if leader_running:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=self.cancel_grace_timeout)
+                if not owned:
+                    return
+            except asyncio.TimeoutError:
+                pass
+        _kill_process_tree(process)
+        # SIGKILL can't be ignored: the group is done, and its ID may be
+        # reused once its members are reaped.
+        _forget_own_group(process)
+        if leader_running:
+            await _wait_reaped(process)
 
     @staticmethod
     def _process_lost(error: BaseException, *, accepted: bool) -> PiProcessLostError:
@@ -527,6 +602,7 @@ class PiAdapter(BaseA2AAdapter):
             self._bind_context(context_id)
             rpc = await self._ensure_started()
             self._active_task_id = task_id
+            lost = False
             try:
                 async for chunk in rpc.prompt(user_input):
                     yield chunk
@@ -535,16 +611,23 @@ class PiAdapter(BaseA2AAdapter):
                     raise CancelledByAdapterError(f"Task {task_id} was cancelled") from error
                 raise
             except PiProcessLostError as error:
-                if self._rpc is rpc:
-                    self._rpc = None
+                lost = True
                 if task_id in self._cancelled_tasks:
                     raise CancelledByAdapterError(f"Task {task_id} was cancelled") from error
                 raise
             finally:
                 self._active_task_id = None
                 self._cancelled_tasks.discard(task_id)
-                if not rpc.is_running and self._rpc is rpc:
-                    self._rpc = None
+                if lost or not rpc.is_running:
+                    # Kills what Pi left in its process group. _rpc is cleared
+                    # only afterwards so kill_children_now() can still reach it.
+                    try:
+                        # Shielded: cancelling this request must not abandon
+                        # the close between SIGTERM and SIGKILL.
+                        await asyncio.shield(rpc.close())
+                    finally:
+                        if self._rpc is rpc:
+                            self._rpc = None
 
     async def cancel(self, context_id: str | None = None, **kwargs: Any) -> None:
         context = kwargs.get("context")
@@ -555,6 +638,12 @@ class PiAdapter(BaseA2AAdapter):
 
         if task_id == self._active_task_id and self._rpc is not None:
             await self._rpc.abort()
+
+    def kill_children_now(self) -> None:
+        """SIGKILL the Pi RPC process group, synchronously (no SIGTERM grace)."""
+        rpc = self._rpc
+        if rpc is not None:
+            rpc.kill_now()
 
     async def close(self) -> None:
         async with self._startup_lock:

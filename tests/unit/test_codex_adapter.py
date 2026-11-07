@@ -887,6 +887,131 @@ class TestStaleSessionRetry:
         # Should have tried exactly 2 times (original + 1 retry)
         assert call_count == 2
 
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "No saved session found with ID old-thread",
+            "no rollout found for thread id old-thread",
+            "no rollout found for conversation id old-thread",
+            "thread not found: old-thread",
+        ],
+    )
+    @pytest.mark.parametrize("channel", ["stderr", "stdout"])
+    @pytest.mark.asyncio
+    async def test_invoke_retries_on_missing_thread(self, adapter, message, channel):
+        adapter._sessions["ctx-miss"] = "old-thread"
+        calls = []
+
+        async def mock_create_subprocess(*args, **kwargs):
+            calls.append(args)
+            proc = AsyncMock()
+            proc.pid = len(calls)
+            if len(calls) == 1:
+                if channel == "stderr":
+                    out, err = b"", message.encode()
+                else:
+                    out, err = json.dumps({"type": "error", "message": message}).encode(), b""
+                proc.communicate = AsyncMock(return_value=(out, err))
+                proc.returncode = 1
+            else:
+                stdout = "\n".join(
+                    [
+                        json.dumps(_thread_started_event("new-thread")),
+                        json.dumps(_item_completed_event("fresh")),
+                    ]
+                )
+                proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
+                proc.returncode = 0
+            return proc
+
+        with patch(
+            "a2a_adapter.base_adapter.create_subprocess_exec",
+            side_effect=mock_create_subprocess,
+        ):
+            result = await adapter.invoke(
+                "hi", context_id="ctx-miss", context=_make_context("task-miss")
+            )
+
+        assert result == "fresh"
+        assert len(calls) == 2
+        assert "resume" in calls[0] and "resume" not in calls[1]
+        assert adapter._sessions.get("ctx-miss") == "new-thread"
+
+    @pytest.mark.asyncio
+    async def test_invoke_retries_on_missing_thread_with_exit_zero(self, adapter):
+        adapter._sessions["ctx-zero"] = "old-thread"
+        calls = []
+
+        async def mock_create_subprocess(*args, **kwargs):
+            calls.append(args)
+            proc = AsyncMock()
+            proc.pid = len(calls)
+            if len(calls) == 1:
+                stdout = json.dumps(_turn_failed_event("thread not found: old-thread"))
+            else:
+                stdout = "\n".join(
+                    [
+                        json.dumps(_thread_started_event("new-thread")),
+                        json.dumps(_item_completed_event("fresh")),
+                    ]
+                )
+            proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
+            proc.returncode = 0
+            return proc
+
+        with patch(
+            "a2a_adapter.base_adapter.create_subprocess_exec",
+            side_effect=mock_create_subprocess,
+        ):
+            result = await adapter.invoke(
+                "hi", context_id="ctx-zero", context=_make_context("task-zero")
+            )
+
+        assert result == "fresh"
+        assert "resume" not in calls[1]
+        assert adapter._sessions.get("ctx-zero") == "new-thread"
+
+    def test_stale_hook_ignores_transcript_text(self, adapter):
+        """Command output or agent text that quotes the message is not a stale thread."""
+        transcript = "\n".join(
+            [
+                json.dumps(_item_completed_event("the log says thread not found: abc")),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "command_execution",
+                            "aggregated_output": "no rollout found for thread id abc",
+                        },
+                    }
+                ),
+                json.dumps(_turn_failed_event("rate limited")),
+            ]
+        )
+        assert adapter._is_stale_session_error(transcript, "") is False
+        assert adapter._is_stale_session_error(transcript, "something else") is False
+
+    @pytest.mark.parametrize("returncode", [1, 0])
+    @pytest.mark.asyncio
+    async def test_unrelated_codex_error_still_fails(self, adapter, returncode):
+        adapter._sessions["ctx-other"] = "old-thread"
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(
+            return_value=(json.dumps(_turn_failed_event("rate limited")).encode(), b"")
+        )
+        mock_proc.returncode = returncode
+        mock_proc.pid = 1
+        with patch(
+            "a2a_adapter.base_adapter.create_subprocess_exec",
+            return_value=mock_proc,
+        ) as spawn:
+            with pytest.raises(RuntimeError, match="rate limited"):
+                await adapter.invoke(
+                    "hi", context_id="ctx-other", context=_make_context("task-other")
+                )
+        assert spawn.call_count == 1
+        assert adapter._sessions.get("ctx-other") == "old-thread"
+
 
 # ──── Test: Session persistence ────
 

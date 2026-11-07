@@ -52,6 +52,24 @@ Your agent is now an A2A server at `http://localhost:9000`, with its Agent
 Card at `http://localhost:9000/.well-known/agent-card.json`. To mount it in an
 existing ASGI app instead, use `to_a2a(adapter)`.
 
+`serve_agent()` binds `127.0.0.1` by default. To accept remote connections,
+bind all interfaces and require a token:
+
+```python
+import os
+
+serve_agent(adapter, host="0.0.0.0", auth_token=os.environ["A2A_AUTH_TOKEN"])
+```
+
+Push notifications are off by default. `serve_agent(adapter,
+push_notifications=True)` (or `to_a2a(..., push_notifications=True)`) turns
+them on; push URLs on localhost, private networks and cloud-metadata addresses
+are then rejected unless you also pass `allow_private_push_urls=True`. A
+request carrying one fails: JSON-RPC `-32602` on the A2A 1.0 methods, HTTP 400
+on REST, and `-32603` with the same "Rejected push notification URL" message on
+the v0.3 method names (a2a-sdk 1.0 reports all v0.3 handler errors that way). Without `auth_token`, any
+client can make the server send requests.
+
 ### Supported SDK Adapters
 
 | Framework or agent | Adapter | Streaming | Example |
@@ -120,12 +138,22 @@ limited by the OS command-line length; OpenClaw itself rejects prompts over
 | Server option | Default | Purpose |
 |---|---|---|
 | `--cwd` | current directory | Directory the agent works in |
-| `--host` / `--port` | `127.0.0.1` / `9000` | Bind address; use `--host 0.0.0.0` to accept remote connections |
+| `--host` / `--port` | `127.0.0.1` / `9000` | Bind address; use `--host 0.0.0.0` with `--auth-token` to accept remote connections |
+| `--auth-token` | none, or `$A2A_AUTH_TOKEN` | Require `Authorization: Bearer <token>` on every request except the Agent Card; prefer the variable, since argv is visible in `ps` |
+| `--push-notifications` | off | Accept push-notification configs and POST task updates to them |
+| `--allow-private-push-urls` | off | With `--push-notifications`, also allow receivers on localhost and private networks |
 | `--name` | `<Agent> (<folder>)`, e.g. `Claude Code (my-app)` | Agent Card display name |
 | `--description` | `<Agent> agent working in <folder>` | Agent Card description |
 | `--skill` | one skill from the card name and description | Agent Card skill as JSON (`id`, `name`, `description`, at least one entry in `tags`, optional `examples`); repeatable |
-| `--timeout` | `600` | Per-request timeout in seconds |
+| `--timeout` | `600` | Total time per request, in seconds |
 | `--executable` | `claude`, `codex`, `pi`, `openclaw`; for `dsh`, the runtime bundled with the SDK | Path to the agent executable |
+
+On POSIX, cancel, timeout and shutdown stop the agent and everything it
+started (shells, MCP servers, tool processes). Ctrl+C or closing the terminal stops running agents
+immediately; SIGTERM lets in-flight requests finish (uvicorn's graceful
+timeout), then stops them.
+Agents run detached from the server's terminal, so a tool that prompts on
+`/dev/tty` (an SSH passphrase, a GPG pinentry) fails instead of prompting.
 
 Pi source commands can be selected without a shell wrapper:
 

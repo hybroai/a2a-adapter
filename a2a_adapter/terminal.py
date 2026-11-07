@@ -941,6 +941,12 @@ class ActivityLog:
             request.task_id = request.task_id or task.get("taskId") or task.get("id")
             request.context_id = request.context_id or task.get("contextId")
 
+    def request_rejected(self, method: str, path: str) -> None:
+        """One row for a request refused by bearer auth (its body is never read)."""
+        # Anyone can send these, so keep the path short.
+        shown = path if len(path) <= 80 else path[:79] + "…"
+        self._row("error", "unauthorized", detail=f"401 {method} {shown}", detail_role="red")
+
     def request_finished(self, request: _RequestActivity, body: bytes | None) -> None:
         with self._lock:
             if request.message_id and self._requests.get(request.message_id) is request:
