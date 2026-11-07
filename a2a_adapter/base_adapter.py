@@ -98,6 +98,24 @@ def _owns_group(proc: Process) -> bool:
     return proc in _OWN_GROUPS
 
 
+def _forget_own_group_if_empty(proc: Process) -> None:
+    """Forget ``proc``'s group once its reaped leader left no member behind.
+
+    A child that moved its stdio off the CLI's pipes keeps the group alive
+    after ``wait()`` returns; the group stays ours (and killable by cancel,
+    close and the exit hook) until it is empty. While any member lives, the
+    group ID cannot be reused.
+    """
+    if not _owns_group(proc) or proc.returncode is None:
+        return
+    try:
+        os.killpg(proc.pid, 0)
+    except (ProcessLookupError, PermissionError):  # empty, or the ID is someone else's
+        _forget_own_group(proc)
+    except OSError:
+        pass
+
+
 async def _spawn_cli(factory, *args, **kwargs) -> Process:
     """Spawn a CLI with ``factory`` (a ``create_subprocess_exec``) in its own group.
 
@@ -159,11 +177,14 @@ async def _wait_reaped(proc: Process, timeout: float = _POST_KILL_WAIT) -> None:
 
 
 def _kill_own_groups_at_exit() -> None:
-    """Last resort at interpreter exit: SIGKILL every group whose leader still runs."""
+    """Last resort at interpreter exit: SIGKILL every group still registered.
+
+    Including groups whose leader already exited, as cancel() and close() do:
+    their other members may still run.
+    """
     for proc in list(_OWN_GROUPS):
-        if proc.returncode is None:
-            with contextlib.suppress(OSError):
-                os.killpg(proc.pid, _SIGKILL)
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, _SIGKILL)
 
 
 def default_state_dir(agent: str, working_dir: str) -> str:

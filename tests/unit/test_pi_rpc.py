@@ -450,19 +450,41 @@ import sys as _sys  # noqa: E402
 
 _posix_only = pytest.mark.skipif(_os.name != "posix", reason="process groups are POSIX-only")
 
-# Starts a ``sleep 30`` grandchild that shares the pipes, writes
-# "<leader pid> <grandchild pid>" to argv[1], optionally ignores SIGTERM, writes
-# the ready file argv[2], then either sleeps or exits.
+# Starts a ``sleep 30`` grandchild that shares the pipes (other modes: see
+# the branches below), writes "<leader pid>
+# <grandchild pid>" to argv[1], optionally ignores SIGTERM, writes the ready
+# file argv[2], then either sleeps or exits.
 _PI_TREE_SCRIPT = r"""
 import os, signal, subprocess, sys, time
-grandchild = subprocess.Popen(["sleep", "30"])
+null = subprocess.DEVNULL
+if sys.argv[3] == "detached-exit":
+    grandchild = subprocess.Popen(["sleep", "30"], stdin=null, stdout=null, stderr=null)
+elif sys.argv[3] == "detached-release-exit":
+    # Runs until the test creates argv[1] + ".release".
+    wait = 'while [ ! -e "$0" ]; do sleep 0.05; done'
+    grandchild = subprocess.Popen(
+        ["sh", "-c", wait, sys.argv[1] + ".release"], stdin=null, stdout=null, stderr=null
+    )
+elif sys.argv[3] == "setsid-exit":
+    # Leaves the group but keeps Pi's pipes, so wait() blocks while it runs.
+    grandchild = subprocess.Popen(["sleep", "30"], start_new_session=True)
+else:
+    grandchild = subprocess.Popen(["sleep", "30"])
 with open(sys.argv[1] + ".tmp", "w") as f:
     f.write(f"{os.getpid()} {grandchild.pid}")
 os.replace(sys.argv[1] + ".tmp", sys.argv[1])
 if sys.argv[3] == "ignore-term":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+if sys.argv[3] == "term-graceful":
+    def on_term(*_):
+        time.sleep(0.3)  # a SIGKILL during this would leave no marker
+        open(sys.argv[1] + ".termed", "w").close()
+        os._exit(0)
+    signal.signal(signal.SIGTERM, on_term)
 open(sys.argv[2], "w").close()
-if sys.argv[3] != "exit":
+if sys.argv[3] == "setsid-exit":
+    time.sleep(0.5)  # let the test start its watchers before Pi exits
+elif sys.argv[3] not in ("exit", "detached-exit", "detached-release-exit"):
     time.sleep(30)
 """
 
@@ -607,3 +629,219 @@ async def test_adapter_kill_children_now_kills_pi_group(tmp_path):
     finally:
         _kill_test_pids(leader, grandchild)
         await asyncio.wait_for(proc.wait(), 5)
+
+
+async def _start_watchers(rpc, proc) -> None:
+    """Start the RPC's exit and group watchers; return once Pi's exit is reported."""
+    rpc._process = proc
+    rpc._watch_task = asyncio.create_task(rpc._watch_process())
+    rpc._group_task = asyncio.create_task(rpc._watch_group())
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5
+    while rpc._failure is None:
+        assert loop.time() < deadline, "the watcher never reported Pi's exit"
+        await asyncio.sleep(0.02)
+
+
+async def _stop_watchers(rpc) -> None:
+    for task in (rpc._stdout_task, rpc._stderr_task, rpc._watch_task, rpc._group_task):
+        if task is not None and not task.done():
+            task.cancel()
+            with __import__("contextlib").suppress(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+
+
+async def _wait_until(predicate, timeout: float = 5) -> bool:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() >= deadline:
+            return False
+        await asyncio.sleep(0.05)
+    return True
+
+
+@_posix_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["close", "kill_now"])
+async def test_group_still_killed_after_watcher_saw_pi_exit(tmp_path, how):
+    """A grandchild off Pi's pipes outlives wait(); close/kill_now must still reach it."""
+    from a2a_adapter.base_adapter import _owns_group
+    from tests.process_helpers import is_alive, wait_dead
+
+    proc, _leader, grandchild = await _spawn_pi_tree(tmp_path, "detached-exit")
+    rpc = _rpc(tmp_path, timeout=0.2)
+    dead = False
+    try:
+        await _start_watchers(rpc, proc)
+        assert is_alive(grandchild), "test setup: the grandchild should outlive Pi"
+        if how == "close":
+            await asyncio.wait_for(rpc.close(), 5)
+            assert rpc._watch_task.done() and rpc._group_task.done()
+        else:
+            rpc.kill_now()
+        dead = await wait_dead(grandchild)
+        assert dead, f"grandchild survived {how}() after Pi exited"
+        assert not _owns_group(proc), "a killed group's ID must not stay ours"
+    finally:
+        if not dead:
+            _kill_test_pids(grandchild)
+        await _stop_watchers(rpc)
+
+
+@_posix_only
+@pytest.mark.asyncio
+async def test_watcher_forgets_group_once_it_is_empty(tmp_path):
+    from asyncio.subprocess import PIPE, create_subprocess_exec
+
+    from a2a_adapter.base_adapter import _owns_group, _spawn_cli
+
+    proc = await _spawn_cli(
+        create_subprocess_exec, _sys.executable, "-c", "pass", stdin=PIPE, stdout=PIPE, stderr=PIPE
+    )
+    rpc = _rpc(tmp_path, timeout=0.2)
+    try:
+        await _start_watchers(rpc, proc)
+        assert await _wait_until(lambda: not _owns_group(proc)), "empty group stayed ours"
+    finally:
+        await _stop_watchers(rpc)
+
+
+@_posix_only
+@pytest.mark.asyncio
+async def test_watcher_forgets_group_when_last_member_exits_later(tmp_path):
+    """The group stays ours while a detached member runs, and is forgotten after."""
+    from a2a_adapter.base_adapter import _owns_group
+    from tests.process_helpers import wait_dead
+
+    proc, _leader, grandchild = await _spawn_pi_tree(tmp_path, "detached-release-exit")
+    rpc = _rpc(tmp_path, timeout=0.2)
+    dead = False
+    try:
+        await _start_watchers(rpc, proc)
+        await asyncio.sleep(0.7)  # longer than one poll interval
+        assert _owns_group(proc), "the detached member still runs: the group is ours"
+        (tmp_path / "pids.release").touch()
+        dead = await wait_dead(grandchild)
+        assert dead, "test setup: the grandchild should exit once released"
+        assert await _wait_until(lambda: not _owns_group(proc)), "empty group stayed ours"
+    finally:
+        if not dead:
+            _kill_test_pids(grandchild)
+        await _stop_watchers(rpc)
+
+
+@_posix_only
+@pytest.mark.asyncio
+async def test_group_forgotten_while_a_setsid_child_holds_the_pipes(tmp_path):
+    """Pi exits, its group is empty, but wait() blocks on a child in its own session."""
+    from a2a_adapter.base_adapter import _owns_group
+
+    proc, _leader, grandchild = await _spawn_pi_tree(tmp_path, "setsid-exit")
+    rpc = _rpc(tmp_path, timeout=0.2)
+    try:
+        rpc._process = proc
+        # As in start(), before Pi exits: wait() then also waits for the pipes.
+        rpc._stdout_task = asyncio.create_task(rpc._read_stdout())
+        rpc._stderr_task = asyncio.create_task(rpc._read_stderr())
+        rpc._watch_task = asyncio.create_task(rpc._watch_process())
+        rpc._group_task = asyncio.create_task(rpc._watch_group())
+        await _wait_leader_exit(proc)
+        assert await _wait_until(lambda: not _owns_group(proc)), "empty group stayed ours"
+        assert not rpc._watch_task.done(), "test setup: wait() should still be blocked"
+    finally:
+        _kill_test_pids(grandchild)  # still running in its own session: ours to kill
+        await _stop_watchers(rpc)
+
+
+@_posix_only
+@pytest.mark.asyncio
+async def test_cancelled_close_still_finishes_with_sigkill(tmp_path):
+    """Cancelling a close() caller during the SIGTERM grace does not stop the close."""
+    from tests.process_helpers import wait_dead
+
+    proc, leader, grandchild = await _spawn_pi_tree(tmp_path, "ignore-term")
+    rpc = _rpc(tmp_path, timeout=0.2)
+    rpc._process = proc
+    rpc.cancel_grace_timeout = 0.5
+    caller = asyncio.create_task(rpc.close())
+    dead = False
+    try:
+        await asyncio.sleep(0.2)  # in the SIGTERM grace wait
+        caller.cancel()
+        with __import__("contextlib").suppress(asyncio.CancelledError):
+            await caller
+        dead = await wait_dead(leader)
+        assert dead, "the close was abandoned after SIGTERM: Pi ignores it and survives"
+        await asyncio.wait_for(rpc.close(), 5)  # a repeat close waits for the first
+    finally:
+        if not dead:
+            _kill_test_pids(leader, grandchild)
+        with __import__("contextlib").suppress(Exception):
+            await asyncio.wait_for(proc.wait(), 5)
+
+
+@_posix_only
+@pytest.mark.asyncio
+async def test_close_task_cancelled_kills_group(tmp_path):
+    """If the close itself is cancelled (e.g. loop shutdown), the group gets SIGKILL."""
+    from tests.process_helpers import wait_dead
+
+    proc, leader, grandchild = await _spawn_pi_tree(tmp_path, "ignore-term")
+    rpc = _rpc(tmp_path, timeout=0.2)
+    rpc._process = proc
+    rpc.cancel_grace_timeout = 30
+    caller = asyncio.create_task(rpc.close())
+    dead = False
+    try:
+        await asyncio.sleep(0.2)
+        rpc._close_task.cancel()
+        with __import__("contextlib").suppress(asyncio.CancelledError):
+            await asyncio.wait_for(caller, 5)
+        dead = await wait_dead(leader)
+        assert dead, "a cancelled close left Pi running"
+    finally:
+        if not dead:
+            _kill_test_pids(leader, grandchild)
+        with __import__("contextlib").suppress(Exception):
+            await asyncio.wait_for(proc.wait(), 5)
+
+
+@_posix_only
+@pytest.mark.asyncio
+async def test_repeat_close_waits_for_the_graceful_close(tmp_path):
+    """A second close() during the first must not cut Pi's SIGTERM grace short."""
+    proc, leader, grandchild = await _spawn_pi_tree(tmp_path, "term-graceful")
+    rpc = _rpc(tmp_path, timeout=0.2)
+    rpc._process = proc
+    rpc.cancel_grace_timeout = 5
+    try:
+        first = asyncio.create_task(rpc.close())
+        await asyncio.sleep(0.05)
+        await asyncio.wait_for(rpc.close(), 10)
+        await asyncio.wait_for(first, 10)
+        assert (tmp_path / "pids.termed").exists(), "Pi was killed before its grace period"
+    finally:
+        _kill_test_pids(grandchild)
+        with __import__("contextlib").suppress(Exception):
+            await asyncio.wait_for(proc.wait(), 5)
+
+
+@_posix_only
+@pytest.mark.asyncio
+async def test_close_forgets_group_after_killing_it(tmp_path):
+    from a2a_adapter.base_adapter import _owns_group
+    from tests.process_helpers import wait_dead
+
+    proc, _leader, grandchild = await _spawn_pi_tree(tmp_path, "detached-exit")
+    rpc = _rpc(tmp_path, timeout=0.2)
+    dead = False
+    try:
+        await _start_watchers(rpc, proc)
+        await asyncio.wait_for(rpc.close(), 5)
+        dead = await wait_dead(grandchild)
+        assert not _owns_group(proc)
+    finally:
+        if not dead:
+            _kill_test_pids(grandchild)
+        await _stop_watchers(rpc)

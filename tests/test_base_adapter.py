@@ -1096,3 +1096,36 @@ class TestStaleSessionHook:
 
 async def _collect(stream):
     return [chunk async for chunk in stream]
+
+
+@posix_only
+async def test_atexit_kills_owned_group_after_leader_exited(tmp_path):
+    """The exit hook kills an owned group even when its leader already exited."""
+    import sys
+    from asyncio.subprocess import create_subprocess_exec
+
+    from a2a_adapter import base_adapter
+    from tests.process_helpers import is_alive, wait_dead
+
+    pidfile = tmp_path / "grandchild.pid"
+    script = (
+        "import subprocess, sys\n"
+        "null = subprocess.DEVNULL\n"
+        "child = subprocess.Popen(['sleep', '30'], stdin=null, stdout=null, stderr=null)\n"
+        "open(sys.argv[1], 'w').write(str(child.pid))\n"
+    )
+    proc = await base_adapter._spawn_cli(
+        create_subprocess_exec, sys.executable, "-c", script, str(pidfile)
+    )
+    grandchild = None
+    try:
+        await asyncio.wait_for(proc.wait(), 5)
+        grandchild = int(pidfile.read_text())
+        assert is_alive(grandchild), "test setup: the grandchild should outlive the leader"
+        base_adapter._kill_own_groups_at_exit()
+        assert await wait_dead(grandchild), "atexit skipped a group whose leader had exited"
+    finally:
+        base_adapter._forget_own_group(proc)
+        if grandchild is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(grandchild, 9)
