@@ -329,8 +329,9 @@ class AdapterAgentExecutor(AgentExecutor):
         Called by DefaultRequestHandler when a tasks/cancel request arrives.
         Delegates to the adapter's cancel() method, then emits canceled state.
         If adapter.cancel() raises, the work may still be running, so the
-        task is not reported canceled: it is marked failed and the error
-        propagates, so the SDK returns it to the caller.
+        task is not reported canceled: the executor sends a single failed
+        state ("Cancel failed: ...") and does not re-raise, so tasks/cancel
+        returns that failed task instead of a JSON-RPC error.
 
         The interrupted execute() waits until this returns, so the event
         queue is still open for the terminal state even when
@@ -356,8 +357,10 @@ class AdapterAgentExecutor(AgentExecutor):
         try:
             await self._adapter.cancel(context=context)
         except Exception as e:
+            # Not re-raised: the SDK would add a second, bare failed state
+            # and hand the error to every stream subscriber.
             logger.warning(
-                "Adapter cancel() raised for task %s; not marking it canceled: %s",
+                "Adapter cancel() raised for task %s; marking it failed: %s",
                 context.task_id,
                 e,
             )
@@ -369,7 +372,7 @@ class AdapterAgentExecutor(AgentExecutor):
             )
             message = updater.new_agent_message([Part(text=f"Cancel failed: {e}")])
             await updater.failed(message=message)
-            raise
+            return
 
         await updater.cancel()
         self._notify("task_canceled", context.task_id, context.context_id)

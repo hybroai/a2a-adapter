@@ -1,18 +1,33 @@
 """Tests for AdapterAgentExecutor — the bridge between adapters and A2A SDK."""
 
 import asyncio
+import contextlib
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 from a2a.server.agent_execution import RequestContext
+from a2a.server.context import ServerCallContext
 from a2a.server.events import EventQueue
-from a2a.types import Part, TaskState
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore
+from a2a.types import (
+    CancelTaskRequest,
+    GetTaskRequest,
+    Message,
+    Part,
+    Role,
+    SendMessageRequest,
+    Task,
+    TaskArtifactUpdateEvent,
+    TaskState,
+    TaskStatusUpdateEvent,
+)
 
 from a2a_adapter.base_adapter import BaseA2AAdapter
 from a2a_adapter.executor import AdapterAgentExecutor
-from a2a_adapter.server import to_a2a
+from a2a_adapter.server import build_agent_card, to_a2a
 
 from .conftest import (
     FailingAdapter,
@@ -370,15 +385,14 @@ class TestCancel:
     async def test_a_failed_adapter_cancel_is_not_reported_canceled(
         self, request_context, event_queue
     ):
-        """The work may still be running, so the error propagates and the
-        SDK marks the task failed instead of canceled."""
+        """The work may still be running, so the task is marked failed, once,
+        by the executor; the error does not propagate to the SDK."""
         adapter = StubAdapter()
         adapter.cancel = AsyncMock(side_effect=RuntimeError("cancel failed"))
         observer = MagicMock()
         executor = AdapterAgentExecutor(adapter, observer=observer)
 
-        with pytest.raises(RuntimeError, match="cancel failed"):
-            await executor.cancel(request_context, event_queue)
+        await executor.cancel(request_context, event_queue)
 
         events = await _collect_events(event_queue)
         assert [e.status.state for e in events] == [TaskState.TASK_STATE_FAILED]
@@ -482,10 +496,140 @@ class TestCancelOverJsonRpc:
     async def test_a_failed_adapter_cancel_fails_the_task(self, cancel_awaits):
         adapter = self.Hanging(RuntimeError("robot did not stop"), cancel_awaits=cancel_awaits)
         cancelled, task = await self._cancel(adapter)
-        assert "error" in cancelled
+        assert cancelled["result"]["status"]["state"] == "failed"
         assert task["status"]["state"] == "failed"
-        # The SDK adds its own failed status after this one, so the message
-        # may have moved to history.
-        messages = [*task.get("history", []), task["status"].get("message", {})]
-        texts = [part["text"] for m in messages for part in m.get("parts", [])]
-        assert "Cancel failed: robot did not stop" in texts
+        texts = [part["text"] for part in task["status"]["message"]["parts"]]
+        assert texts == ["Cancel failed: robot did not stop"]
+
+
+# ── tasks/cancel through the real request handler ─────────────
+
+SUBMITTED = TaskState.TASK_STATE_SUBMITTED
+WORKING = TaskState.TASK_STATE_WORKING
+CANCELED = TaskState.TASK_STATE_CANCELED
+FAILED = TaskState.TASK_STATE_FAILED
+COMPLETED = TaskState.TASK_STATE_COMPLETED
+
+
+def _status_text(status) -> str | None:
+    if not status.HasField("message"):
+        return None
+    return "".join(part.text for part in status.message.parts)
+
+
+def _describe(payload) -> tuple:
+    """A stream payload as a comparable tuple, read from public SDK types."""
+    if isinstance(payload, Task):
+        return ("task", payload.status.state)
+    if isinstance(payload, TaskStatusUpdateEvent):
+        return ("status", payload.status.state, _status_text(payload.status))
+    if isinstance(payload, TaskArtifactUpdateEvent):
+        text = "".join(part.text for part in payload.artifact.parts)
+        return ("artifact", text, payload.append, payload.last_chunk)
+    return (type(payload).__name__,)
+
+
+def _states(payloads) -> list:
+    """Status-carrying payloads as (kind, state) pairs, artifacts as ("artifact",)."""
+    return [d[:2] if d[0] != "artifact" else d[:1] for d in map(_describe, payloads)]
+
+
+async def _run_and_cancel(
+    adapter,
+    *,
+    observer=None,
+    payloads_before_cancel: int = 2,
+    wait_stream: bool = True,
+    cancel_timeout: float = 5,
+):
+    """Stream a message through DefaultRequestHandler, then cancel the task.
+
+    Returns ``(cancel result or exception, stream payloads, stream task,
+    stored task)``. With ``wait_stream`` the stream is awaited first (for
+    runs that unwind); otherwise the stored task is read right after the
+    cancel, while a stuck run keeps the stream open.
+    """
+    executor = AdapterAgentExecutor(adapter, observer)
+    handler = DefaultRequestHandler(
+        executor, InMemoryTaskStore(), build_agent_card(adapter, streaming=True)
+    )
+    call = ServerCallContext()
+    message = Message(role=Role.ROLE_USER, message_id=uuid.uuid4().hex, parts=[Part(text="hi")])
+    payloads: list = []
+
+    async def consume():
+        async for payload in handler.on_message_send_stream(
+            SendMessageRequest(message=message), call
+        ):
+            payloads.append(payload)
+
+    stream = asyncio.create_task(consume())
+    await asyncio.wait_for(adapter.started.wait(), 5)
+    for _ in range(500):
+        if len(payloads) >= payloads_before_cancel:
+            break
+        await asyncio.sleep(0.01)
+    task_id = payloads[0].id
+    try:
+        result = await asyncio.wait_for(
+            handler.on_cancel_task(CancelTaskRequest(id=task_id), call), cancel_timeout
+        )
+    except Exception as e:  # the old behaviour: the cancel RPC raised
+        result = e
+    if wait_stream:
+        await asyncio.wait_for(asyncio.shield(stream), 5)
+    stored = await handler.on_get_task(GetTaskRequest(id=task_id), call)
+    return result, payloads, stream, stored
+
+
+class Stubborn(BaseA2AAdapter):
+    """invoke() ignores CancelledError until the test sets ``release``."""
+
+    def __init__(self, cancel_error: Exception | None = None):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancel_error = cancel_error
+
+    async def invoke(self, user_input, context_id=None, **kwargs):
+        self.started.set()
+        while not self.release.is_set():
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                continue
+        return "late"
+
+    async def cancel(self, context_id=None, **kwargs):
+        if self.cancel_error is not None:
+            raise self.cancel_error
+
+
+async def _finish(adapter: Stubborn, stream: asyncio.Task) -> None:
+    """Let a stubborn run finish and the stream end, whatever the test saw."""
+    adapter.release.set()
+    with contextlib.suppress(Exception, asyncio.CancelledError):
+        await asyncio.wait_for(asyncio.shield(stream), 5)
+
+
+class TestCancelThroughHandler:
+    async def test_a_failed_adapter_cancel_sends_one_failed(self):
+        adapter = Stubborn(RuntimeError("robot did not stop"))
+        observer = MagicMock()
+        result, payloads, stream, stored = await _run_and_cancel(
+            adapter, observer=observer, wait_stream=False
+        )
+        try:
+            assert isinstance(result, Task), result
+            assert result.status.state == FAILED
+            assert stored.status.state == FAILED
+            assert _status_text(stored.status) == "Cancel failed: robot did not stop"
+            observer.task_failed.assert_called_once()
+            observer.task_canceled.assert_not_called()
+        finally:
+            await _finish(adapter, stream)
+        assert stream.exception() is None
+        assert [_describe(p) for p in payloads[:3]] == [
+            ("task", SUBMITTED),
+            ("status", WORKING, None),
+            ("status", FAILED, "Cancel failed: robot did not stop"),
+        ]

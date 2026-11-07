@@ -81,7 +81,9 @@ A2A Client → HTTP POST / (tasks/cancel)
     → AdapterAgentExecutor.cancel()
       → adapter.cancel()          (may await; CLI adapters kill the CLI's
                                    process group on POSIX)
-      → TaskUpdater.cancel()      (or failed, if adapter.cancel() raised)
+      → TaskUpdater.cancel()      (or one failed state, "Cancel failed: …",
+                                   if adapter.cancel() raised; the RPC
+                                   then returns that task, not an error)
 ```
 
 ## Core Components
@@ -126,7 +128,7 @@ Bridge between `BaseA2AAdapter` and A2A SDK's `AgentExecutor`:
 - Calls `adapter.invoke()` or `adapter.stream()`
 - Converts results to A2A events via `TaskUpdater`
 - Handles errors → `TaskUpdater.failed()`
-- Handles cancellation → `adapter.cancel()` + `TaskUpdater.cancel()`; if `adapter.cancel()` raises, the task is marked failed with a "Cancel failed" message and the error propagates to the caller. The interrupted `execute()` waits for the cancel to finish, so this holds when `adapter.cancel()` awaits
+- Handles cancellation → `adapter.cancel()` + `TaskUpdater.cancel()`; if `adapter.cancel()` raises, the executor sends a single failed state with a "Cancel failed: …" message and does not re-raise, so `tasks/cancel` returns that failed task rather than a JSON-RPC error. The interrupted `execute()` waits for the cancel to finish, so this holds when `adapter.cancel()` awaits
 
 ### Server Layer (`server.py`)
 
