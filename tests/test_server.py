@@ -380,3 +380,304 @@ class TestShutdownKillsChildren:
 
         monkeypatch.setattr(server_module._ReadyServer, "run", interrupted)
         server_module.serve_agent(StubAdapter())
+
+
+# ── Bearer-token auth (Fix 4) ────────────────────────────────
+
+_SEND = {
+    "jsonrpc": "2.0",
+    "id": "1",
+    "method": "message/send",
+    "params": {
+        "message": {"role": "user", "messageId": "m-1", "parts": [{"kind": "text", "text": "hi"}]}
+    },
+}
+
+
+def _client(app, token: str | None = None):
+    headers = {"Authorization": f"Bearer {token}"} if token is not None else {}
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver", headers=headers
+    )
+
+
+class TestAuth:
+    async def test_no_token_keeps_routes_open(self):
+        async with _client(to_a2a(StubAdapter())) as client:
+            response = await client.post("/", json=_SEND)
+        assert response.status_code == 200
+        assert response.json()["result"]["status"]["state"] == "completed"
+
+    async def test_jsonrpc_requires_token(self):
+        async with _client(to_a2a(StubAdapter(), auth_token="s3cret")) as client:
+            response = await client.post("/", json=_SEND)
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == "Bearer"
+        assert response.json() == {"error": "unauthorized"}
+
+    @pytest.mark.parametrize(
+        "header", ["Bearer wrong", "Basic s3cret", "s3cret", "Bearer", "Bearer s3cret2"]
+    )
+    async def test_jsonrpc_wrong_token_rejected(self, header):
+        app = to_a2a(StubAdapter(), auth_token="s3cret")
+        async with _client(app) as client:
+            response = await client.post("/", json=_SEND, headers={"Authorization": header})
+        assert response.status_code == 401
+
+    @pytest.mark.parametrize("scheme", ["Bearer", "bearer", "BEARER"])
+    async def test_jsonrpc_right_token_accepted(self, scheme):
+        app = to_a2a(StubAdapter(), auth_token="s3cret")
+        async with _client(app) as client:
+            response = await client.post(
+                "/", json=_SEND, headers={"Authorization": f"{scheme} s3cret"}
+            )
+        assert response.status_code == 200
+        assert response.json()["result"]["status"]["state"] == "completed"
+
+    @pytest.mark.parametrize(
+        "method, path",
+        [
+            ("POST", "/message:send"),
+            ("GET", "/tasks"),
+            ("GET", "/tasks/x"),
+            ("GET", "/tenant-a/tasks"),
+            ("POST", "/v1/message:send"),
+            ("GET", "/v1/card"),
+            ("GET", "/extendedAgentCard"),
+            ("GET", "/no-such-route"),
+        ],
+    )
+    async def test_rest_routes_require_token(self, method, path):
+        app = to_a2a(StubAdapter(), auth_token="s3cret")
+        async with _client(app) as client:
+            response = await client.request(method, path)
+        assert response.status_code == 401
+
+    @pytest.mark.parametrize("path", ["/.well-known/agent-card.json", "/.well-known/agent.json"])
+    async def test_agent_card_routes_stay_public(self, path):
+        app = to_a2a(StubAdapter(), auth_token="s3cret")
+        async with _client(app) as client:
+            assert (await client.get(path)).status_code == 200
+            assert (await client.head(path)).status_code == 200
+            assert (await client.post(path)).status_code == 401
+
+    async def test_card_declares_bearer_scheme_when_token_set(self):
+        app = to_a2a(StubAdapter(), auth_token="s3cret")
+        async with _client(app) as client:
+            card = (await client.get("/.well-known/agent-card.json")).json()
+        assert card["securitySchemes"] == {
+            "bearer": {"httpAuthSecurityScheme": {"scheme": "bearer"}}
+        }
+        assert card["securityRequirements"] == [{"schemes": {"bearer": {}}}]
+
+    async def test_card_has_no_security_without_token(self):
+        async with _client(to_a2a(StubAdapter())) as client:
+            card = (await client.get("/.well-known/agent-card.json")).json()
+        assert "securitySchemes" not in card
+        assert "securityRequirements" not in card
+        assert not build_agent_card(StubAdapter()).security_schemes
+
+    @pytest.mark.parametrize("token", ["", "   ", "\t\n"])
+    def test_empty_token_rejected(self, token):
+        with pytest.raises(ValueError, match="auth_token"):
+            to_a2a(StubAdapter(), auth_token=token)
+
+    async def test_custom_card_not_modified(self):
+        card = build_agent_card(StubAdapter(), name="Custom")
+        app = to_a2a(StubAdapter(), agent_card=card, auth_token="s3cret")
+        assert not card.security_schemes
+        async with _client(app, "s3cret") as client:
+            served = (await client.get("/.well-known/agent-card.json")).json()
+            assert (await client.post("/", json=_SEND)).status_code == 200
+        assert served["name"] == "Custom"
+        assert "securitySchemes" not in served
+
+    @pytest.mark.parametrize("token", [" tok", "tok\n", "tok "])
+    def test_token_with_surrounding_whitespace_rejected(self, token):
+        with pytest.raises(ValueError, match="whitespace"):
+            to_a2a(StubAdapter(), auth_token=token)
+
+    @pytest.mark.parametrize("token", ["tök", "tok\x00", "tok\tx"])
+    def test_non_printable_ascii_token_rejected(self, token):
+        with pytest.raises(ValueError, match="printable ASCII"):
+            to_a2a(StubAdapter(), auth_token=token)
+
+    async def test_unauthenticated_websocket_is_closed(self):
+        from a2a_adapter.server import _BearerAuthMiddleware
+
+        reached = []
+
+        async def app(scope, receive, send):
+            reached.append(scope["type"])
+
+        sent = []
+
+        async def receive():
+            return {"type": "websocket.connect"}
+
+        async def send(message):
+            sent.append(message)
+
+        middleware = _BearerAuthMiddleware(app, token="s3cret")
+        await middleware({"type": "websocket", "path": "/ws", "headers": []}, receive, send)
+        assert reached == []
+        assert sent == [{"type": "websocket.close", "code": 1008}]
+
+        authed = {
+            "type": "websocket",
+            "path": "/ws",
+            "headers": [(b"authorization", b"Bearer s3cret")],
+        }
+        await middleware(authed, receive, send)
+        assert reached == ["websocket"]
+
+    async def test_lifespan_passes_through(self):
+        app = to_a2a(StubAdapter(), auth_token="s3cret")
+        async with app.router.lifespan_context(app):
+            pass
+
+
+def _fake_started_run(captured):
+    def fake_run(self):
+        captured.append(self)
+        self.started = True
+
+    return fake_run
+
+
+class TestServeAgentBind:
+    @pytest.fixture(autouse=True)
+    def _no_real_server(self, monkeypatch):
+        from a2a_adapter import server as server_module
+
+        self.servers = []
+        monkeypatch.setattr(server_module._ReadyServer, "run", _fake_started_run(self.servers))
+        monkeypatch.setattr(
+            "a2a_adapter.server.uvicorn.run",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("uvicorn.run() called")),
+        )
+
+    def test_warns_on_non_loopback_without_auth(self, caplog):
+        from a2a_adapter.server import serve_agent
+
+        with caplog.at_level("WARNING", logger="a2a_adapter.server"):
+            serve_agent(StubAdapter(), host="0.0.0.0")
+        assert any("without auth" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize(
+        "host, kwargs",
+        [
+            ("127.0.0.1", {}),
+            ("::1", {}),
+            ("localhost", {}),
+            ("127.0.0.2", {}),
+            ("0.0.0.0", {"auth_token": "t"}),
+        ],
+    )
+    def test_no_warning_on_loopback_or_with_auth(self, caplog, host, kwargs):
+        from a2a_adapter.server import serve_agent
+
+        with caplog.at_level("WARNING", logger="a2a_adapter.server"):
+            serve_agent(StubAdapter(), host=host, **kwargs)
+        assert not any("without auth" in r.getMessage() for r in caplog.records)
+
+    def test_no_warning_for_uds(self, caplog, tmp_path):
+        from a2a_adapter.server import serve_agent
+
+        with caplog.at_level("WARNING", logger="a2a_adapter.server"):
+            serve_agent(StubAdapter(), host="0.0.0.0", uds=str(tmp_path / "s.sock"))
+        assert not any("without auth" in r.getMessage() for r in caplog.records)
+
+    def test_is_loopback_host(self):
+        from a2a_adapter.server import _is_loopback_host
+
+        for host in ("localhost", "LOCALHOST", "127.0.0.1", "127.1.2.3", "::1", "[::1]"):
+            assert _is_loopback_host(host), host
+        for host in ("0.0.0.0", "::", "192.168.1.2", "example.com", "", "localhost.evil"):
+            assert not _is_loopback_host(host), host
+
+    @pytest.mark.parametrize("with_display", [False, True])
+    async def test_serve_agent_passes_token_to_app(self, with_display):
+        import io
+
+        from a2a_adapter.server import serve_agent
+        from a2a_adapter.terminal import ActivityLog
+
+        class QuietDisplay:
+            activity = ActivityLog(io.StringIO(), color=False)
+
+            def install_logging(self, level):
+                pass
+
+            def ready(self, card):
+                pass
+
+            def close(self):
+                pass
+
+            def uninstall_logging(self):
+                pass
+
+        kwargs = {"display": QuietDisplay()} if with_display else {}
+        serve_agent(StubAdapter(), auth_token="s3cret", **kwargs)
+        app = self.servers[-1].config.app
+        async with _client(app) as client:
+            assert (await client.post("/", json=_SEND)).status_code == 401
+        async with _client(app, "s3cret") as client:
+            assert (await client.post("/", json=_SEND)).status_code == 200
+
+    def test_serve_agent_card_declares_bearer(self, monkeypatch):
+        from a2a_adapter import server as server_module
+
+        cards = []
+        real_to_a2a = server_module.to_a2a
+
+        def spy(adapter, agent_card=None, *args, **kwargs):
+            cards.append(agent_card)
+            return real_to_a2a(adapter, agent_card, *args, **kwargs)
+
+        monkeypatch.setattr(server_module, "to_a2a", spy)
+        server_module.serve_agent(StubAdapter(), auth_token="t")
+        assert "bearer" in cards[-1].security_schemes
+        server_module.serve_agent(StubAdapter())
+        assert not cards[-1].security_schemes
+
+    def test_serve_agent_default_host(self):
+        from a2a_adapter.server import serve_agent
+
+        serve_agent(StubAdapter())
+        assert self.servers[-1].config.host == "127.0.0.1"
+
+
+class TestChildEnvSecrets:
+    def test_child_env_has_no_auth_token(self, monkeypatch, tmp_path):
+        from a2a_adapter.base_adapter import BaseA2AAdapter
+
+        class Cli(BaseA2AAdapter):
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                return ""
+
+        monkeypatch.setenv("A2A_AUTH_TOKEN", "server-secret")
+        assert "A2A_AUTH_TOKEN" not in Cli(working_dir=str(tmp_path))._build_env()
+        explicit = Cli(working_dir=str(tmp_path), env_vars={"A2A_AUTH_TOKEN": "mine"})
+        assert explicit._build_env()["A2A_AUTH_TOKEN"] == "mine"
+
+    async def test_pi_spawn_env_has_no_auth_token(self, monkeypatch, tmp_path):
+        from unittest.mock import AsyncMock
+
+        from a2a_adapter.integrations.pi import PiRpcProcess
+
+        monkeypatch.setenv("A2A_AUTH_TOKEN", "server-secret")
+        spawn = AsyncMock(side_effect=RuntimeError("stop after spawn args"))
+        monkeypatch.setattr("a2a_adapter.integrations.pi.create_subprocess_exec", spawn)
+        for env_vars, expected in (({}, None), ({"A2A_AUTH_TOKEN": "mine"}, "mine")):
+            rpc = PiRpcProcess(
+                command=["pi"],
+                working_dir=str(tmp_path),
+                session_id="s",
+                session_dir=str(tmp_path / "sessions"),
+                env_vars=env_vars,
+            )
+            with pytest.raises(RuntimeError, match="stop after spawn"):
+                await rpc.start()
+            assert spawn.call_args.kwargs["env"].get("A2A_AUTH_TOKEN") == expected

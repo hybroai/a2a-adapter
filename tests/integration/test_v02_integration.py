@@ -354,3 +354,51 @@ async def test_lifespan_shutdown_kills_cli_grandchildren(tmp_path):
     finally:
         kill_pids(tmp_path)
         await cancel_and_wait(request)
+
+
+# ═══════════════════════════════════════════════════
+# Bearer-token auth
+# ═══════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_authenticated_send_and_stream():
+    app = to_a2a(StreamEchoAdapter(), auth_token="s3cret")
+    auth = {"Authorization": "Bearer s3cret"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        sent = await client.post("/", json=make_send_payload("hi there"), headers=auth)
+        assert sent.status_code == 200
+        task = sent.json()["result"]
+        assert task["status"]["state"] == "completed"
+
+        streamed = await client.post("/", json=make_stream_payload("a b"), headers=auth)
+        assert streamed.status_code == 200
+        assert "text/event-stream" in streamed.headers["content-type"]
+        assert '"completed"' in streamed.text or "completed" in streamed.text
+
+        get = {"jsonrpc": "2.0", "id": "g", "method": "tasks/get", "params": {"id": task["id"]}}
+        assert (await client.post("/", json=get)).status_code == 401
+        assert (await client.post("/", json=get, headers=auth)).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_activity_log_records_rejected_request():
+    import io
+
+    from a2a_adapter.terminal import ActivityLog, Verbosity
+
+    stream = io.StringIO()
+    log = ActivityLog(stream, color=False, verbosity=Verbosity.DEBUG, width=200)
+    app = to_a2a(EchoAdapter(), auth_token="s3cret", activity=log)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        response = await client.post("/", json=make_send_payload("private-payload-xyz"))
+    assert response.status_code == 401
+    output = stream.getvalue()
+    rows = [line for line in output.splitlines() if "401" in line]
+    assert len(rows) == 1
+    assert "POST /" in rows[0]
+    assert "private-payload-xyz" not in output

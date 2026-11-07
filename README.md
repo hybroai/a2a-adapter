@@ -52,6 +52,15 @@ Your agent is now an A2A server at `http://localhost:9000`, with its Agent
 Card at `http://localhost:9000/.well-known/agent-card.json`. To mount it in an
 existing ASGI app instead, use `to_a2a(adapter)`.
 
+`serve_agent()` binds `127.0.0.1` by default. To accept remote connections,
+bind all interfaces and require a token:
+
+```python
+import os
+
+serve_agent(adapter, host="0.0.0.0", auth_token=os.environ["A2A_AUTH_TOKEN"])
+```
+
 ### Supported SDK Adapters
 
 | Framework or agent | Adapter | Streaming | Example |
@@ -120,7 +129,8 @@ limited by the OS command-line length; OpenClaw itself rejects prompts over
 | Server option | Default | Purpose |
 |---|---|---|
 | `--cwd` | current directory | Directory the agent works in |
-| `--host` / `--port` | `127.0.0.1` / `9000` | Bind address; use `--host 0.0.0.0` to accept remote connections |
+| `--host` / `--port` | `127.0.0.1` / `9000` | Bind address; use `--host 0.0.0.0` with `--auth-token` to accept remote connections |
+| `--auth-token` | none, or `$A2A_AUTH_TOKEN` | Require `Authorization: Bearer <token>` on every request except the Agent Card; prefer the variable, since argv is visible in `ps` |
 | `--name` | `<Agent> (<folder>)`, e.g. `Claude Code (my-app)` | Agent Card display name |
 | `--description` | `<Agent> agent working in <folder>` | Agent Card description |
 | `--skill` | one skill from the card name and description | Agent Card skill as JSON (`id`, `name`, `description`, at least one entry in `tags`, optional `examples`); repeatable |

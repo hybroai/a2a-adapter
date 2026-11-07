@@ -141,6 +141,16 @@ Three public functions:
   get only the lifespan `close()` and an `atexit` fallback.
 - **`build_agent_card(adapter)`** — `adapter.get_metadata()` → `AgentCard`
 
+`serve_agent()` binds `127.0.0.1` by default. `to_a2a(auth_token=...)` /
+`serve_agent(auth_token=...)` add a pure-ASGI bearer-token middleware,
+outermost (before the activity middleware, which buffers and may log request
+bodies). Only GET/HEAD of the two agent-card paths stay public; every other
+route, including ones the SDK adds later, needs `Authorization: Bearer
+<token>` and gets 401 otherwise. The generated card declares the bearer
+scheme. Serving a non-loopback host without a token logs a warning. The
+token never reaches CLI children: `A2A_AUTH_TOKEN` is removed from their
+environment unless the adapter's own `env_vars` set it.
+
 ### CLI Entry Point (`cli.py`)
 
 The `a2a-adapter` console script is intentionally thin:
@@ -150,6 +160,8 @@ The `a2a-adapter` console script is intentionally thin:
 - Passes native agent arguments after `--` into the selected adapter
 - Rejects protocol/session flags owned by the adapter
 - Calls the same `serve_agent()` used by Python SDK consumers
+- `--auth-token` (or `$A2A_AUTH_TOKEN`, which the CLI then removes from its
+  own environment) turns on bearer-token auth
 
 Hermes is not a v1 CLI target because `HermesAdapter` is an in-process gateway
 adapter rather than a local CLI subprocess adapter. `dsh` is a target because

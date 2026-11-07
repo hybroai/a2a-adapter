@@ -13,7 +13,9 @@ Replaces: client.py (deprecated in v0.2, removed in v0.3)
 """
 
 import contextlib
+import hmac
 import inspect
+import ipaddress
 import logging
 import os
 import signal
@@ -40,6 +42,10 @@ from a2a.types import (
     AgentInterface,
     AgentProvider,
     AgentSkill,
+    HTTPAuthSecurityScheme,
+    SecurityRequirement,
+    SecurityScheme,
+    StringList,
 )
 from a2a.utils.constants import (
     AGENT_CARD_WELL_KNOWN_PATH,
@@ -73,6 +79,84 @@ class _SafeInMemoryPushNotificationConfigStore(InMemoryPushNotificationConfigSto
         if not getattr(notification_config, "url", ""):
             return
         await super().set_info(task_id, notification_config, context)
+
+
+_PUBLIC_CARD_PATHS = frozenset({AGENT_CARD_WELL_KNOWN_PATH, LEGACY_AGENT_CARD_PATH})
+
+
+class _BearerAuthMiddleware:
+    """Require ``Authorization: Bearer <token>`` on every HTTP request.
+
+    Only GET/HEAD on the two agent-card paths stay public, so routes the SDK
+    adds later are protected by default. Card paths are matched exactly:
+    behind a proxy prefix or uvicorn ``root_path`` they need the token too.
+    Pure ASGI, and it never sets ``scope["user"]``: the SDK keys push configs
+    by user, and the push sender looks them up anonymously.
+    """
+
+    def __init__(self, app: Any, token: str, on_reject=None) -> None:
+        self.app = app
+        self._token = token.encode("utf-8")
+        self._on_reject = on_reject
+
+    async def __call__(self, scope: dict, receive, send) -> None:
+        if scope["type"] == "websocket":
+            if self._authorized(scope):
+                await self.app(scope, receive, send)
+            else:
+                await send({"type": "websocket.close", "code": 1008})
+            return
+        if scope["type"] != "http":  # lifespan
+            await self.app(scope, receive, send)
+            return
+        method = scope.get("method", "")
+        path = scope.get("path", "")
+        public = method in ("GET", "HEAD") and path in _PUBLIC_CARD_PATHS
+        if public or self._authorized(scope):
+            await self.app(scope, receive, send)
+            return
+        if self._on_reject is not None:
+            try:
+                self._on_reject(method, path)
+            except Exception:
+                logger.debug("Recording a rejected request failed", exc_info=True)
+        response = JSONResponse(
+            {"error": "unauthorized"}, status_code=401, headers={"WWW-Authenticate": "Bearer"}
+        )
+        await response(scope, receive, send)
+
+    def _authorized(self, scope: dict) -> bool:
+        for name, value in scope.get("headers", []):
+            if name.lower() == b"authorization":
+                scheme, _, credentials = value.strip().partition(b" ")
+                return scheme.lower() == b"bearer" and hmac.compare_digest(
+                    credentials.strip(), self._token
+                )
+        return False
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Whether binding ``host`` only accepts connections from this machine."""
+    host = host.strip("[]")
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _check_auth_token(auth_token: str | None) -> None:
+    if auth_token is None:
+        return
+    if not auth_token.strip():
+        raise ValueError("auth_token must not be empty; pass None to disable auth")
+    if auth_token != auth_token.strip():
+        # Clients send the token without it, so every request would get 401.
+        raise ValueError("auth_token must not start or end with whitespace")
+    if not all(" " <= char <= "~" for char in auth_token):
+        # HTTP clients send header values as ASCII; anything else never matches.
+        raise ValueError("auth_token must be printable ASCII")
 
 
 def _legacy_card_url(agent_card: AgentCard) -> str | None:
@@ -130,6 +214,7 @@ def to_a2a(
     task_store: TaskStore | None = None,
     *,
     activity: "ActivityLog | None" = None,
+    auth_token: str | None = None,
     **card_overrides: Any,
 ) -> Any:
     """Convert any adapter into an A2A Protocol ASGI application.
@@ -147,6 +232,11 @@ def to_a2a(
             Defaults to InMemoryTaskStore.
         activity: Optional ActivityLog that prints one row per A2A
             operation and task state change (used by the CLI).
+        auth_token: Optional bearer token. When set, every request except
+            GET/HEAD of the agent card needs ``Authorization: Bearer <token>``
+            (401 otherwise), and an auto-generated card declares the bearer
+            scheme. A card passed in is served as given. None (default)
+            leaves the server open.
         **card_overrides: Override individual AgentCard fields
             (name, description, url, version, streaming).
 
@@ -159,8 +249,12 @@ def to_a2a(
         >>> app = to_a2a(adapter)
         >>> # Deploy with any ASGI server: uvicorn, hypercorn, daphne, etc.
     """
+    _check_auth_token(auth_token)
     if agent_card is None:
+        card_overrides.setdefault("bearer_auth", auth_token is not None)
         agent_card = build_agent_card(adapter, **card_overrides)
+    elif auth_token is not None and not agent_card.security_schemes:
+        logger.debug("auth_token is set but the given agent card declares no security scheme")
 
     task_store = task_store or InMemoryTaskStore()
     push_config_store = _SafeInMemoryPushNotificationConfigStore()
@@ -191,6 +285,11 @@ def to_a2a(
     routes.extend(create_rest_routes(handler, enable_v0_3_compat=True))
 
     middleware = []
+    if auth_token is not None:
+        # Outermost: the activity middleware buffers and (at --debug) logs
+        # request bodies, so it must never see an unauthenticated payload.
+        on_reject = activity.request_rejected if activity is not None else None
+        middleware.append(Middleware(_BearerAuthMiddleware, token=auth_token, on_reject=on_reject))
     if activity is not None:
         from .terminal import ActivityMiddleware
 
@@ -268,11 +367,12 @@ class _ReadyServer(uvicorn.Server):
 def serve_agent(
     adapter: BaseA2AAdapter,
     agent_card: AgentCard | None = None,
-    host: str = "0.0.0.0",
+    host: str = "127.0.0.1",
     port: int = 9000,
     log_level: str = "info",
     *,
     display: "TerminalDisplay | None" = None,
+    auth_token: str | None = None,
     **kwargs: Any,
 ) -> None:
     """One-line A2A server startup.
@@ -284,9 +384,14 @@ def serve_agent(
     Args:
         adapter: Any BaseA2AAdapter implementation.
         agent_card: Optional pre-built AgentCard.
-        host: Host address to bind to (default: "0.0.0.0").
+        host: Host address to bind to (default: "127.0.0.1", this machine
+            only). Use "0.0.0.0" to accept remote connections, with
+            ``auth_token``.
         port: Port to listen on (default: 9000).
         log_level: Logging level (default: "info").
+        auth_token: Optional bearer token required on every request except
+            the agent card (see :func:`to_a2a`). Serving a non-loopback host
+            without one logs a warning.
         display: Optional TerminalDisplay. When given, Uvicorn's own
             startup and access lines are replaced by the display's card
             (shown once the socket is listening) and activity rail.
@@ -304,11 +409,13 @@ def serve_agent(
         >>> adapter = N8nAdapter(webhook_url="http://localhost:5678/webhook/agent")
         >>> serve_agent(adapter, port=9000)
     """
+    _check_auth_token(auth_token)
     if agent_card is None:
         display_host = "localhost" if host in ("0.0.0.0", "::") else host
         agent_card = build_agent_card(
             adapter,
             url=f"http://{display_host}:{port}/",
+            bearer_auth=auth_token is not None,
         )
 
     if kwargs.get("workers", 1) not in (None, 1) or kwargs.get("reload"):
@@ -316,7 +423,8 @@ def serve_agent(
     on_interrupt = getattr(adapter, "kill_children_now", None)
 
     if display is None:
-        app = to_a2a(adapter, agent_card)
+        app = to_a2a(adapter, agent_card, auth_token=auth_token)
+        _warn_if_exposed(host, auth_token, kwargs)
         # What uvicorn.run() does around Server.run(): app_dir on sys.path,
         # Ctrl+C swallowed, the uds socket removed, exit 3 on failed startup.
         app_dir = kwargs.pop("app_dir", None)
@@ -340,9 +448,10 @@ def serve_agent(
         raise ValueError(
             f"serve_agent(display=...) sets Uvicorn logging itself; drop {', '.join(owned)}"
         )
-    app = to_a2a(adapter, agent_card, activity=display.activity)
+    app = to_a2a(adapter, agent_card, activity=display.activity, auth_token=auth_token)
     display.install_logging(log_level)
     try:
+        _warn_if_exposed(host, auth_token, kwargs)
         config = uvicorn.Config(
             app,
             host=host,
@@ -368,6 +477,15 @@ def serve_agent(
         sys.exit(_STARTUP_FAILURE)
 
 
+def _warn_if_exposed(host: str, auth_token: str | None, kwargs: dict) -> None:
+    if auth_token is None and not _is_loopback_host(host) and not {"uds", "fd"} & kwargs.keys():
+        logger.warning(
+            "Serving on %s without auth: anyone who can reach this port can run the agent. "
+            "Set auth_token / --auth-token or bind 127.0.0.1.",
+            host,
+        )
+
+
 def build_agent_card(
     adapter: BaseA2AAdapter,
     **overrides: Any,
@@ -385,7 +503,8 @@ def build_agent_card(
         adapter: The adapter to generate a card for.
         **overrides: Override any auto-generated field.
             Supported keys: name, description, version, streaming, url,
-            provider, documentation_url, icon_url.
+            provider, documentation_url, icon_url, and ``bearer_auth``
+            (bool, default False) to declare a bearer-token security scheme.
 
     Returns:
         A fully populated AgentCard.
@@ -411,7 +530,19 @@ def build_agent_card(
         else:
             provider = provider_data
 
+    security: dict[str, Any] = {}
+    if overrides.get("bearer_auth", False):
+        security = {
+            "security_schemes": {
+                "bearer": SecurityScheme(
+                    http_auth_security_scheme=HTTPAuthSecurityScheme(scheme="bearer")
+                )
+            },
+            "security_requirements": [SecurityRequirement(schemes={"bearer": StringList()})],
+        }
+
     return AgentCard(
+        **security,
         name=overrides.get("name", meta.name or type(adapter).__name__),
         description=overrides.get("description", meta.description or ""),
         version=overrides.get("version", meta.version),

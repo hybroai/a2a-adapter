@@ -17,6 +17,7 @@ from typing import Any
 from ..base_adapter import (
     AdapterMetadata,
     BaseA2AAdapter,
+    _child_env,
     _forget_own_group,
     _kill_process_tree,
     _owns_group,
@@ -156,8 +157,7 @@ class PiRpcProcess:
         if self.model:
             args.extend(["--model", self.model])
 
-        env = os.environ.copy()
-        env.update(self.env_vars)
+        env = _child_env(self.env_vars)
 
         try:
             self._process = await _spawn_cli(

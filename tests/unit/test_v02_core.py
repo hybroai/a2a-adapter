@@ -242,14 +242,14 @@ def _fake_run(self):
 
 
 def test_serve_agent_url_from_port():
-    """serve_agent should derive the AgentCard URL from host/port."""
+    """serve_agent should derive the AgentCard URL from host/port (default host 127.0.0.1)."""
     with patch("a2a_adapter.server._ReadyServer.run", _fake_run):
         with patch("a2a_adapter.server.to_a2a") as mock_to_a2a:
             mock_to_a2a.return_value = MagicMock()
             serve_agent(MinimalAdapter(), port=9008)
 
             card = mock_to_a2a.call_args[1].get("agent_card") or mock_to_a2a.call_args[0][1]
-            assert card.supported_interfaces[0].url == "http://localhost:9008/"
+            assert card.supported_interfaces[0].url == "http://127.0.0.1:9008/"
     config = _ran_configs[-1]
     assert config.app is mock_to_a2a.return_value
     assert config.port == 9008

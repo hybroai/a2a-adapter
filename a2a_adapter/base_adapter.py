@@ -44,6 +44,20 @@ logger = logging.getLogger(__name__)
 # itself into yet another session escapes the group; Windows keeps the
 # single-process kill.
 
+# Server secrets that must not reach the agent or the tools it runs. Removed
+# from a CLI's environment unless the adapter's own env_vars set them.
+_SERVER_SECRET_ENV = ("A2A_AUTH_TOKEN",)
+
+
+def _child_env(env_vars: dict[str, str]) -> dict[str, str]:
+    """Environment for a CLI child: os.environ minus server secrets, plus ``env_vars``."""
+    env = os.environ.copy()
+    for name in _SERVER_SECRET_ENV:
+        env.pop(name, None)
+    env.update(env_vars)
+    return env
+
+
 _SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 _POST_KILL_WAIT = 5.0  # seconds to wait for a killed process to be reaped
 _MIN_TAIL_WAIT = 0.1  # seconds a streaming run gets to exit after its output ends
@@ -805,10 +819,8 @@ class BaseA2AAdapter(ABC):
         return self._context_locks[context_key]
 
     def _build_env(self) -> dict[str, str]:
-        """Build subprocess environment: os.environ + self.env_vars."""
-        env = os.environ.copy()
-        env.update(self.env_vars)
-        return env
+        """Build subprocess environment: os.environ (minus server secrets) + self.env_vars."""
+        return _child_env(self.env_vars)
 
     def _load_sessions(self) -> None:
         """Load session mapping from disk. Missing/corrupt -> empty dict."""
