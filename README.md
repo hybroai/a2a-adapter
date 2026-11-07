@@ -67,7 +67,10 @@ them on; push URLs on localhost, private networks and cloud-metadata addresses
 are then rejected unless you also pass `allow_private_push_urls=True`. A
 request carrying one fails: JSON-RPC `-32602` on the A2A 1.0 methods, HTTP 400
 on REST, and `-32603` with the same "Rejected push notification URL" message on
-the v0.3 method names (a2a-sdk 1.0 reports all v0.3 handler errors that way). Without `auth_token`, any
+the v0.3 method names (a2a-sdk 1.0 reports all v0.3 handler errors that way).
+Push targets are checked again when the connection opens, and the connection
+goes to the checked address; pushes do not use `HTTP(S)_PROXY` unless
+`allow_private_push_urls=True`. Without `auth_token`, any
 client can make the server send requests.
 
 ### Supported SDK Adapters

@@ -1,5 +1,6 @@
 """Tests for server.py — build_agent_card() and to_a2a()."""
 
+import httpcore
 import httpx
 import pytest
 from a2a.types import AgentCard
@@ -748,10 +749,121 @@ def push_receiver(monkeypatch):
         return httpx.Response(200)
 
     def make(**kwargs):
-        return real(transport=httpx.MockTransport(handler), **kwargs)
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real(**kwargs)
 
     monkeypatch.setattr(server_module, "_make_push_client", make)
     return received
+
+
+_OK = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+
+
+class FakeStream(httpcore.AsyncNetworkStream):
+    """One offline connection: records writes and TLS, replays a canned reply
+    to each request."""
+
+    def __init__(self, host, port, response):
+        self.host, self.port, self.response = host, port, response
+        self.writes: list[bytes] = []
+        self.tls: dict | None = None
+        self.closed = False
+        self._awaiting_reply = False
+
+    async def read(self, max_bytes, timeout=None):
+        # One reply per request, so keep-alive reuse works (the SDK sends a
+        # push per task event).
+        if not self._awaiting_reply:
+            return b""
+        self._awaiting_reply = False
+        return self.response
+
+    async def write(self, buffer, timeout=None):
+        self.writes.append(bytes(buffer))
+        self._awaiting_reply = True
+
+    async def aclose(self):
+        self.closed = True
+
+    async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        self.tls = {"ssl_context": ssl_context, "server_hostname": server_hostname}
+        return self
+
+    def get_extra_info(self, info):
+        return None
+
+    @property
+    def data(self) -> bytes:
+        return b"".join(self.writes)
+
+
+class FakeNetwork(httpcore.AsyncNetworkBackend):
+    """Offline delegate backend: records connects, never opens a socket."""
+
+    def __init__(self):
+        self.connects: list[tuple] = []
+        self.streams: list[FakeStream] = []
+        self.responses: list[bytes] = []  # consumed in connect order
+        self.fail: set[str] = set()  # hosts that raise ConnectError
+        # host -> seconds until ConnectTimeout (None: the whole timeout)
+        self.hang: dict[str, float | None] = {}
+        self.slept: list[float] = []
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        import asyncio
+
+        self.connects.append((host, port, timeout))
+        if host in self.hang:
+            delay = self.hang[host]
+            await asyncio.sleep(timeout if delay is None else min(timeout, delay))
+            raise httpcore.ConnectTimeout(f"timed out connecting to {host}")
+        if host in self.fail:
+            raise httpcore.ConnectError(f"cannot connect to {host}")
+        stream = FakeStream(host, port, self.responses.pop(0) if self.responses else _OK)
+        self.streams.append(stream)
+        return stream
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        raise AssertionError("unexpected unix socket")
+
+    async def sleep(self, seconds):
+        self.slept.append(seconds)
+
+
+@pytest.fixture
+def push_network(fake_dns, monkeypatch):
+    """Push sends go through the real httpx -> httpcore -> pinned backend path
+    and end at a FakeNetwork. Real sockets are made to fail loudly."""
+    import a2a_adapter.server as server_module
+
+    network = FakeNetwork()
+    monkeypatch.setattr(server_module, "_push_network_backend", lambda: network)
+
+    async def no_real_connect(self, *args, **kwargs):
+        raise AssertionError("a push tried to open a real connection")
+
+    monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", no_real_connect)
+    return network
+
+
+def _capture_push_client(monkeypatch):
+    """Record every push client to_a2a builds (and the kwargs it passed)."""
+    import a2a_adapter.server as server_module
+
+    made: list[tuple[dict, httpx.AsyncClient]] = []
+    real = server_module._make_push_client
+
+    def make(**kwargs):
+        client = real(**kwargs)
+        made.append((kwargs, client))
+        return client
+
+    monkeypatch.setattr(server_module, "_make_push_client", make)
+    return made
+
+
+def _redirect(location: str) -> bytes:
+    return (f"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n").encode()
 
 
 @pytest.fixture
@@ -1009,7 +1121,7 @@ class TestPushNotifications:
                 reply = await _create_push_config(client, task["id"], url, v1=True)
                 assert reply["result"]["url"] == url
 
-    async def test_send_time_recheck_blocks_rebound_host(self, monkeypatch, push_receiver):
+    async def test_send_time_rebinding_blocks_connect(self, monkeypatch, push_network):
         lookups = []
 
         async def rebinding(host, port):
@@ -1025,36 +1137,55 @@ class TestPushNotifications:
             )
             await _settle()
         assert reply["result"]["status"]["state"] == "completed"
-        assert len(lookups) >= 2, "the host is resolved again when sending"
-        assert push_receiver == []
+        assert len(lookups) >= 2, "the host is resolved again when connecting"
+        assert push_network.connects == []
 
-    async def test_public_push_url_delivered(self, fake_dns, push_receiver):
+    async def test_send_connects_to_address_resolved_at_connect(self, monkeypatch, push_network):
+        lookups = []
+
+        async def moving(host, port):
+            lookups.append(host)
+            return ["93.184.216.34"] if len(lookups) == 1 else ["93.184.216.35"]
+
+        monkeypatch.setattr("a2a_adapter.server._resolve", moving)
         app = to_a2a(StubAdapter(), push_notifications=True)
         async with _client(app) as client:
-            reply = await _send_task(
-                client, pushNotificationConfig={"url": "https://hooks.example/h"}
-            )
+            await _send_task(client, pushNotificationConfig={"url": "https://hooks.example/h"})
+            await _settle()
+        assert [c[:2] for c in push_network.connects] == [("93.184.216.35", 443)]
+
+    @pytest.mark.parametrize("host", ["hooks.example", "hooks.example."])
+    async def test_https_push_pins_ip_and_keeps_hostname(self, push_network, fake_dns, host):
+        import ssl
+
+        fake_dns["hooks.example."] = ["93.184.216.34"]
+        app = to_a2a(StubAdapter(), push_notifications=True)
+        async with _client(app) as client:
+            reply = await _send_task(client, pushNotificationConfig={"url": f"https://{host}/h"})
             await _settle()
         assert reply["result"]["status"]["state"] == "completed"
-        assert push_receiver and str(push_receiver[0].url) == "https://hooks.example/h"
+        assert [c[:2] for c in push_network.connects] == [("93.184.216.34", 443)]
+        stream = push_network.streams[0]
+        assert stream.tls["server_hostname"] == host
+        assert stream.tls["ssl_context"].check_hostname is True
+        assert stream.tls["ssl_context"].verify_mode == ssl.CERT_REQUIRED
+        assert stream.data.startswith(b"POST /h HTTP/1.1\r\n")
+        assert f"\r\nHost: {host}\r\n".encode() in stream.data
 
-    async def test_push_client_does_not_follow_redirects(self, fake_dns, monkeypatch):
-        import a2a_adapter.server as server_module
+    async def test_http_push_pins_ip_and_keeps_host_header(self, push_network):
+        app = to_a2a(StubAdapter(), push_notifications=True)
+        async with _client(app) as client:
+            await _send_task(client, pushNotificationConfig={"url": "http://hooks.example:8080/h"})
+            await _settle()
+        assert [c[:2] for c in push_network.connects] == [("93.184.216.34", 8080)]
+        stream = push_network.streams[0]
+        assert stream.tls is None
+        assert b"\r\nHost: hooks.example:8080\r\n" in stream.data
 
-        seen: list[str] = []
-        real = server_module._make_push_client
-
-        def redirecting(request):
-            seen.append(str(request.url))
-            # A public target, so only follow_redirects (not the host
-            # re-check) can stop the second request.
-            return httpx.Response(302, headers={"Location": "https://example.com/next"})
-
-        monkeypatch.setattr(
-            server_module,
-            "_make_push_client",
-            lambda **kwargs: real(transport=httpx.MockTransport(redirecting), **kwargs),
-        )
+    async def test_push_client_does_not_follow_redirects(self, push_network):
+        # A public target, so only follow_redirects (not the pinning) can
+        # stop the second request.
+        push_network.responses = [_redirect("https://example.com/next")]
         app = to_a2a(StubAdapter(), push_notifications=True)
         async with app.router.lifespan_context(app), _client(app) as client:
             reply = await _send_task(
@@ -1062,7 +1193,81 @@ class TestPushNotifications:
             )
             await _settle()
         assert reply["result"]["status"]["state"] == "completed"
-        assert seen and all(url == "https://hooks.example/h" for url in seen)
+        assert len(push_network.connects) == 1
+        assert push_network.streams[0].data.startswith(b"POST /h ")
+
+    async def test_redirect_to_private_never_connects(self, push_network):
+        # Holds even if redirects were followed: the pinned backend would
+        # refuse the 169.254.169.254 hop (follow_redirects itself is covered
+        # by test_push_client_does_not_follow_redirects).
+        push_network.responses = [_redirect("http://169.254.169.254/latest")]
+        app = to_a2a(StubAdapter(), push_notifications=True)
+        async with _client(app) as client:
+            reply = await _send_task(
+                client, pushNotificationConfig={"url": "https://hooks.example/h"}
+            )
+            await _settle()
+        assert reply["result"]["status"]["state"] == "completed"
+        assert len(push_network.connects) == 1
+
+    async def test_followed_redirect_is_revalidated(self, push_network, monkeypatch):
+        made = _capture_push_client(monkeypatch)
+        to_a2a(StubAdapter(), push_notifications=True)
+        ((_, push_client),) = made
+        push_network.responses = [_redirect("http://rebound.example/")]
+        async with push_client:
+            with pytest.raises(httpx.ConnectError):
+                await push_client.post("https://hooks.example/h", follow_redirects=True)
+        assert [c[:2] for c in push_network.connects] == [("93.184.216.34", 443)]
+
+    async def test_pool_keys_by_hostname_not_ip(self, push_network, fake_dns, monkeypatch):
+        fake_dns["a.example"] = ["93.184.216.34"]
+        fake_dns["b.example"] = ["93.184.216.34"]
+        made = _capture_push_client(monkeypatch)
+        to_a2a(StubAdapter(), push_notifications=True)
+        ((_, push_client),) = made
+        async with push_client:
+            await push_client.post("https://a.example/")
+            await push_client.post("https://b.example/")
+        assert [c[:2] for c in push_network.connects] == [("93.184.216.34", 443)] * 2
+        assert [s.tls["server_hostname"] for s in push_network.streams] == [
+            "a.example",
+            "b.example",
+        ]
+
+    async def test_allow_private_keeps_default_client(self, push_receiver, monkeypatch):
+        made = _capture_push_client(monkeypatch)
+        app = to_a2a(StubAdapter(), push_notifications=True, allow_private_push_urls=True)
+        assert [kwargs for kwargs, _ in made] == [{"follow_redirects": False}]
+        async with _client(app) as client:
+            await _send_task(client, pushNotificationConfig={"url": "http://127.0.0.1/x"})
+            await _settle()
+        assert push_receiver and str(push_receiver[0].url) == "http://127.0.0.1/x"
+
+    async def test_pinned_push_ignores_env_proxy(self, push_network, monkeypatch):
+        monkeypatch.setenv("HTTPS_PROXY", "http://10.0.0.1:3128")
+        monkeypatch.setenv("ALL_PROXY", "http://10.0.0.1:3128")
+        made = _capture_push_client(monkeypatch)
+        app = to_a2a(StubAdapter(), push_notifications=True)
+        async with _client(app) as client:
+            await _send_task(client, pushNotificationConfig={"url": "https://hooks.example/h"})
+            await _settle()
+        assert [c[:2] for c in push_network.connects] == [("93.184.216.34", 443)]
+        ((_, push_client),) = made
+        assert push_client._mounts == {}
+
+    @pytest.mark.parametrize("pool", ["object", "subclass"])
+    def test_unsupported_transport_fails_loudly(self, monkeypatch, pool):
+        class SubPool(httpcore.AsyncConnectionPool):
+            pass
+
+        class StubTransport:
+            def __init__(self, *args, **kwargs):
+                self._pool = object() if pool == "object" else SubPool()
+
+        monkeypatch.setattr(httpx, "AsyncHTTPTransport", StubTransport)
+        with pytest.raises(RuntimeError, match="cannot pin"):
+            to_a2a(StubAdapter(), push_notifications=True)
 
     def test_push_disabled_creates_no_client(self, monkeypatch):
         import a2a_adapter.server as server_module
@@ -1097,6 +1302,133 @@ class TestPushNotifications:
             task = (await _send_task(client))["result"]
             reply = await _create_push_config(client, task["id"], "http://r.test/x", v1=True)
         assert reply["result"]["url"] == "http://r.test/x"
+
+
+class TestPinnedPushBackend:
+    @staticmethod
+    def _backend(network):
+        from a2a_adapter.server import _PinnedPushBackend
+
+        return _PinnedPushBackend(network)
+
+    @staticmethod
+    def _recording_resolver(monkeypatch, answer):
+        calls = []
+
+        async def resolve(host, port):
+            calls.append(host)
+            if isinstance(answer, BaseException):
+                raise answer
+            return list(answer(len(calls)) if callable(answer) else answer)
+
+        monkeypatch.setattr("a2a_adapter.server._resolve", resolve)
+        return calls
+
+    async def test_connects_to_validated_ip_without_resolving_again(
+        self, push_network, monkeypatch
+    ):
+        calls = self._recording_resolver(
+            monkeypatch, lambda n: ["93.184.216.34"] if n == 1 else ["127.0.0.1"]
+        )
+        await self._backend(push_network).connect_tcp("hooks.example", 443)
+        assert [c[:2] for c in push_network.connects] == [("93.184.216.34", 443)]
+        assert calls == ["hooks.example"]
+
+    @pytest.mark.parametrize(
+        "addresses",
+        [
+            ["127.0.0.1"],
+            ["93.184.216.34", "10.0.0.1"],
+            ["93.184.216.3" + str(i) for i in range(5)] + ["169.254.169.254"],
+            ["::ffff:127.0.0.1"],
+            ["64:ff9b::a9fe:a9fe"],
+            [],
+        ],
+    )
+    async def test_rejects_any_non_public_address(self, push_network, monkeypatch, addresses):
+        self._recording_resolver(monkeypatch, addresses)
+        with pytest.raises(httpcore.ConnectError):
+            await self._backend(push_network).connect_tcp("hooks.example", 443)
+        assert push_network.connects == []
+
+    async def test_duplicate_addresses_tried_once(self, push_network, monkeypatch):
+        self._recording_resolver(monkeypatch, ["93.184.216.34"] * 3)
+        push_network.fail.add("93.184.216.34")
+        with pytest.raises(httpcore.ConnectError):
+            await self._backend(push_network).connect_tcp("hooks.example", 443)
+        assert [c[0] for c in push_network.connects] == ["93.184.216.34"]
+
+    async def test_falls_back_to_next_address(self, push_network, monkeypatch):
+        self._recording_resolver(monkeypatch, ["93.184.216.34", "93.184.216.35"])
+        push_network.fail.add("93.184.216.34")
+        await self._backend(push_network).connect_tcp("hooks.example", 443)
+        assert [c[0] for c in push_network.connects] == ["93.184.216.34", "93.184.216.35"]
+        push_network.fail.add("93.184.216.35")
+        with pytest.raises(httpcore.ConnectError):
+            await self._backend(push_network).connect_tcp("hooks.example", 443)
+
+    async def test_attempts_share_one_deadline(self, push_network, monkeypatch):
+        self._recording_resolver(monkeypatch, ["93.184.216.34", "93.184.216.35", "93.184.216.36"])
+        # The first address times out after 0.3 s; the second waits out
+        # whatever time it is given. Wide margins: CI runners can be slow.
+        push_network.hang.update({"93.184.216.34": 0.3, "93.184.216.35": None})
+        with pytest.raises(httpcore.ConnectTimeout):
+            await self._backend(push_network).connect_tcp("hooks.example", 443, timeout=1.0)
+        timeouts = [c[2] for c in push_network.connects]
+        # The second attempt gets only what the first left over (~0.7 s),
+        # and once that runs out the third address is not tried.
+        assert len(timeouts) == 2, timeouts
+        assert timeouts[0] == pytest.approx(1.0, abs=0.05)
+        assert 0.3 < timeouts[1] < 0.75, timeouts
+
+    async def test_ipv6_address_passed_as_literal(self, push_network, monkeypatch):
+        self._recording_resolver(monkeypatch, ["2606:4700:4700::1111"])
+        await self._backend(push_network).connect_tcp("hooks.example", 443)
+        assert [c[0] for c in push_network.connects] == ["2606:4700:4700::1111"]
+
+    @pytest.mark.parametrize("host", ["8.8.8.8", "2606:4700:4700::1111"])
+    async def test_public_ip_literal_skips_dns(self, push_network, monkeypatch, host):
+        calls = self._recording_resolver(monkeypatch, AssertionError("no DNS"))
+        await self._backend(push_network).connect_tcp(host, 443)
+        assert [c[0] for c in push_network.connects] == [host]
+        assert calls == []
+
+    @pytest.mark.parametrize("host", ["169.254.169.254", "::1"])
+    async def test_private_ip_literal_rejected(self, push_network, host):
+        with pytest.raises(httpcore.ConnectError):
+            await self._backend(push_network).connect_tcp(host, 80)
+        assert push_network.connects == []
+
+    @pytest.mark.parametrize("host", ["127.1", "2130706433", "0x7f.1"])
+    async def test_numeric_names_validated_by_resolved_address(self, push_network, fake_dns, host):
+        fake_dns[host] = ["127.0.0.1"]  # what getaddrinfo answers for these
+        with pytest.raises(httpcore.ConnectError):
+            await self._backend(push_network).connect_tcp(host, 80)
+        assert push_network.connects == []
+
+    @pytest.mark.parametrize("host", ["localhost", "api.localhost", "localhost.", "LocalHost"])
+    async def test_localhost_names_rejected_without_dns(self, push_network, monkeypatch, host):
+        calls = self._recording_resolver(monkeypatch, ["93.184.216.34"])
+        with pytest.raises(httpcore.ConnectError):
+            await self._backend(push_network).connect_tcp(host, 80)
+        assert calls == []
+        assert push_network.connects == []
+
+    @pytest.mark.parametrize(
+        "error", [OSError("no such host"), TimeoutError(), UnicodeError("bad idna")]
+    )
+    async def test_resolver_failure_is_connect_error(self, push_network, monkeypatch, error):
+        self._recording_resolver(monkeypatch, error)
+        with pytest.raises(httpcore.ConnectError):
+            await self._backend(push_network).connect_tcp("hooks.example", 443)
+        assert push_network.connects == []
+
+    async def test_unix_socket_refused_and_sleep_delegates(self, push_network):
+        backend = self._backend(push_network)
+        with pytest.raises(httpcore.ConnectError):
+            await backend.connect_unix_socket("/tmp/x.sock")
+        await backend.sleep(0.5)
+        assert push_network.slept == [0.5]
 
 
 class TestServeAgentPush:
