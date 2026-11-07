@@ -17,7 +17,7 @@ import asyncio
 import contextlib
 import logging
 import uuid
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -147,14 +147,17 @@ class AdapterAgentExecutor(AgentExecutor):
         return task_id in self._cancelling or run.terminal
 
     @staticmethod
-    async def _send_terminal(run: _Run, send: Awaitable[None]) -> None:
+    async def _send_terminal(
+        run: _Run, send: Awaitable[None], on_sent: Callable[[], None] | None = None
+    ) -> None:
         """Enqueue a terminal state, even if the caller is cancelled.
 
         ``run.terminal`` is set before the first await, so a concurrent
         cancel() defers to this state. If the caller is cancelled while the
         enqueue is blocked (e.g. on a full queue), the enqueue keeps going
         and is awaited, bounded, before the cancellation propagates: the
-        SDK closes the queue once execute() returns.
+        SDK closes the queue once execute() returns. ``on_sent`` runs once
+        the state was enqueued, also on that cancelled path.
         """
         run.terminal = True
         enqueue = asyncio.ensure_future(send)
@@ -163,11 +166,15 @@ class AdapterAgentExecutor(AgentExecutor):
         except asyncio.CancelledError:
             with contextlib.suppress(Exception, asyncio.CancelledError):
                 await asyncio.wait_for(asyncio.shield(enqueue), _CANCEL_SETTLE_TIMEOUT)
+            if on_sent and enqueue.done() and not enqueue.cancelled() and not enqueue.exception():
+                on_sent()
             raise
         except Exception:
             # Nothing was enqueued: let the caller report the failure.
             run.terminal = False
             raise
+        if on_sent:
+            on_sent()
 
     async def _execute(self, context: RequestContext, event_queue: EventQueue, run: _Run) -> None:
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)
@@ -305,8 +312,13 @@ class AdapterAgentExecutor(AgentExecutor):
 
         # Part(text="") would also serialize to {} in the completion message.
         message = updater.new_agent_message([Part(text=response_text or "[Empty response]")])
-        self._notify("task_completed", context.task_id, context.context_id, response_text, None)
-        await self._send_terminal(run, updater.complete(message=message))
+        await self._send_terminal(
+            run,
+            updater.complete(message=message),
+            lambda: self._notify(
+                "task_completed", context.task_id, context.context_id, response_text, None
+            ),
+        )
 
     def _extract_text_from_parts(self, parts: list[Part]) -> str:
         """Extract text content from multimodal parts for completion message.
@@ -407,8 +419,13 @@ class AdapterAgentExecutor(AgentExecutor):
             return
         full_text = self._concatenate_chunks(chunks)
         message = updater.new_agent_message([Part(text=full_text)])
-        self._notify("task_completed", context.task_id, context.context_id, full_text, len(chunks))
-        await self._send_terminal(run, updater.complete(message=message))
+        await self._send_terminal(
+            run,
+            updater.complete(message=message),
+            lambda: self._notify(
+                "task_completed", context.task_id, context.context_id, full_text, len(chunks)
+            ),
+        )
 
     def _concatenate_chunks(self, chunks: list[str | Part]) -> str:
         """Concatenate text from streaming chunks for completion message.
@@ -501,7 +518,9 @@ class AdapterAgentExecutor(AgentExecutor):
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)
         run = self._runs.get(context.task_id)
         if run is not None and run.terminal:
-            # execute() already sent the terminal state; the run is over.
+            # execute() sent (or is sending) the terminal state; the run is
+            # over. If that enqueue then fails or times out, no terminal
+            # state is sent (a known, rare gap).
             logger.info("Task %s already reached a terminal state; not canceling", context.task_id)
             return
 

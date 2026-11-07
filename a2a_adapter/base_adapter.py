@@ -447,11 +447,14 @@ class BaseA2AAdapter(ABC):
     def _release_task(self, task_id: str) -> None:
         """Forget per-task cancel markers once the task is done.
 
-        Called by the executor exactly once per task, after both execute()
-        and cancel() have finished, so a cancel that found no running CLI
-        (and queued a marker that no run consumed) does not leak. Private,
-        but adapters that keep their own per-task cancel markers may
-        override it. Without ``super().__init__()`` this is a no-op.
+        Called by the executor once execute() and cancel() for the task
+        have both finished, so a cancel that found no running CLI (and
+        queued a marker that no run consumed) does not leak. It runs at
+        least once per run and may run more than once (a multi-turn task,
+        a second cancellation, an abandoned cancel finishing later), so an
+        override must be idempotent. Private, but adapters that keep their
+        own per-task cancel markers may override it. Without
+        ``super().__init__()`` this is a no-op.
         """
         if not getattr(self, "_cli_runtime_enabled", False):
             return

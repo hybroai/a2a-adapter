@@ -1031,12 +1031,15 @@ class TestCancelEdgeCases:
                 self.events.append(event)
 
         queue = RefusesCompleted(lambda e: False)
+        observer = MagicMock()
+        executor = AdapterAgentExecutor(StubAdapter(), observer=observer)
         with caplog.at_level("INFO", logger="a2a_adapter.executor"):
             with pytest.raises(RuntimeError):
-                await AdapterAgentExecutor(StubAdapter()).execute(request_context, queue)
+                await executor.execute(request_context, queue)
 
         assert "store refused" in caplog.text
         assert "cancel in progress" not in caplog.text
+        observer.task_completed.assert_not_called()
 
     async def test_a_cancel_given_up_on_drops_the_late_result(self, request_context, monkeypatch):
         """cancel() is cancelled and its decision outlasts the bounded wait:
@@ -1049,6 +1052,10 @@ class TestCancelEdgeCases:
             await cancel_gate.wait()
 
         adapter.cancel = slow_cancel
+        released: list[str] = []
+        adapter._release_task = lambda task_id: released.append(
+            "after decision" if cancel_gate.is_set() else "before decision"
+        )
         observer = MagicMock()
         executor = AdapterAgentExecutor(adapter, observer=observer)
         queue = _BlockingQueue(lambda e: False)
@@ -1074,3 +1081,6 @@ class TestCancelEdgeCases:
         states = [e.status.state for e in queue.events if isinstance(e, TaskStatusUpdateEvent)]
         assert COMPLETED not in states
         observer.task_completed.assert_not_called()
+        # The abandoned decision releases once it finished, so a marker
+        # its adapter.cancel() queued does not leak.
+        assert released[-1] == "after decision"
