@@ -124,7 +124,7 @@ limited by the OS command-line length; OpenClaw itself rejects prompts over
 | `--name` | `<Agent> (<folder>)`, e.g. `Claude Code (my-app)` | Agent Card display name |
 | `--description` | `<Agent> agent working in <folder>` | Agent Card description |
 | `--skill` | one skill from the card name and description | Agent Card skill as JSON (`id`, `name`, `description`, at least one entry in `tags`, optional `examples`); repeatable |
-| `--timeout` | `600` | Per-request timeout in seconds |
+| `--timeout` | `600` | Total time per request, in seconds |
 | `--executable` | `claude`, `codex`, `pi`, `openclaw`; for `dsh`, the runtime bundled with the SDK | Path to the agent executable |
 
 On POSIX, cancel, timeout and shutdown stop the agent and everything it

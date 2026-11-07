@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 _SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 _POST_KILL_WAIT = 5.0  # seconds to wait for a killed process to be reaped
+_MIN_TAIL_WAIT = 0.1  # seconds a streaming run gets to exit after its output ends
 
 # Processes this module spawned as process-group leaders. Only these are ever
 # passed to ``os.killpg``; anything else (mocks with fake PIDs, processes
@@ -592,9 +593,22 @@ class BaseA2AAdapter(ABC):
                 raise FileNotFoundError(f"Working directory does not exist: '{self.working_dir}'")
             raise FileNotFoundError(self._binary_not_found_message())
 
-        # 4. Track
+        # 4. Track. ``self.timeout`` bounds the whole run, not each line: a
+        # CLI that keeps printing must still stop at the deadline. Each await
+        # gets the time that is left instead of one asyncio.timeout() around
+        # the loop, which would fire while the generator is suspended at
+        # ``yield`` and cancel the consumer at an unrelated await. Time the
+        # consumer spends between chunks counts toward the deadline.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout
         self._active_processes[task_id] = proc
         yielded_any = False
+
+        def _remaining() -> float:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            return remaining
 
         stderr_chunks: list[bytes] = []
 
@@ -614,12 +628,23 @@ class BaseA2AAdapter(ABC):
             if cmd_result.stdin is not None
             else None
         )
+        helpers = [task for task in (stderr_task, stdin_task) if task is not None]
+
+        async def _stop_after_kill() -> None:
+            for task in helpers:
+                task.cancel()
+            # return_exceptions: a helper that failed (or was cancelled) must
+            # not skip the others or the reap.
+            await asyncio.gather(*helpers, return_exceptions=True)
+            await _wait_reaped(proc)
+
         aborted = False
+        tail_timed_out = False
 
         try:
             assert proc.stdout is not None
             while True:
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout=self.timeout)
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=_remaining())
                 if not line:
                     break
                 text = line.decode("utf-8", errors="replace").strip()
@@ -652,27 +677,40 @@ class BaseA2AAdapter(ABC):
             _kill_process_tree(proc)
             raise
         finally:
-            self._active_processes.pop(task_id, None)
-
-            if aborted:
-                # The run ends here, so a cancel marker must not outlive it
-                # and mark a later run with the same task ID as cancelled.
-                self._killed_tasks.discard(task_id)
-                for task in (stderr_task, stdin_task):
-                    if task is None:
-                        continue
-                    task.cancel()
+            try:
+                if aborted:
+                    await _stop_after_kill()
+                else:
+                    # stdout closed; the CLI (or a child holding stderr) may
+                    # still run, so the tail is bounded by the same deadline.
                     try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                await _wait_reaped(proc)
-            else:
-                await proc.wait()
-                await stderr_task
-                if stdin_task is not None:
-                    await stdin_task
-            _forget_own_group(proc)
+                        await asyncio.wait_for(
+                            asyncio.gather(proc.wait(), *helpers),
+                            # A floor, so output that ended right at the
+                            # deadline isn't reported as a timeout.
+                            timeout=max(deadline - loop.time(), _MIN_TAIL_WAIT),
+                        )
+                    except asyncio.TimeoutError:
+                        tail_timed_out = True
+                        _kill_process_tree(proc)
+                        await _stop_after_kill()
+                    except BaseException:  # consumer cancelled, or a helper failed
+                        aborted = True
+                        _kill_process_tree(proc)
+                        await _stop_after_kill()
+                        raise
+            finally:
+                # Popped only now, so cancel() and kill_children_now() still
+                # reach a CLI that closed stdout but keeps running.
+                self._active_processes.pop(task_id, None)
+                _forget_own_group(proc)
+                if aborted or tail_timed_out:
+                    # After the pop, so a cancel() racing the reap can't re-add
+                    # a marker that would mark a later run with this ID cancelled.
+                    self._killed_tasks.discard(task_id)
+
+        if tail_timed_out:
+            raise RuntimeError(f"Command timed out after {self.timeout} seconds")
 
         stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
 
@@ -697,6 +735,7 @@ class BaseA2AAdapter(ABC):
             )
             self._sessions.pop(context_key, None)
             self._save_sessions()
+            # The retry gets a fresh timeout budget, as in _run_subprocess.
             async for chunk in self._run_subprocess_streaming(
                 context_key,
                 task_id,

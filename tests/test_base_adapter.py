@@ -627,3 +627,227 @@ class TestProcessTreeKill:
             await asyncio.wait_for(adapter.invoke("hi", context=context), 5)
         proc.kill.assert_called()
         assert "t-timeout" not in adapter._killed_tasks
+
+
+# ── Streaming total deadline (Fix 2) ─────────────────────────
+
+_TICKER = (
+    "import sys, time\n"
+    "for i in range(100):\n"
+    "    print(f'line {i}', flush=True)\n"
+    "    time.sleep(0.1)\n"
+)
+_CLOSE_STDOUT_THEN_SLEEP = "import os, time\nos.close(1)\ntime.sleep(30)\n"
+_LINE_CLOSE_STDOUT_THEN_SLEEP = (
+    "import os, sys, time\nprint('first', flush=True)\nos.close(1)\ntime.sleep(30)\n"
+)
+_QUICK = "print('a'); print('b')\n"
+
+
+class _PythonStreamAdapter(BaseA2AAdapter):
+    """Streams the stdout lines of a ``python -c`` child, one chunk per line."""
+
+    def __init__(self, tmp_path, script: str, *, timeout: float):
+        super().__init__(working_dir=str(tmp_path), timeout=timeout)
+        self._script = script
+        self.spawned = []
+
+    async def invoke(self, user_input, context_id=None, **kwargs):
+        raise NotImplementedError
+
+    async def stream(self, user_input, context_id=None, **kwargs):
+        context = kwargs.get("context")
+        task_id = context.task_id if context is not None else "task-1"
+        async for chunk in self._run_subprocess_streaming("ctx", task_id, user_input=user_input):
+            yield chunk
+
+    def _build_command(self, message, context_key):
+        import sys
+
+        return CommandResult(args=[sys.executable, "-c", self._script], used_resume=False)
+
+    def _handle_stream_line(self, line):
+        from a2a_adapter.base_adapter import StreamEvent
+
+        return StreamEvent(text=line)
+
+
+def _kill_spawned(adapter) -> None:
+    import signal
+
+    for proc in adapter.spawned:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(proc.pid, signal.SIGKILL)
+
+
+@pytest.fixture
+def record_spawns(monkeypatch):
+    """Record every process _run_subprocess_streaming spawns on ``adapter.spawned``."""
+    from a2a_adapter import base_adapter
+
+    real = base_adapter.create_subprocess_exec
+    adapters = []
+
+    def bind(adapter):
+        adapters.append(adapter)
+        return adapter
+
+    async def spawning(*args, **kwargs):
+        proc = await real(*args, **kwargs)
+        for adapter in adapters:
+            adapter.spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(base_adapter, "create_subprocess_exec", spawning)
+    return bind
+
+
+@posix_only
+class TestStreamingDeadline:
+    async def _consume(self, adapter, chunks, **kwargs):
+        async for chunk in adapter.stream("hi", **kwargs):
+            chunks.append(chunk)
+
+    async def test_streaming_total_deadline(self, tmp_path, record_spawns):
+        adapter = record_spawns(_PythonStreamAdapter(tmp_path, _TICKER, timeout=1))
+        chunks: list[str] = []
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        try:
+            with pytest.raises(RuntimeError, match="timed out after 1 seconds"):
+                await asyncio.wait_for(self._consume(adapter, chunks), 5)
+            assert loop.time() - start < 3
+            assert chunks and chunks[0] == "line 0"
+        finally:
+            _kill_spawned(adapter)
+
+    async def test_streaming_deadline_kills_child(self, tmp_path, record_spawns):
+        adapter = record_spawns(_PythonStreamAdapter(tmp_path, _TICKER, timeout=1))
+        try:
+            with pytest.raises(RuntimeError, match="timed out"):
+                await asyncio.wait_for(self._consume(adapter, []), 5)
+            assert adapter.spawned[0].returncode is not None
+            assert adapter._active_processes == {}
+        finally:
+            _kill_spawned(adapter)
+
+    async def test_streaming_tail_wait_is_bounded(self, tmp_path, record_spawns):
+        adapter = record_spawns(_PythonStreamAdapter(tmp_path, _CLOSE_STDOUT_THEN_SLEEP, timeout=1))
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        try:
+            with pytest.raises(RuntimeError, match="timed out after 1 seconds"):
+                await asyncio.wait_for(self._consume(adapter, []), 5)
+            assert loop.time() - start < 3
+            assert adapter.spawned[0].returncode is not None
+            assert adapter._active_processes == {}
+        finally:
+            _kill_spawned(adapter)
+
+    async def test_streaming_fast_run_unaffected(self, tmp_path, record_spawns):
+        adapter = record_spawns(_PythonStreamAdapter(tmp_path, _QUICK, timeout=5))
+        chunks: list[str] = []
+        try:
+            await asyncio.wait_for(self._consume(adapter, chunks), 5)
+            assert chunks == ["a", "b"]
+        finally:
+            _kill_spawned(adapter)
+
+    @pytest.mark.parametrize("how", ["cancel", "kill_children_now"])
+    async def test_streaming_tail_child_still_cancellable(self, tmp_path, record_spawns, how):
+        from a2a_adapter.exceptions import CancelledByAdapterError
+
+        adapter = record_spawns(
+            _PythonStreamAdapter(tmp_path, _LINE_CLOSE_STDOUT_THEN_SLEEP, timeout=60)
+        )
+        context = SimpleNamespace(task_id="t-tail")
+        stream = adapter.stream("hi", context=context)
+        rest = None
+        try:
+            assert await asyncio.wait_for(anext(stream), 5) == "first"
+            rest = asyncio.create_task(anext(stream))  # now sits in the tail wait
+            await asyncio.sleep(0.3)
+            assert not rest.done()
+            if how == "cancel":
+                await adapter.cancel(context=context)
+                expected, match = CancelledByAdapterError, "killed by cancel"
+            else:
+                adapter.kill_children_now()
+                expected, match = RuntimeError, "exit code -9"
+            with pytest.raises(expected, match=match):
+                await asyncio.wait_for(rest, 5)
+        finally:
+            _kill_spawned(adapter)
+            if rest is not None and not rest.done():
+                rest.cancel()
+                with contextlib.suppress(BaseException):
+                    await rest
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(stream.aclose(), 5)
+
+    @pytest.mark.parametrize("adapter_cancel_first", [True, False])
+    async def test_consumer_cancelled_in_tail_kills_child(
+        self, tmp_path, record_spawns, adapter_cancel_first
+    ):
+        adapter = record_spawns(
+            _PythonStreamAdapter(tmp_path, _LINE_CLOSE_STDOUT_THEN_SLEEP, timeout=60)
+        )
+        context = SimpleNamespace(task_id="t-tail-cancel")
+        stream = adapter.stream("hi", context=context)
+        rest = None
+        try:
+            assert await asyncio.wait_for(anext(stream), 5) == "first"
+            rest = asyncio.create_task(anext(stream))  # sits in the tail wait
+            await asyncio.sleep(0.3)
+            if adapter_cancel_first:  # the SDK's order on tasks/cancel
+                await adapter.cancel(context=context)
+            rest.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(rest, 5)
+            proc = adapter.spawned[0]
+            await asyncio.wait_for(proc.wait(), 5)
+            assert proc.returncode is not None
+            assert adapter._active_processes == {}
+            assert "t-tail-cancel" not in adapter._killed_tasks
+        finally:
+            _kill_spawned(adapter)
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(stream.aclose(), 5)
+
+    async def test_tail_wait_with_no_time_left_still_succeeds(self, tmp_path, monkeypatch):
+        """Output that ends right at the deadline is not reported as a timeout."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        adapter = _PythonStreamAdapter(tmp_path, _QUICK, timeout=60)
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        lines = iter([b"a\n"])
+
+        async def readline():
+            try:
+                return next(lines)
+            except StopIteration:
+                # EOF arrives exactly at the deadline: no time left for the tail.
+                monkeypatch.setattr(loop, "time", lambda: real_time() + 60)
+                return b""
+
+        async def wait():
+            await asyncio.sleep(0)
+            return 0
+
+        proc = MagicMock(pid=4242, returncode=0)
+        proc.stdout.readline = readline
+        proc.stderr.read = AsyncMock(return_value=b"")
+        proc.wait = wait
+        monkeypatch.setattr(
+            "a2a_adapter.base_adapter.create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+        try:
+            # No outer wait_for: the shifted clock would fire it at once.
+            assert await _collect_chunks(adapter.stream("hi")) == ["a"]
+        finally:
+            monkeypatch.setattr(loop, "time", real_time)
+
+
+async def _collect_chunks(stream):
+    return [chunk async for chunk in stream]
