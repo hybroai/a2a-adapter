@@ -150,6 +150,18 @@ def _add_server_options(
             f"(default: ${_AUTH_TOKEN_ENV}; prefer the variable, argv is visible in ps)"
         ),
     )
+    parser.add_argument(
+        "--push-notifications",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Accept push-notification configs and POST task updates to them (default: off)",
+    )
+    parser.add_argument(
+        "--allow-private-push-urls",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Also allow push URLs on localhost and private networks (default: rejected)",
+    )
     parser.add_argument("--port", type=_port, default=9000, help="A2A server port")
     parser.add_argument(
         "--timeout", type=_positive_float, default=600.0, help="Agent timeout in seconds"
@@ -463,8 +475,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         log_level=args.log_level,
         display=display,
         auth_token=auth_token,
+        **_push_options(args),
     )
     return 0
+
+
+def _push_options(args: argparse.Namespace) -> dict[str, bool]:
+    """The push flags the user set; unset ones keep the SDK defaults."""
+    options = {}
+    if args.push_notifications is not None:
+        options["push_notifications"] = args.push_notifications
+    if args.allow_private_push_urls is not None:
+        if args.push_notifications:
+            options["allow_private_push_urls"] = args.allow_private_push_urls
+        elif args.allow_private_push_urls:
+            print(
+                "a2a-adapter: warning: --allow-private-push-urls has no effect "
+                "without --push-notifications",
+                file=sys.stderr,
+            )
+    return options
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -139,7 +139,7 @@ class TestPushSenderContext:
                 seen.append(context)
 
         monkeypatch.setattr(server_module, "BasePushNotificationSender", Sdk10Sender)
-        to_a2a(StubAdapter())
+        to_a2a(StubAdapter(), push_notifications=True)
         assert len(seen) == 1 and isinstance(seen[0], ServerCallContext)
 
     def test_omits_the_deprecated_context_when_it_is_optional(self, monkeypatch):
@@ -154,7 +154,7 @@ class TestPushSenderContext:
                 seen.append(context)
 
         monkeypatch.setattr(server_module, "BasePushNotificationSender", Sdk13Sender)
-        to_a2a(StubAdapter())
+        to_a2a(StubAdapter(), push_notifications=True)
         assert seen == [None], "a non-None context logs a deprecation warning in 1.3"
 
     def test_installed_sdk_gets_a_context_only_if_it_requires_one(self, caplog):
@@ -681,3 +681,503 @@ class TestChildEnvSecrets:
             with pytest.raises(RuntimeError, match="stop after spawn"):
                 await rpc.start()
             assert spawn.call_args.kwargs["env"].get("A2A_AUTH_TOKEN") == expected
+
+
+# ── Push notifications: opt-in and URL restrictions (Fix 5) ──
+
+_PRIVATE_PUSH_URLS = [
+    "http://127.0.0.1/x",
+    "http://localhost/x",
+    "http://api.localhost/x",
+    "http://10.0.0.5/x",
+    "http://192.168.1.2/x",
+    "http://100.64.0.1/x",
+    "http://169.254.169.254/latest",
+    "http://[::1]/x",
+    "http://[fe80::1]/x",
+    "http://[::ffff:127.0.0.1]/x",
+    "http://[64:ff9b::7f00:1]/x",
+    "http://0.0.0.0/x",
+    "http://224.0.0.1/x",
+    "ftp://example.com/x",
+    "http:///x",
+    "http://rebound.example/x",  # _resolve (patched) maps it to 127.0.0.1
+    "http://[::127.0.0.1]/x",  # deprecated IPv4-compatible
+    "http://[::ffff:0:7f00:1]/x",  # IPv4-translated
+    "http://[fec0::1]/x",  # deprecated site-local
+]
+
+_PUBLIC_PUSH_URLS = [
+    "http://8.8.8.8/x",
+    "https://[2606:4700:4700::1111]/x",
+    "http://[::ffff:8.8.8.8]/x",
+    "http://[64:ff9b::808:808]/x",
+    "https://example.com:8443/x",
+]
+
+
+@pytest.fixture
+def fake_dns(monkeypatch):
+    """Offline DNS: hostnames resolve from this dict; anything else fails."""
+    table = {
+        "example.com": ["93.184.216.34"],
+        "hooks.example": ["93.184.216.34"],
+        "rebound.example": ["127.0.0.1"],
+        "mixed.example": ["93.184.216.34", "10.0.0.1"],
+    }
+
+    async def resolve(host, port):
+        if host not in table:
+            raise OSError(f"cannot resolve {host}")
+        return list(table[host])
+
+    monkeypatch.setattr("a2a_adapter.server._resolve", resolve)
+    return table
+
+
+@pytest.fixture
+def push_receiver(monkeypatch):
+    """Route every push POST to an in-memory receiver (never the network)."""
+    import a2a_adapter.server as server_module
+
+    received: list[httpx.Request] = []
+    real = server_module._make_push_client
+
+    def handler(request):
+        received.append(request)
+        return httpx.Response(200)
+
+    def make(**kwargs):
+        return real(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(server_module, "_make_push_client", make)
+    return received
+
+
+@pytest.fixture
+def no_real_push_post(monkeypatch):
+    """Record (never send) push POSTs; works without _make_push_client.
+
+    Patches ``AsyncClient.post``, so tests using it send with ``client.request``.
+    """
+    posts = []
+
+    async def fake_post(self, url, *args, **kwargs):
+        posts.append(str(url))
+        return httpx.Response(200, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    return posts
+
+
+async def _send_task(client, **configuration):
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "s",
+        "method": "message/send",
+        "params": {
+            "message": {
+                "role": "user",
+                "messageId": f"m-{len(configuration)}-{id(configuration)}",
+                "parts": [{"kind": "text", "text": "hi"}],
+            }
+        },
+    }
+    if configuration:
+        payload["params"]["configuration"] = configuration
+    return (await client.request("POST", "/", json=payload)).json()
+
+
+async def _send_task_with_push_v1(client, url):
+    body = {
+        "jsonrpc": "2.0",
+        "id": "s1",
+        "method": "SendMessage",
+        "params": {
+            "message": {"role": "ROLE_USER", "messageId": f"m1-{url}", "parts": [{"text": "hi"}]},
+            "configuration": {"taskPushNotificationConfig": {"url": url}},
+        },
+    }
+    response = await client.request("POST", "/", json=body, headers={"A2A-Version": "1.0"})
+    return response.json()
+
+
+def _assert_push_url_rejected(reply, *, v1: bool):
+    # a2a-sdk 1.0's v0.3 JSON-RPC adapter reports every handler error as
+    # -32603 with the error's message; the v1 dispatcher keeps -32602.
+    assert reply["error"]["message"] == _PUSH_REJECTED
+    if v1:
+        assert reply["error"]["code"] == -32602
+
+
+# One message for every rejection: the reason (and any resolved address)
+# stays in the server log, so clients can't probe internal DNS.
+_PUSH_REJECTED = "Rejected push notification URL: only public http(s) URLs are allowed"
+
+
+async def _create_push_config(client, task_id, url, *, v1: bool):
+    if v1:
+        body = {
+            "jsonrpc": "2.0",
+            "id": "p",
+            "method": "CreateTaskPushNotificationConfig",
+            "params": {"taskId": task_id, "url": url},
+        }
+        response = await client.request("POST", "/", json=body, headers={"A2A-Version": "1.0"})
+        return response.json()
+    body = {
+        "jsonrpc": "2.0",
+        "id": "p",
+        "method": "tasks/pushNotificationConfig/set",
+        "params": {"taskId": task_id, "pushNotificationConfig": {"url": url}},
+    }
+    return (await client.request("POST", "/", json=body)).json()
+
+
+async def _settle():
+    import asyncio
+
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+
+
+class TestPushNotifications:
+    def test_card_push_default(self):
+        assert build_agent_card(StubAdapter()).capabilities.push_notifications is False
+
+    def test_card_push_opt_in(self):
+        card = build_agent_card(StubAdapter(), push_notifications=True)
+        assert card.capabilities.push_notifications is True
+
+    @pytest.mark.parametrize("v1", [True, False])
+    async def test_push_disabled_rejects_config_set(self, no_real_push_post, v1):
+        async with _client(to_a2a(StubAdapter())) as client:
+            task = (await _send_task(client))["result"]
+            reply = await _create_push_config(client, task["id"], "https://example.com/h", v1=v1)
+        assert "error" in reply
+        assert "push" in reply["error"]["message"].lower()
+
+    async def test_push_disabled_ignores_inline_config(self, no_real_push_post):
+        async with _client(to_a2a(StubAdapter())) as client:
+            reply = await _send_task(
+                client, pushNotificationConfig={"url": "https://example.com/i"}
+            )
+            v1_reply = await _send_task_with_push_v1(client, "https://example.com/j")
+            await _settle()
+        assert reply["result"]["status"]["state"] == "completed"
+        assert v1_reply["result"]["task"]["status"]["state"] == "TASK_STATE_COMPLETED"
+        assert no_real_push_post == []
+
+    async def test_push_disabled_ignores_inline_config_when_streaming(self, no_real_push_post):
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "st",
+            "method": "message/stream",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "messageId": "m-stream",
+                    "parts": [{"kind": "text", "text": "hi"}],
+                },
+                "configuration": {"pushNotificationConfig": {"url": "https://example.com/s"}},
+            },
+        }
+        app = to_a2a(StreamingStubAdapter(["a", "b"]))
+        async with _client(app) as client:
+            response = await client.request("POST", "/", json=payload)
+            await _settle()
+        assert "completed" in response.text
+        assert no_real_push_post == []
+
+    @pytest.mark.parametrize("url", _PUBLIC_PUSH_URLS)
+    async def test_validate_push_url_accepts_public(self, fake_dns, url):
+        from a2a_adapter.server import _validate_push_url
+
+        await _validate_push_url(url, allow_private=False)
+
+    async def test_rejection_does_not_leak_resolution(self, fake_dns, push_receiver, caplog):
+        app = to_a2a(StubAdapter(), push_notifications=True)
+        async with _client(app) as client:
+            with caplog.at_level("INFO", logger="a2a_adapter.server"):
+                unknown = await _send_task_with_push_v1(client, "http://unknown.example/x")
+                private = await _send_task_with_push_v1(client, "http://rebound.example/x")
+        assert unknown["error"] == private["error"]
+        assert "127.0.0.1" not in str(private)
+        assert "127.0.0.1" in caplog.text, "the reason is logged on the server"
+
+    async def test_rest_push_config_rejects_private_url(self, fake_dns, push_receiver):
+        app = to_a2a(StubAdapter(), push_notifications=True)
+        async with _client(app) as client:
+            task = (await _send_task(client))["result"]
+            response = await client.request(
+                "POST",
+                f"/tasks/{task['id']}/pushNotificationConfigs",
+                json={"url": "http://127.0.0.1/x"},
+                headers={"A2A-Version": "1.0"},
+            )
+        assert response.status_code == 400
+        assert response.json()["error"]["message"] == _PUSH_REJECTED
+
+    async def test_resolve_times_out(self, monkeypatch):
+        import asyncio
+
+        import a2a_adapter.server as server_module
+
+        async def hanging(*args, **kwargs):
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(server_module, "_RESOLVE_TIMEOUT", 0.05)
+        monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", hanging)
+        with pytest.raises(asyncio.TimeoutError):
+            await server_module._resolve("slow.example", 80)
+        with pytest.raises(ValueError):
+            await server_module._validate_push_url("http://slow.example/x", allow_private=False)
+
+    @pytest.mark.parametrize("url", _PRIVATE_PUSH_URLS)
+    async def test_validate_push_url_rejects_private(self, fake_dns, url):
+        from a2a_adapter.server import _validate_push_url
+
+        with pytest.raises(ValueError):
+            await _validate_push_url(url, allow_private=False)
+
+    @pytest.mark.parametrize("url", ["http://mixed.example/x", "http://unknown.example/x"])
+    async def test_validate_push_url_rejects_any_private_or_unresolvable(self, fake_dns, url):
+        from a2a_adapter.server import _validate_push_url
+
+        with pytest.raises(ValueError):
+            await _validate_push_url(url, allow_private=False)
+
+    async def test_validate_push_url_resolution_timeout_rejects(self, monkeypatch):
+        import asyncio
+
+        from a2a_adapter.server import _validate_push_url
+
+        async def slow(host, port):
+            raise asyncio.TimeoutError
+
+        monkeypatch.setattr("a2a_adapter.server._resolve", slow)
+        with pytest.raises(ValueError):
+            await _validate_push_url("https://slow.example/x", allow_private=False)
+
+    @pytest.mark.parametrize("url", ["http://127.0.0.1/x", "http://anything.internal:8080/x"])
+    async def test_validate_push_url_allow_private_skips_dns(self, monkeypatch, url):
+        from a2a_adapter.server import _validate_push_url
+
+        async def no_dns(host, port):
+            raise AssertionError("DNS must not be used")
+
+        monkeypatch.setattr("a2a_adapter.server._resolve", no_dns)
+        await _validate_push_url(url, allow_private=True)
+        with pytest.raises(ValueError):
+            await _validate_push_url("ftp://x/y", allow_private=True)
+
+    @pytest.mark.parametrize("v1", [True, False])
+    @pytest.mark.parametrize("url", _PRIVATE_PUSH_URLS)
+    async def test_private_push_url_rejected_inline(self, fake_dns, push_receiver, url, v1):
+        app = to_a2a(StubAdapter(), push_notifications=True)
+        async with _client(app) as client:
+            if v1:
+                reply = await _send_task_with_push_v1(client, url)
+            else:
+                reply = await _send_task(client, pushNotificationConfig={"url": url})
+            await _settle()
+        _assert_push_url_rejected(reply, v1=v1)
+        assert push_receiver == []
+
+    @pytest.mark.parametrize("v1", [True, False])
+    @pytest.mark.parametrize("url", ["http://127.0.0.1/x", "http://rebound.example/x"])
+    async def test_private_push_url_rejected_on_config_set(self, fake_dns, push_receiver, url, v1):
+        app = to_a2a(StubAdapter(), push_notifications=True)
+        async with _client(app) as client:
+            task = (await _send_task(client))["result"]
+            reply = await _create_push_config(client, task["id"], url, v1=v1)
+        _assert_push_url_rejected(reply, v1=v1)
+        assert push_receiver == []
+
+    async def test_public_push_url_accepted(self, fake_dns, push_receiver):
+        app = to_a2a(StubAdapter(), push_notifications=True)
+        async with _client(app) as client:
+            task = (await _send_task(client))["result"]
+            reply = await _create_push_config(client, task["id"], "https://example.com/h", v1=True)
+        assert reply["result"]["url"] == "https://example.com/h"
+
+    async def test_allow_private_push_urls(self, push_receiver):
+        app = to_a2a(StubAdapter(), push_notifications=True, allow_private_push_urls=True)
+        async with _client(app) as client:
+            task = (await _send_task(client))["result"]
+            for url in ("http://127.0.0.1/x", "http://10.0.0.5/x", "http://receiver.test/x"):
+                reply = await _create_push_config(client, task["id"], url, v1=True)
+                assert reply["result"]["url"] == url
+
+    async def test_send_time_recheck_blocks_rebound_host(self, monkeypatch, push_receiver):
+        lookups = []
+
+        async def rebinding(host, port):
+            lookups.append(host)
+            # Public when the config is registered, loopback when it is used.
+            return ["93.184.216.34"] if len(lookups) == 1 else ["127.0.0.1"]
+
+        monkeypatch.setattr("a2a_adapter.server._resolve", rebinding)
+        app = to_a2a(StubAdapter(), push_notifications=True)
+        async with _client(app) as client:
+            reply = await _send_task(
+                client, pushNotificationConfig={"url": "https://hooks.example/h"}
+            )
+            await _settle()
+        assert reply["result"]["status"]["state"] == "completed"
+        assert len(lookups) >= 2, "the host is resolved again when sending"
+        assert push_receiver == []
+
+    async def test_public_push_url_delivered(self, fake_dns, push_receiver):
+        app = to_a2a(StubAdapter(), push_notifications=True)
+        async with _client(app) as client:
+            reply = await _send_task(
+                client, pushNotificationConfig={"url": "https://hooks.example/h"}
+            )
+            await _settle()
+        assert reply["result"]["status"]["state"] == "completed"
+        assert push_receiver and str(push_receiver[0].url) == "https://hooks.example/h"
+
+    async def test_push_client_does_not_follow_redirects(self, fake_dns, monkeypatch):
+        import a2a_adapter.server as server_module
+
+        seen: list[str] = []
+        real = server_module._make_push_client
+
+        def redirecting(request):
+            seen.append(str(request.url))
+            # A public target, so only follow_redirects (not the host
+            # re-check) can stop the second request.
+            return httpx.Response(302, headers={"Location": "https://example.com/next"})
+
+        monkeypatch.setattr(
+            server_module,
+            "_make_push_client",
+            lambda **kwargs: real(transport=httpx.MockTransport(redirecting), **kwargs),
+        )
+        app = to_a2a(StubAdapter(), push_notifications=True)
+        async with app.router.lifespan_context(app), _client(app) as client:
+            reply = await _send_task(
+                client, pushNotificationConfig={"url": "https://hooks.example/h"}
+            )
+            await _settle()
+        assert reply["result"]["status"]["state"] == "completed"
+        assert seen and all(url == "https://hooks.example/h" for url in seen)
+
+    def test_push_disabled_creates_no_client(self, monkeypatch):
+        import a2a_adapter.server as server_module
+
+        made = []
+        monkeypatch.setattr(server_module, "_make_push_client", lambda **k: made.append(k))
+        to_a2a(StubAdapter())
+        assert made == []
+
+    async def test_empty_url_config_still_ignored(self):
+        from a2a.types import TaskPushNotificationConfig
+
+        from a2a_adapter.server import _SafeInMemoryPushNotificationConfigStore
+
+        from a2a.server.context import ServerCallContext
+
+        store = _SafeInMemoryPushNotificationConfigStore()
+        context = ServerCallContext()
+        await store.set_info("t", TaskPushNotificationConfig(url=""), context)
+        assert await store.get_info("t", context) == []
+
+    def test_custom_card_disagreeing_with_flag_is_rejected(self):
+        card = build_agent_card(StubAdapter())
+        with pytest.raises(ValueError, match="push_notifications"):
+            to_a2a(StubAdapter(), agent_card=card, push_notifications=True)
+        to_a2a(StubAdapter(), agent_card=card, push_notifications=False)
+
+    async def test_custom_card_capability_decides(self, push_receiver):
+        card = build_agent_card(StubAdapter(), push_notifications=True)
+        app = to_a2a(StubAdapter(), agent_card=card, allow_private_push_urls=True)
+        async with _client(app) as client:
+            task = (await _send_task(client))["result"]
+            reply = await _create_push_config(client, task["id"], "http://r.test/x", v1=True)
+        assert reply["result"]["url"] == "http://r.test/x"
+
+
+class TestServeAgentPush:
+    @pytest.fixture(autouse=True)
+    def _no_real_server(self, monkeypatch):
+        from a2a_adapter import server as server_module
+
+        self.servers = []
+        self.cards = []
+        monkeypatch.setattr(server_module._ReadyServer, "run", _fake_started_run(self.servers))
+        real_to_a2a = server_module.to_a2a
+
+        def spy(adapter, agent_card=None, *args, **kwargs):
+            self.cards.append(agent_card)
+            return real_to_a2a(adapter, agent_card, *args, **kwargs)
+
+        monkeypatch.setattr(server_module, "to_a2a", spy)
+
+    def test_serve_agent_push_opt_in_starts(self):
+        from a2a_adapter.server import serve_agent
+
+        serve_agent(StubAdapter(), push_notifications=True)
+        assert self.cards[-1].capabilities.push_notifications is True
+        serve_agent(StubAdapter())
+        assert self.cards[-1].capabilities.push_notifications is False
+
+    def test_serve_agent_custom_card_disagreeing_is_rejected(self):
+        from a2a_adapter.server import serve_agent
+
+        card = build_agent_card(StubAdapter())
+        with pytest.raises(ValueError, match="push_notifications"):
+            serve_agent(StubAdapter(), agent_card=card, push_notifications=True)
+        assert self.servers == []
+
+    def test_warns_when_push_enabled_without_auth(self, caplog):
+        from a2a_adapter.server import serve_agent
+
+        with caplog.at_level("WARNING", logger="a2a_adapter.server"):
+            serve_agent(StubAdapter(), push_notifications=True)
+        assert any("push" in r.getMessage().lower() for r in caplog.records)
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="a2a_adapter.server"):
+            serve_agent(StubAdapter(), push_notifications=True, auth_token="t")
+        assert not any("push" in r.getMessage().lower() for r in caplog.records)
+
+    def test_push_warnings_in_display_mode(self, caplog):
+        import io
+
+        from a2a_adapter.server import serve_agent
+        from a2a_adapter.terminal import ActivityLog
+
+        class QuietDisplay:
+            activity = ActivityLog(io.StringIO(), color=False)
+
+            def install_logging(self, level):
+                pass
+
+            def ready(self, card):
+                pass
+
+            def close(self):
+                pass
+
+            def uninstall_logging(self):
+                pass
+
+        with caplog.at_level("WARNING", logger="a2a_adapter.server"):
+            serve_agent(
+                StubAdapter(),
+                display=QuietDisplay(),
+                push_notifications=True,
+                allow_private_push_urls=True,
+            )
+        messages = " ".join(r.getMessage().lower() for r in caplog.records)
+        assert "without auth" in messages and "private" in messages
+
+    def test_warns_when_private_push_urls_allowed(self, caplog):
+        from a2a_adapter.server import serve_agent
+
+        with caplog.at_level("WARNING", logger="a2a_adapter.server"):
+            serve_agent(
+                StubAdapter(), push_notifications=True, allow_private_push_urls=True, auth_token="t"
+            )
+        assert any("private" in r.getMessage().lower() for r in caplog.records)

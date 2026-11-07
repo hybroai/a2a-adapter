@@ -12,6 +12,7 @@ Design rationale:
 Replaces: client.py (deprecated in v0.2, removed in v0.3)
 """
 
+import asyncio
 import contextlib
 import hmac
 import inspect
@@ -23,6 +24,7 @@ import sys
 import threading
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import httpx
 import uvicorn
@@ -47,6 +49,7 @@ from a2a.types import (
     SecurityScheme,
     StringList,
 )
+from a2a.utils.errors import InvalidParamsError
 from a2a.utils.constants import (
     AGENT_CARD_WELL_KNOWN_PATH,
     PROTOCOL_VERSION_CURRENT,
@@ -72,12 +75,106 @@ _INTERRUPT_SIGNALS = frozenset(
 )
 
 
+_RESOLVE_TIMEOUT = 5.0
+# IPv6 forms that embed an IPv4 address in their last 32 bits; several
+# report is_global even when the embedded address is private.
+_EMBEDS_IPV4 = (
+    ipaddress.ip_network("64:ff9b::/96"),  # NAT64
+    ipaddress.ip_network("::/96"),  # deprecated IPv4-compatible
+    ipaddress.ip_network("::ffff:0:0:0/96"),  # IPv4-translated (SIIT)
+)
+_SITE_LOCAL = ipaddress.ip_network("fec0::/10")  # deprecated; is_global says True
+_PUSH_URL_REJECTED = "Rejected push notification URL: only public http(s) URLs are allowed"
+
+
+async def _resolve(host: str, port: int) -> list[str]:
+    """Return every address ``host`` resolves to (5 s limit)."""
+    loop = asyncio.get_running_loop()
+    infos = await asyncio.wait_for(loop.getaddrinfo(host, port), _RESOLVE_TIMEOUT)
+    return [info[4][0] for info in infos]
+
+
+def _public_ip(text: str) -> bool:
+    ip = ipaddress.ip_address(text.split("%", 1)[0])  # drop an IPv6 zone id
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip in _SITE_LOCAL:
+            return False
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif any(ip in net for net in _EMBEDS_IPV4):
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)  # :: and ::1 map to 0.0.0.x
+    # is_global is False for loopback, RFC 1918, link-local (cloud metadata),
+    # CGNAT, unique-local, unspecified and reserved; multicast can be global.
+    return ip.is_global and not ip.is_multicast
+
+
+async def _validate_push_url(url: str, allow_private: bool) -> None:
+    """Raise ValueError unless the server may POST push notifications to ``url``.
+
+    Without ``allow_private`` the host must not be localhost and every
+    address it resolves to must be public. DNS can still change between this
+    check and the connection (no IP pinning).
+    """
+    parts = urlsplit(url)
+    await _validate_push_target(parts.scheme, parts.hostname, parts.port, allow_private)
+
+
+async def _validate_push_target(
+    scheme: str, host: str | None, port: int | None, allow_private: bool
+) -> None:
+    """The checks behind :func:`_validate_push_url`, on an already-parsed URL."""
+    if scheme not in ("http", "https"):
+        raise ValueError("push URL must use http or https")
+    if not host:
+        raise ValueError("push URL has no host")
+    if allow_private:
+        return
+    host = host.lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        raise ValueError(f"push URL host {host!r} is not public")
+    try:
+        ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        try:
+            addresses = await _resolve(host, port or (443 if scheme == "https" else 80))
+        except (OSError, asyncio.TimeoutError, ValueError, UnicodeError) as exc:
+            raise ValueError(f"push URL host {host!r} does not resolve") from exc
+        if not addresses:
+            raise ValueError(f"push URL host {host!r} does not resolve")
+    else:
+        addresses = [host]
+    for address in addresses:
+        if not _public_ip(address):
+            raise ValueError(f"push URL host {host!r} is not public ({address})")
+
+
+def _make_push_client(**kwargs: Any) -> httpx.AsyncClient:
+    """The push sender's HTTP client (a seam: tests add a mock transport)."""
+    return httpx.AsyncClient(**kwargs)
+
+
 class _SafeInMemoryPushNotificationConfigStore(InMemoryPushNotificationConfigStore):
-    """Ignore malformed empty-URL configs emitted by v0.3 compatibility clients."""
+    """Push-config store that only keeps URLs the server may send to.
+
+    Ignores the malformed empty-URL configs v0.3 compatibility clients emit,
+    and rejects other URLs that fail :func:`_validate_push_url`.
+    """
+
+    def __init__(self, *args: Any, allow_private_urls: bool = False, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._allow_private_urls = allow_private_urls
 
     async def set_info(self, task_id, notification_config, context) -> None:
-        if not getattr(notification_config, "url", ""):
+        url = getattr(notification_config, "url", "")
+        if not url:
             return
+        try:
+            await _validate_push_url(url, self._allow_private_urls)
+        except ValueError as exc:
+            # The reason stays in the log: echoing it (or the resolved address)
+            # would let clients map internal DNS through the server.
+            logger.info("Rejected push notification URL for task %s: %s", task_id, exc)
+            raise InvalidParamsError(message=_PUSH_URL_REJECTED) from exc
         await super().set_info(task_id, notification_config, context)
 
 
@@ -133,6 +230,15 @@ class _BearerAuthMiddleware:
                     credentials.strip(), self._token
                 )
         return False
+
+
+def _check_card_push(agent_card: AgentCard, push_notifications: bool | None) -> None:
+    card_push = bool(agent_card.capabilities.push_notifications)
+    if push_notifications is not None and push_notifications != card_push:
+        raise ValueError(
+            f"push_notifications={push_notifications} disagrees with the given agent card "
+            f"(capabilities.push_notifications={card_push}); set it on the card instead"
+        )
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -215,6 +321,8 @@ def to_a2a(
     *,
     activity: "ActivityLog | None" = None,
     auth_token: str | None = None,
+    push_notifications: bool | None = None,
+    allow_private_push_urls: bool = False,
     **card_overrides: Any,
 ) -> Any:
     """Convert any adapter into an A2A Protocol ASGI application.
@@ -237,6 +345,16 @@ def to_a2a(
             (401 otherwise), and an auto-generated card declares the bearer
             scheme. A card passed in is served as given. None (default)
             leaves the server open.
+        push_notifications: Accept push-notification configs and POST task
+            updates to them. Off by default; a card passed in decides
+            instead (passing a value that disagrees with it raises
+            ValueError). Without ``auth_token`` anyone who reaches the server
+            can make it send requests.
+        allow_private_push_urls: Also accept push URLs on localhost, private
+            networks and other non-public addresses (default False: those
+            are rejected with invalid params, -32602 on the A2A 1.0 JSON-RPC
+            methods and -32603 on the v0.3 names under a2a-sdk 1.0, and the
+            host is checked again before each POST).
         **card_overrides: Override individual AgentCard fields
             (name, description, url, version, streaming).
 
@@ -252,14 +370,35 @@ def to_a2a(
     _check_auth_token(auth_token)
     if agent_card is None:
         card_overrides.setdefault("bearer_auth", auth_token is not None)
+        if push_notifications is not None:
+            card_overrides["push_notifications"] = push_notifications
         agent_card = build_agent_card(adapter, **card_overrides)
-    elif auth_token is not None and not agent_card.security_schemes:
-        logger.debug("auth_token is set but the given agent card declares no security scheme")
+    else:
+        _check_card_push(agent_card, push_notifications)
+        if auth_token is not None and not agent_card.security_schemes:
+            logger.debug("auth_token is set but the given agent card declares no security scheme")
 
     task_store = task_store or InMemoryTaskStore()
-    push_config_store = _SafeInMemoryPushNotificationConfigStore()
-    push_httpx_client = httpx.AsyncClient()
-    push_sender = _push_sender(push_httpx_client, push_config_store)
+    push_config_store = push_sender = push_httpx_client = None
+    # The SDK stores inline push configs whenever a store exists, so "off"
+    # means no store and no sender, not only a card capability.
+    if agent_card.capabilities.push_notifications:
+        push_config_store = _SafeInMemoryPushNotificationConfigStore(
+            allow_private_urls=allow_private_push_urls
+        )
+
+        async def _recheck_host(request: httpx.Request) -> None:
+            # DNS may have changed since the config was stored. Check the
+            # host httpx itself parsed, since that is the one it connects to.
+            url = request.url
+            await _validate_push_target(
+                url.scheme, url.raw_host.decode("ascii"), url.port, allow_private_push_urls
+            )
+
+        push_httpx_client = _make_push_client(
+            event_hooks={"request": [_recheck_host]}, follow_redirects=False
+        )
+        push_sender = _push_sender(push_httpx_client, push_config_store)
 
     executor = AdapterAgentExecutor(adapter, observer=activity)
     handler = DefaultRequestHandler(
@@ -277,7 +416,8 @@ def to_a2a(
         try:
             await adapter.close()
         finally:
-            await push_httpx_client.aclose()
+            if push_httpx_client is not None:
+                await push_httpx_client.aclose()
 
     routes = []
     routes.extend(_create_compat_agent_card_routes(agent_card))
@@ -373,6 +513,8 @@ def serve_agent(
     *,
     display: "TerminalDisplay | None" = None,
     auth_token: str | None = None,
+    push_notifications: bool | None = None,
+    allow_private_push_urls: bool = False,
     **kwargs: Any,
 ) -> None:
     """One-line A2A server startup.
@@ -392,6 +534,11 @@ def serve_agent(
         auth_token: Optional bearer token required on every request except
             the agent card (see :func:`to_a2a`). Serving a non-loopback host
             without one logs a warning.
+        push_notifications: Enable push notifications (default off; see
+            :func:`to_a2a`). Enabling them without ``auth_token`` logs a
+            warning.
+        allow_private_push_urls: Accept push URLs on private and loopback
+            addresses (see :func:`to_a2a`); logs a warning.
         display: Optional TerminalDisplay. When given, Uvicorn's own
             startup and access lines are replaced by the display's card
             (shown once the socket is listening) and activity rail.
@@ -416,15 +563,20 @@ def serve_agent(
             adapter,
             url=f"http://{display_host}:{port}/",
             bearer_auth=auth_token is not None,
+            push_notifications=bool(push_notifications),
         )
+    else:
+        _check_card_push(agent_card, push_notifications)
+    push = {"allow_private_push_urls": allow_private_push_urls}
 
     if kwargs.get("workers", 1) not in (None, 1) or kwargs.get("reload"):
         raise ValueError("serve_agent runs one in-process server; drop workers/reload")
     on_interrupt = getattr(adapter, "kill_children_now", None)
 
     if display is None:
-        app = to_a2a(adapter, agent_card, auth_token=auth_token)
+        app = to_a2a(adapter, agent_card, auth_token=auth_token, **push)
         _warn_if_exposed(host, auth_token, kwargs)
+        _warn_about_push(agent_card, auth_token, allow_private_push_urls)
         # What uvicorn.run() does around Server.run(): app_dir on sys.path,
         # Ctrl+C swallowed, the uds socket removed, exit 3 on failed startup.
         app_dir = kwargs.pop("app_dir", None)
@@ -448,10 +600,11 @@ def serve_agent(
         raise ValueError(
             f"serve_agent(display=...) sets Uvicorn logging itself; drop {', '.join(owned)}"
         )
-    app = to_a2a(adapter, agent_card, activity=display.activity, auth_token=auth_token)
+    app = to_a2a(adapter, agent_card, activity=display.activity, auth_token=auth_token, **push)
     display.install_logging(log_level)
     try:
         _warn_if_exposed(host, auth_token, kwargs)
+        _warn_about_push(agent_card, auth_token, allow_private_push_urls)
         config = uvicorn.Config(
             app,
             host=host,
@@ -486,6 +639,21 @@ def _warn_if_exposed(host: str, auth_token: str | None, kwargs: dict) -> None:
         )
 
 
+def _warn_about_push(agent_card: AgentCard, auth_token: str | None, allow_private: bool) -> None:
+    if not agent_card.capabilities.push_notifications:
+        return
+    if auth_token is None:
+        logger.warning(
+            "Push notifications are on without auth: any client can make this server "
+            "send requests to public URLs. Set auth_token / --auth-token."
+        )
+    if allow_private:
+        logger.warning(
+            "Push notifications may target private and loopback addresses "
+            "(allow_private_push_urls): clients can make this server call internal services."
+        )
+
+
 def build_agent_card(
     adapter: BaseA2AAdapter,
     **overrides: Any,
@@ -503,8 +671,9 @@ def build_agent_card(
         adapter: The adapter to generate a card for.
         **overrides: Override any auto-generated field.
             Supported keys: name, description, version, streaming, url,
-            provider, documentation_url, icon_url, and ``bearer_auth``
-            (bool, default False) to declare a bearer-token security scheme.
+            provider, documentation_url, icon_url, ``bearer_auth``
+            (bool, default False) to declare a bearer-token security scheme,
+            and ``push_notifications`` (bool, default False).
 
     Returns:
         A fully populated AgentCard.
@@ -548,7 +717,7 @@ def build_agent_card(
         version=overrides.get("version", meta.version),
         capabilities=AgentCapabilities(
             streaming=streaming,
-            push_notifications=True,
+            push_notifications=overrides.get("push_notifications", False),
         ),
         supported_interfaces=[
             AgentInterface(

@@ -80,7 +80,7 @@ class TestRenderCard:
         assert "http://127.0.0.1:9000/.well-known/agent-card.json" in text
         assert re.search(r"json-rpc\s+http://127\.0\.0\.1:9000/\s", text)
         assert re.search(r"rest\s+http://127\.0\.0\.1:9000/", text)
-        assert "✓ streaming" in text and "✓ push notifications" in text
+        assert "✓ streaming" in text and "✗ push notifications" in text
         assert re.search(r"skills\s+general", text)
         assert re.search(r"command\s+claude --model opus", text)
         assert re.search(r"cwd\s+/Users/you/proj", text)

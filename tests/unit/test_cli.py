@@ -615,3 +615,37 @@ def test_cli_rejects_non_ascii_token_as_usage_error(tmp_path, monkeypatch, capsy
     assert exit_info.value.code == 2
     serve.assert_not_called()
     assert "printable ASCII" in capsys.readouterr().err
+
+
+def test_cli_push_flags_left_to_the_sdk_by_default(tmp_path):
+    kwargs = _serve_kwargs(["claude", "--cwd", str(tmp_path)])
+    assert "push_notifications" not in kwargs
+    assert "allow_private_push_urls" not in kwargs
+
+
+@pytest.mark.parametrize(
+    "flags, expected",
+    [
+        (["--push-notifications"], {"push_notifications": True}),
+        (["--no-push-notifications"], {"push_notifications": False}),
+        (
+            ["--push-notifications", "--allow-private-push-urls"],
+            {"push_notifications": True, "allow_private_push_urls": True},
+        ),
+        (
+            ["--push-notifications", "--no-allow-private-push-urls"],
+            {"push_notifications": True, "allow_private_push_urls": False},
+        ),
+    ],
+)
+def test_cli_push_flags_reach_serve_agent(tmp_path, flags, expected):
+    kwargs = _serve_kwargs(["claude", "--cwd", str(tmp_path), *flags])
+    for key in ("push_notifications", "allow_private_push_urls"):
+        assert kwargs.get(key) == expected.get(key), key
+
+
+@pytest.mark.parametrize("push", [[], ["--no-push-notifications"]])
+def test_cli_allow_private_without_push_warns_and_is_ignored(tmp_path, capsys, push):
+    kwargs = _serve_kwargs(["claude", "--cwd", str(tmp_path), *push, "--allow-private-push-urls"])
+    assert "allow_private_push_urls" not in kwargs
+    assert "--allow-private-push-urls" in capsys.readouterr().err

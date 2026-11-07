@@ -160,7 +160,7 @@ def test_build_card_defaults():
     assert card.description == ""
     assert card.supported_interfaces[0].url == "http://localhost:9000/"
     assert card.capabilities.streaming is False
-    assert card.capabilities.push_notifications is True
+    assert card.capabilities.push_notifications is False
     assert card.skills == []
 
 
@@ -221,9 +221,10 @@ def test_build_card_skills_with_tags():
     assert card.skills[1].tags == ["coding"]
 
 
-def test_build_card_push_notifications_enabled():
-    """All auto-generated cards should advertise push notification support."""
-    card = build_agent_card(MinimalAdapter())
+def test_build_card_push_notifications_opt_in():
+    """Push notifications are off unless asked for."""
+    assert build_agent_card(MinimalAdapter()).capabilities.push_notifications is False
+    card = build_agent_card(MinimalAdapter(), push_notifications=True)
     assert card.capabilities.push_notifications is True
 
 

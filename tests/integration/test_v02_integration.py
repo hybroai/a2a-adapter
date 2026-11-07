@@ -135,7 +135,7 @@ async def test_agent_card_endpoint(echo_app):
 
 @pytest.mark.asyncio
 async def test_agent_card_push_notifications(echo_app):
-    """Agent card should advertise push notification support."""
+    """Push notifications are off by default."""
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=echo_app),
         base_url="http://testserver",
@@ -143,7 +143,17 @@ async def test_agent_card_push_notifications(echo_app):
         resp = await client.get("/.well-known/agent.json")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["capabilities"]["pushNotifications"] is True
+        assert data["capabilities"]["pushNotifications"] is False
+
+
+@pytest.mark.asyncio
+async def test_agent_card_push_notifications_opt_in():
+    app = to_a2a(EchoAdapter(), push_notifications=True)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        data = (await client.get("/.well-known/agent.json")).json()
+    assert data["capabilities"]["pushNotifications"] is True
 
 
 # ═══════════════════════════════════════════════════
@@ -402,3 +412,41 @@ async def test_activity_log_records_rejected_request():
     assert len(rows) == 1
     assert "POST /" in rows[0]
     assert "private-payload-xyz" not in output
+
+
+@pytest.mark.asyncio
+async def test_push_notification_delivered_to_allowed_url(monkeypatch):
+    """Push on, private receivers allowed, auth on: a task POSTs to the receiver."""
+    import asyncio
+
+    import a2a_adapter.server as server_module
+
+    received: list[httpx.Request] = []
+    real = server_module._make_push_client
+
+    def make(**kwargs):
+        transport = httpx.MockTransport(lambda r: received.append(r) or httpx.Response(200))
+        return real(transport=transport, **kwargs)
+
+    monkeypatch.setattr(server_module, "_make_push_client", make)
+    app = to_a2a(
+        EchoAdapter(), push_notifications=True, allow_private_push_urls=True, auth_token="s3cret"
+    )
+    payload = make_send_payload("ping")
+    payload["params"]["configuration"] = {
+        "pushNotificationConfig": {"url": "http://receiver.test/hook"}
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={"Authorization": "Bearer s3cret"},
+    ) as client:
+        reply = (await client.post("/", json=payload)).json()
+        for _ in range(50):
+            if received:
+                break
+            await asyncio.sleep(0.01)
+    assert reply["result"]["status"]["state"] == "completed"
+    assert received, "the receiver got the task update"
+    assert str(received[0].url) == "http://receiver.test/hook"
+    assert reply["result"]["id"] in received[-1].content.decode()

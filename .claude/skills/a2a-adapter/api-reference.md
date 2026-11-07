@@ -302,6 +302,8 @@ serve_agent(
     *,
     display: TerminalDisplay | None = None,  # CLI startup card + activity log
     auth_token: str | None = None,         # Bearer token for every route but the card
+    push_notifications: bool | None = None,  # Default off
+    allow_private_push_urls: bool = False, # Allow localhost/private push receivers
     **kwargs,                              # Passed to uvicorn.Config
 )
 ```
@@ -314,6 +316,8 @@ app = to_a2a(
     agent_card: AgentCard | None = None,
     task_store: TaskStore | None = None,   # Default: InMemoryTaskStore
     auth_token: str | None = None,         # Bearer token for every route but the card
+    push_notifications: bool | None = None,  # Default off; a given card decides
+    allow_private_push_urls: bool = False, # Allow localhost/private push receivers
     **card_overrides,                      # name=, description=, url=, version=, streaming=,
                                            # provider=, documentation_url=, icon_url=,
                                            # bearer_auth= (declare the bearer scheme)
@@ -326,7 +330,7 @@ app = to_a2a(
 
 `streaming=False` does not disable auto-detection; override `supports_streaming()` to turn streaming off.
 
-The app serves JSON-RPC at `/` (A2A 1.0 methods plus the v0.3 names for older clients), REST routes, and the AgentCard at `/.well-known/agent-card.json` (also the legacy `/.well-known/agent.json`). Auto-enabled capabilities on the generated AgentCard: `streaming` (auto-detected) and `push_notifications=True`.
+The app serves JSON-RPC at `/` (A2A 1.0 methods plus the v0.3 names for older clients), REST routes, and the AgentCard at `/.well-known/agent-card.json` (also the legacy `/.well-known/agent.json`). On the generated AgentCard, `streaming` is auto-detected and `push_notifications` is off unless you pass `push_notifications=True`. With push on, URLs on localhost and private or non-public addresses are rejected unless `allow_private_push_urls=True` (JSON-RPC `-32602` on A2A 1.0 methods, HTTP 400 on REST, `-32603` on the v0.3 method names under a2a-sdk 1.0).
 
 ### `build_agent_card()` -- generate AgentCard
 
@@ -335,7 +339,8 @@ card = build_agent_card(
     adapter: BaseA2AAdapter,
     **overrides,     # name=, description=, url=, version=, streaming=,
                      # provider=, documentation_url=, icon_url=,
-                     # bearer_auth= (declare the bearer scheme)
+                     # bearer_auth= (declare the bearer scheme),
+                     # push_notifications= (default False)
 )
 ```
 

@@ -151,6 +151,20 @@ scheme. Serving a non-loopback host without a token logs a warning. The
 token never reaches CLI children: `A2A_AUTH_TOKEN` is removed from their
 environment unless the adapter's own `env_vars` set it.
 
+Push notifications are opt-in (`push_notifications=True`). The card's
+`capabilities.push_notifications` is the single switch: when it is off,
+`to_a2a` passes the SDK no push store and no sender (the SDK stores inline
+configs whenever a store exists). When it is on, the adapter's config store
+rejects URLs that are not http(s), point at `localhost`, or resolve to any
+non-public address (loopback, private, link-local/metadata, CGNAT,
+IPv4-embedding IPv6 forms such as mapped and NAT64, site-local, multicast)
+unless `allow_private_push_urls=True`. The client gets one generic
+"Rejected push notification URL" error (`-32602` on A2A 1.0 JSON-RPC, 400 on
+REST, `-32603` on the v0.3 names, which a2a-sdk 1.0 maps that way); the reason
+and any resolved address go only to the server log. The push HTTP client re-checks the host before
+every POST (DNS rebinding) and does not follow redirects. A window remains
+between that check and httpx's own DNS lookup; the IP is not pinned.
+
 ### CLI Entry Point (`cli.py`)
 
 The `a2a-adapter` console script is intentionally thin:
@@ -162,6 +176,8 @@ The `a2a-adapter` console script is intentionally thin:
 - Calls the same `serve_agent()` used by Python SDK consumers
 - `--auth-token` (or `$A2A_AUTH_TOKEN`, which the CLI then removes from its
   own environment) turns on bearer-token auth
+- `--push-notifications` / `--allow-private-push-urls` turn on push and allow
+  private receivers; unset flags keep the SDK defaults
 
 Hermes is not a v1 CLI target because `HermesAdapter` is an in-process gateway
 adapter rather than a local CLI subprocess adapter. `dsh` is a target because
@@ -209,7 +225,7 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 | Concurrent request handling | `asyncio.create_task()` per request |
 | Task persistence | `InMemoryTaskStore` (pluggable) |
 | AgentCard serving | `A2AStarletteApplication` at `/.well-known/agent-card.json` |
-| Push notifications | `PushNotificationSender` |
+| Push notifications (opt-in; URL checks are ours, in the config store) | `PushNotificationSender` |
 | Task resubscription | `DefaultRequestHandler.on_resubscribe` |
 
 ## Directory Structure
