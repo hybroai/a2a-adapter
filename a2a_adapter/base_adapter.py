@@ -578,9 +578,7 @@ class BaseA2AAdapter(ABC):
 
     def _forget_stale_session(self, context_key: str) -> None:
         """Drop the stored session for ``context_key`` (memory and disk)."""
-        logger.warning(
-            "Stale session for context %s, retrying once without resume", context_key
-        )
+        logger.warning("Stale session for context %s, retrying once without resume", context_key)
         self._sessions.pop(context_key, None)
         self._save_sessions()
 
