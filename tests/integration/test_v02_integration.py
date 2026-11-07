@@ -314,3 +314,43 @@ def test_build_card_streaming_adapter():
 
     assert card.name == "Stream Echo Agent"
     assert card.capabilities.streaming is True
+
+
+# ═══════════════════════════════════════════════════
+# Shutdown kills CLI process trees (POSIX)
+# ═══════════════════════════════════════════════════
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX process groups")
+@pytest.mark.asyncio
+async def test_lifespan_shutdown_kills_cli_grandchildren(tmp_path):
+    import asyncio
+
+    from tests.process_helpers import (
+        TreeCliAdapter,
+        cancel_and_wait,
+        kill_pids,
+        wait_dead,
+        wait_for_pids,
+    )
+
+    app = to_a2a(TreeCliAdapter(tmp_path))
+    request = None
+    grandchild = None
+
+    async def run_lifespan():
+        nonlocal request, grandchild
+        async with app.router.lifespan_context(app):
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            )
+            request = asyncio.create_task(client.post("/", json=make_send_payload("hi")))
+            _, grandchild = await wait_for_pids(tmp_path)
+        # Lifespan exit ran adapter.close()
+
+    try:
+        await asyncio.wait_for(run_lifespan(), 5)
+        assert await wait_dead(grandchild), "grandchild survived the lifespan shutdown"
+    finally:
+        kill_pids(tmp_path)
+        await cancel_and_wait(request)

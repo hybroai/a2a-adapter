@@ -95,3 +95,50 @@ def request_context():
 def _isolated_state_home(tmp_path_factory, monkeypatch):
     """Keep CLI adapter session stores out of the real ~/.local/state."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("state")))
+
+
+@pytest.fixture(autouse=True)
+def _killpg_only_own_children(monkeypatch):
+    """Fail any test that would signal a process group it did not spawn.
+
+    Many unit tests hand the adapters mock processes with made-up PIDs; a
+    stray ``os.killpg`` on one of those would signal a real process group
+    (for example the user's shell). This fixture records, on its own, the
+    PID of every real child spawned during the test (asyncio's Unix
+    subprocess transport goes through ``subprocess.Popen``) and lets
+    ``os.killpg`` reach only those. It also empties the adapter's
+    ownership registry at teardown so its ``atexit`` hook has nothing left
+    to signal.
+    """
+    import os
+    import subprocess
+
+    from a2a_adapter import base_adapter
+
+    spawned: set[int] = set()
+    violations: list[int] = []
+    original_init = subprocess.Popen.__init__
+    original_killpg = getattr(os, "killpg", None)
+
+    def recording_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        pid = getattr(self, "pid", None)
+        if pid is not None:
+            spawned.add(pid)
+
+    def guarded_killpg(pgid, sig):
+        if pgid not in spawned:
+            violations.append(pgid)
+            raise AssertionError(f"os.killpg({pgid}) targets a group this test did not spawn")
+        return original_killpg(pgid, sig)
+
+    monkeypatch.setattr(subprocess.Popen, "__init__", recording_init)
+    if original_killpg is not None:
+        monkeypatch.setattr(base_adapter.os, "killpg", guarded_killpg)
+    try:
+        yield
+    finally:
+        own_groups = getattr(base_adapter, "_OWN_GROUPS", None)
+        if own_groups is not None:
+            own_groups.clear()
+    assert not violations, f"os.killpg targeted foreign process groups: {violations}"

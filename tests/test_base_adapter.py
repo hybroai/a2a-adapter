@@ -1,6 +1,7 @@
 """Tests for BaseA2AAdapter contract and AdapterMetadata."""
 
 import asyncio
+import contextlib
 import logging
 import os
 from types import SimpleNamespace
@@ -306,3 +307,323 @@ class TestDefaultStateDir:
         assert d.startswith(
             os.path.join(str(tmp_path / "home"), ".local", "state", "a2a-adapter", "pi") + os.sep
         )
+
+
+# ── Process-tree kill (Fix 1) ────────────────────────────────
+
+posix_only = pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-only")
+
+
+@posix_only
+class TestProcessTreeKill:
+    async def test_cancel_kills_grandchild(self, tmp_path):
+        from a2a_adapter.exceptions import CancelledByAdapterError
+        from tests.process_helpers import (
+            TreeCliAdapter,
+            cancel_and_wait,
+            kill_pids,
+            wait_dead,
+            wait_for_pids,
+        )
+
+        adapter = TreeCliAdapter(tmp_path)
+        context = SimpleNamespace(task_id="t-cancel")
+        task = asyncio.create_task(adapter.invoke("hi", context=context))
+        try:
+            _, grandchild = await wait_for_pids(tmp_path)
+            await adapter.cancel(context=context)
+            with pytest.raises(CancelledByAdapterError):
+                await asyncio.wait_for(task, 5)
+            assert await wait_dead(grandchild), "grandchild survived cancel()"
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+    async def test_task_cancellation_kills_grandchild(self, tmp_path):
+        from tests.process_helpers import (
+            TreeCliAdapter,
+            cancel_and_wait,
+            kill_pids,
+            wait_dead,
+            wait_for_pids,
+        )
+
+        adapter = TreeCliAdapter(tmp_path)
+        task = asyncio.create_task(adapter.invoke("hi", context=SimpleNamespace(task_id="t")))
+        try:
+            _, grandchild = await wait_for_pids(tmp_path)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+            assert await wait_dead(grandchild), "grandchild survived task cancellation"
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+    async def test_timeout_kills_grandchild(self, tmp_path):
+        from tests.process_helpers import (
+            TreeCliAdapter,
+            cancel_and_wait,
+            kill_pids,
+            wait_dead,
+            wait_for_pids,
+        )
+
+        adapter = TreeCliAdapter(tmp_path, timeout=1)
+        task = asyncio.create_task(adapter.invoke("hi", context=SimpleNamespace(task_id="t")))
+        try:
+            _, grandchild = await wait_for_pids(tmp_path)
+            with pytest.raises(RuntimeError, match="timed out after 1 seconds"):
+                await asyncio.wait_for(task, 5)
+            assert await wait_dead(grandchild), "grandchild survived the timeout"
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+    async def test_close_kills_grandchild(self, tmp_path):
+        from tests.process_helpers import (
+            TreeCliAdapter,
+            cancel_and_wait,
+            kill_pids,
+            wait_dead,
+            wait_for_pids,
+        )
+
+        adapter = TreeCliAdapter(tmp_path)
+        task = asyncio.create_task(adapter.invoke("hi", context=SimpleNamespace(task_id="t")))
+        try:
+            _, grandchild = await wait_for_pids(tmp_path)
+            await asyncio.wait_for(adapter.close(), 5)
+            assert await wait_dead(grandchild), "grandchild survived close()"
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+    async def test_streaming_cancel_kills_grandchild(self, tmp_path):
+        from tests.process_helpers import (
+            STREAMING_GRANDCHILD_SCRIPT,
+            TreeCliAdapter,
+            cancel_and_wait,
+            kill_pids,
+            wait_dead,
+            wait_for_pids,
+        )
+
+        adapter = TreeCliAdapter(tmp_path, script=STREAMING_GRANDCHILD_SCRIPT)
+        first_chunk = asyncio.Event()
+
+        async def consume():
+            async for _ in adapter.stream("hi", context=SimpleNamespace(task_id="t")):
+                first_chunk.set()
+
+        task = asyncio.create_task(consume())
+        try:
+            await asyncio.wait_for(first_chunk.wait(), 5)
+            _, grandchild = await wait_for_pids(tmp_path)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+            assert await wait_dead(grandchild), "grandchild survived stream cancellation"
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+    async def test_streaming_close_kills_grandchild(self, tmp_path):
+        from tests.process_helpers import (
+            STREAMING_GRANDCHILD_SCRIPT,
+            TreeCliAdapter,
+            kill_pids,
+            wait_dead,
+            wait_for_pids,
+        )
+
+        adapter = TreeCliAdapter(tmp_path, script=STREAMING_GRANDCHILD_SCRIPT)
+        stream = adapter.stream("hi", context=SimpleNamespace(task_id="t"))
+        try:
+            assert await asyncio.wait_for(anext(stream), 5) == "started"
+            _, grandchild = await wait_for_pids(tmp_path)
+            await asyncio.wait_for(stream.aclose(), 5)
+            assert await wait_dead(grandchild), "grandchild survived closing the stream"
+        finally:
+            kill_pids(tmp_path)
+
+    async def test_kill_tree_ignores_vanished_group(self, tmp_path, monkeypatch):
+        import signal
+        from asyncio.subprocess import create_subprocess_exec
+
+        from a2a_adapter import base_adapter
+        from a2a_adapter.base_adapter import _kill_process_tree, _spawn_cli
+
+        proc = await _spawn_cli(create_subprocess_exec, "sleep", "30")
+        try:
+
+            def vanished(pgid, sig):
+                raise ProcessLookupError
+
+            monkeypatch.setattr(base_adapter.os, "killpg", vanished)
+            _kill_process_tree(proc)  # must not raise
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(proc.pid, signal.SIGKILL)
+            await asyncio.wait_for(proc.wait(), 5)
+
+    def test_mock_proc_is_never_killpg_target(self, monkeypatch):
+        import signal
+        from unittest.mock import MagicMock
+
+        from a2a_adapter import base_adapter
+        from a2a_adapter.base_adapter import _kill_process_tree
+
+        killpg = MagicMock()
+        monkeypatch.setattr(base_adapter.os, "killpg", killpg)
+
+        proc = MagicMock(pid=1, returncode=None)
+        _kill_process_tree(proc)
+        proc.kill.assert_called_once_with()
+
+        proc = MagicMock(pid=1, returncode=None)
+        _kill_process_tree(proc, signal.SIGTERM)
+        proc.terminate.assert_called_once_with()
+        proc.kill.assert_not_called()
+
+        killpg.assert_not_called()
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_spawn_uses_new_session_on_posix(self, tmp_path, monkeypatch, streaming):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from tests.process_helpers import TreeCliAdapter
+
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.pid = 4242
+        proc.communicate = AsyncMock(return_value=(b"ok", b""))
+        proc.wait = AsyncMock(return_value=0)
+        proc.stdout.readline = AsyncMock(side_effect=[b"ok\n", b""])
+        proc.stderr.read = AsyncMock(return_value=b"")
+        spawn = AsyncMock(return_value=proc)
+        monkeypatch.setattr("a2a_adapter.base_adapter.create_subprocess_exec", spawn)
+
+        adapter = TreeCliAdapter(tmp_path)
+        if streaming:
+            assert [c async for c in adapter.stream("hi")] == ["ok"]
+        else:
+            assert await adapter.invoke("hi") == "ok"
+        assert spawn.call_args.kwargs.get("start_new_session") is True
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_cancel_after_leader_exited_kills_grandchild(self, tmp_path, streaming):
+        from a2a_adapter.exceptions import CancelledByAdapterError
+        from tests.process_helpers import (
+            LEADER_EXITS_SCRIPT,
+            STREAMING_LEADER_EXITS_SCRIPT,
+            TreeCliAdapter,
+            cancel_and_wait,
+            kill_pids,
+            wait_dead,
+            wait_for_pids,
+        )
+
+        script = STREAMING_LEADER_EXITS_SCRIPT if streaming else LEADER_EXITS_SCRIPT
+        adapter = TreeCliAdapter(tmp_path, script=script, timeout=60)
+        context = SimpleNamespace(task_id="t-exited")
+
+        async def run():
+            if streaming:
+                return [c async for c in adapter.stream("hi", context=context)]
+            return await adapter.invoke("hi", context=context)
+
+        task = asyncio.create_task(run())
+        try:
+            _, grandchild = await wait_for_pids(tmp_path)
+            proc = adapter._active_processes["t-exited"]
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 5
+            while proc.returncode is None:
+                assert loop.time() < deadline, "leader did not exit"
+                await asyncio.sleep(0.02)
+            await adapter.cancel(context=context)
+            with pytest.raises(CancelledByAdapterError):
+                await asyncio.wait_for(task, 5)
+            assert await wait_dead(grandchild)
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_clean_exit_never_killpgs(self, tmp_path, monkeypatch, streaming):
+        from unittest.mock import MagicMock
+
+        from a2a_adapter import base_adapter
+        from tests.process_helpers import TreeCliAdapter
+
+        adapter = TreeCliAdapter(tmp_path, script="echo done")
+        killpg = MagicMock()
+        monkeypatch.setattr(base_adapter.os, "killpg", killpg)
+        if streaming:
+            assert [c async for c in adapter.stream("hi")] == ["done"]
+        else:
+            assert await adapter.invoke("hi") == "done"
+        assert len(base_adapter._OWN_GROUPS) == 0
+        adapter.kill_children_now()
+        await adapter.close()
+        base_adapter._kill_own_groups_at_exit()
+        killpg.assert_not_called()
+
+    async def test_cancelled_stream_leaves_no_killed_marker(self, tmp_path):
+        from tests.process_helpers import (
+            STREAMING_GRANDCHILD_SCRIPT,
+            TreeCliAdapter,
+            cancel_and_wait,
+            kill_pids,
+            wait_for_pids,
+        )
+
+        adapter = TreeCliAdapter(tmp_path, script=STREAMING_GRANDCHILD_SCRIPT)
+        context = SimpleNamespace(task_id="t-reused")
+        started = asyncio.Event()
+
+        async def consume():
+            async for _ in adapter.stream("hi", context=context):
+                started.set()
+
+        task = asyncio.create_task(consume())
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            await wait_for_pids(tmp_path)
+            # The SDK's order: adapter.cancel() first, then the producer task.
+            await adapter.cancel(context=context)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+        assert "t-reused" not in adapter._killed_tasks
+
+    async def test_cancel_during_timeout_reap_leaves_no_killed_marker(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from tests.process_helpers import TreeCliAdapter
+
+        adapter = TreeCliAdapter(tmp_path, timeout=0.1)
+        context = SimpleNamespace(task_id="t-timeout")
+
+        async def hang(*args, **kwargs):
+            await asyncio.sleep(30)
+
+        async def wait_and_get_cancelled():
+            # A tasks/cancel arrives while the timed-out run waits for the reap.
+            await adapter.cancel(context=context)
+            return -9
+
+        proc = MagicMock(pid=4242, returncode=None)
+        proc.communicate = hang
+        proc.wait = wait_and_get_cancelled
+        monkeypatch.setattr(
+            "a2a_adapter.base_adapter.create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+        with pytest.raises(RuntimeError, match="timed out"):
+            await asyncio.wait_for(adapter.invoke("hi", context=context), 5)
+        proc.kill.assert_called()
+        assert "t-timeout" not in adapter._killed_tasks

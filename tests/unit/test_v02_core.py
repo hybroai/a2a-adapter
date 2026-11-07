@@ -232,20 +232,32 @@ def test_build_card_push_notifications_enabled():
 # ═══════════════════════════════════════════════════
 
 
+_ran_configs: list = []
+
+
+def _fake_run(self):
+    """Stand-in for uvicorn's Server.run: record the config, report a start."""
+    _ran_configs.append(self.config)
+    self.started = True
+
+
 def test_serve_agent_url_from_port():
     """serve_agent should derive the AgentCard URL from host/port."""
-    with patch("a2a_adapter.server.uvicorn"):
+    with patch("a2a_adapter.server._ReadyServer.run", _fake_run):
         with patch("a2a_adapter.server.to_a2a") as mock_to_a2a:
             mock_to_a2a.return_value = MagicMock()
             serve_agent(MinimalAdapter(), port=9008)
 
             card = mock_to_a2a.call_args[1].get("agent_card") or mock_to_a2a.call_args[0][1]
             assert card.supported_interfaces[0].url == "http://localhost:9008/"
+    config = _ran_configs[-1]
+    assert config.app is mock_to_a2a.return_value
+    assert config.port == 9008
 
 
 def test_serve_agent_wildcard_host_normalized():
     """Wildcard bind addresses should be normalized to localhost in the card URL."""
-    with patch("a2a_adapter.server.uvicorn"):
+    with patch("a2a_adapter.server._ReadyServer.run", _fake_run):
         with patch("a2a_adapter.server.to_a2a") as mock_to_a2a:
             mock_to_a2a.return_value = MagicMock()
             serve_agent(MinimalAdapter(), host="0.0.0.0", port=9005)
@@ -256,7 +268,7 @@ def test_serve_agent_wildcard_host_normalized():
 
 def test_serve_agent_ipv6_wildcard_normalized():
     """IPv6 wildcard :: should be normalized to localhost."""
-    with patch("a2a_adapter.server.uvicorn"):
+    with patch("a2a_adapter.server._ReadyServer.run", _fake_run):
         with patch("a2a_adapter.server.to_a2a") as mock_to_a2a:
             mock_to_a2a.return_value = MagicMock()
             serve_agent(MinimalAdapter(), host="::", port=9005)
@@ -267,7 +279,7 @@ def test_serve_agent_ipv6_wildcard_normalized():
 
 def test_serve_agent_custom_host_preserved():
     """Non-wildcard hosts should be preserved in the card URL."""
-    with patch("a2a_adapter.server.uvicorn"):
+    with patch("a2a_adapter.server._ReadyServer.run", _fake_run):
         with patch("a2a_adapter.server.to_a2a") as mock_to_a2a:
             mock_to_a2a.return_value = MagicMock()
             serve_agent(MinimalAdapter(), host="192.168.1.100", port=9010)
@@ -290,7 +302,7 @@ def test_serve_agent_prebuilt_card_not_overridden():
         default_input_modes=["text"],
         default_output_modes=["text"],
     )
-    with patch("a2a_adapter.server.uvicorn"):
+    with patch("a2a_adapter.server._ReadyServer.run", _fake_run):
         with patch("a2a_adapter.server.to_a2a") as mock_to_a2a:
             mock_to_a2a.return_value = MagicMock()
             serve_agent(MinimalAdapter(), agent_card=custom_card, port=9999)

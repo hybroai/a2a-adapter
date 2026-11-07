@@ -127,6 +127,13 @@ limited by the OS command-line length; OpenClaw itself rejects prompts over
 | `--timeout` | `600` | Per-request timeout in seconds |
 | `--executable` | `claude`, `codex`, `pi`, `openclaw`; for `dsh`, the runtime bundled with the SDK | Path to the agent executable |
 
+On POSIX, cancel, timeout and shutdown stop the agent and everything it
+started (shells, MCP servers, tool processes). Ctrl+C or closing the terminal stops running agents
+immediately; SIGTERM lets in-flight requests finish (uvicorn's graceful
+timeout), then stops them.
+Agents run detached from the server's terminal, so a tool that prompts on
+`/dev/tty` (an SSH passphrase, a GPG pinentry) fails instead of prompting.
+
 Pi source commands can be selected without a shell wrapper:
 
 ```bash

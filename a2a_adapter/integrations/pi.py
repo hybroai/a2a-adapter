@@ -7,13 +7,23 @@ import json
 import logging
 import os
 import re
+import signal
 from asyncio.subprocess import PIPE, Process, create_subprocess_exec
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import suppress
 from typing import Any
 
-from ..base_adapter import AdapterMetadata, BaseA2AAdapter, default_state_dir
+from ..base_adapter import (
+    AdapterMetadata,
+    BaseA2AAdapter,
+    _forget_own_group,
+    _kill_process_tree,
+    _owns_group,
+    _spawn_cli,
+    _wait_reaped,
+    default_state_dir,
+)
 from ..exceptions import CancelledByAdapterError
 
 
@@ -150,7 +160,8 @@ class PiRpcProcess:
         env.update(self.env_vars)
 
         try:
-            self._process = await create_subprocess_exec(
+            self._process = await _spawn_cli(
+                create_subprocess_exec,
                 *args,
                 stdin=PIPE,
                 stdout=PIPE,
@@ -300,7 +311,11 @@ class PiRpcProcess:
             return
         self._closing = True
 
-        if self._process is not None and self._process.returncode is None:
+        # A registered process group is signalled even after Pi exited on its
+        # own: Pi's tool children can outlive it.
+        if self._process is not None and (
+            self._process.returncode is None or _owns_group(self._process)
+        ):
             self._signal_failure(PiRpcError("Pi RPC process is closing"))
             await self._terminate_process()
 
@@ -380,7 +395,12 @@ class PiRpcProcess:
     async def _watch_process(self) -> None:
         process = self._process
         assert process is not None
+        # Known gap: wait() returns only once all of Pi's pipes close, so while
+        # a grandchild still holds them Pi's own death goes unnoticed here.
         return_code = await process.wait()
+        # Every pipe is closed, so the group is very likely empty: stop
+        # treating its ID as ours before it can be reused.
+        _forget_own_group(process)
         if not self._closing:
             stderr = b"".join(self._stderr_tail).decode("utf-8", errors="replace")[-2000:].strip()
             message = f"Pi RPC process exited with code {return_code}"
@@ -415,17 +435,37 @@ class PiRpcProcess:
         self._events.put_nowait(error)
         self._turn_settled.set()
 
+    def kill_now(self) -> None:
+        """SIGKILL Pi and its process group immediately (signal-handler safe)."""
+        if self._process is not None:
+            _kill_process_tree(self._process)
+
     async def _terminate_process(self) -> None:
+        """SIGTERM Pi's process group, wait the grace period, then SIGKILL it.
+
+        For a group we spawned, the group is signalled even when Pi already
+        exited, since its tool children may not have; only the waits are
+        skipped then.
+        """
         process = self._process
-        if process is None or process.returncode is not None:
+        if process is None:
+            return
+        owned = _owns_group(process)
+        if process.returncode is not None and not owned:
             return
 
-        process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=self.cancel_grace_timeout)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+        leader_running = process.returncode is None
+        _kill_process_tree(process, signal.SIGTERM)
+        if leader_running:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=self.cancel_grace_timeout)
+                if not owned:
+                    return
+            except asyncio.TimeoutError:
+                pass
+        _kill_process_tree(process)
+        if leader_running:
+            await _wait_reaped(process)
 
     @staticmethod
     def _process_lost(error: BaseException, *, accepted: bool) -> PiProcessLostError:
@@ -555,6 +595,12 @@ class PiAdapter(BaseA2AAdapter):
 
         if task_id == self._active_task_id and self._rpc is not None:
             await self._rpc.abort()
+
+    def kill_children_now(self) -> None:
+        """SIGKILL the Pi RPC process group, synchronously (no SIGTERM grace)."""
+        rpc = self._rpc
+        if rpc is not None:
+            rpc.kill_now()
 
     async def close(self) -> None:
         async with self._startup_lock:

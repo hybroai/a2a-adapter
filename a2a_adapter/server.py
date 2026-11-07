@@ -12,9 +12,13 @@ Design rationale:
 Replaces: client.py (deprecated in v0.2, removed in v0.3)
 """
 
+import contextlib
 import inspect
 import logging
+import os
+import signal
 import sys
+import threading
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -56,6 +60,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _STARTUP_FAILURE = 3  # uvicorn's exit code when startup fails
 LEGACY_AGENT_CARD_PATH = "/.well-known/agent.json"
+# Signals that stop running CLI agents at once (SIGTERM drains first).
+_INTERRUPT_SIGNALS = frozenset(
+    sig for sig in (signal.SIGINT, getattr(signal, "SIGHUP", None)) if sig is not None
+)
 
 
 class _SafeInMemoryPushNotificationConfigStore(InMemoryPushNotificationConfigStore):
@@ -192,16 +200,69 @@ def to_a2a(
 
 
 class _ReadyServer(uvicorn.Server):
-    """Uvicorn server that calls ``on_ready`` once its socket is listening."""
+    """Uvicorn server with two hooks.
 
-    def __init__(self, config: uvicorn.Config, on_ready) -> None:
+    ``on_ready`` runs once the socket is listening. ``on_interrupt`` (optional,
+    synchronous) runs inside the signal handler on Ctrl+C (SIGINT), on SIGHUP
+    or on a second signal of any kind, at most once. CLI agents run in their own
+    process group, so the terminal's Ctrl+C no longer reaches them; this hook
+    kills them so in-flight requests end and uvicorn can finish. A single
+    SIGTERM keeps uvicorn's graceful drain; the lifespan's ``adapter.close()``
+    stops the children afterwards.
+
+    The work must be synchronous: uvicorn re-raises captured signals after
+    ``serve()`` returns, so after SIGTERM (or a forced exit) nothing scheduled
+    on the event loop is guaranteed to run.
+    """
+
+    def __init__(self, config: uvicorn.Config, on_ready, on_interrupt=None) -> None:
         super().__init__(config)
         self._on_ready = on_ready
+        self._on_interrupt = on_interrupt
+        self._signal_count = 0
+        self._interrupt_done = False
 
     async def startup(self, sockets=None) -> None:
         await super().startup(sockets=sockets)
         if self.started and not self.should_exit:
             self._on_ready()
+
+    @contextlib.contextmanager
+    def capture_signals(self):
+        """Also treat SIGHUP (terminal closed, SSH dropped) like Ctrl+C.
+
+        The CLI agents run in their own session, so the hangup no longer
+        reaches them; without this the server would die by SIGHUP and leave
+        them running. uvicorn re-raises captured signals once the original
+        handlers are back, so the process still exits by SIGHUP afterwards.
+        """
+        with super().capture_signals():
+            sighup = getattr(signal, "SIGHUP", None)
+            if (
+                sighup is None
+                or threading.current_thread() is not threading.main_thread()
+                or signal.getsignal(sighup) is signal.SIG_IGN  # e.g. under nohup: keep it
+            ):
+                yield
+                return
+            original = signal.signal(sighup, self.handle_exit)
+            try:
+                yield
+            finally:
+                signal.signal(sighup, original)
+
+    def handle_exit(self, sig: int, frame) -> None:
+        super().handle_exit(sig, frame)
+        # Our own counter: uvicorn sets force_exit only on a second SIGINT.
+        self._signal_count += 1
+        if self._on_interrupt is None or self._interrupt_done:
+            return
+        if sig in _INTERRUPT_SIGNALS or self._signal_count >= 2:
+            self._interrupt_done = True
+            try:
+                self._on_interrupt()
+            except Exception:
+                logger.exception("Stopping running agents on interrupt failed")
 
 
 def serve_agent(
@@ -216,7 +277,7 @@ def serve_agent(
 ) -> None:
     """One-line A2A server startup.
 
-    Combines to_a2a() + uvicorn.run() for maximum convenience.
+    Combines to_a2a() with an in-process uvicorn server.
     This is the recommended way to start an A2A server for development
     and simple deployments.
 
@@ -229,8 +290,14 @@ def serve_agent(
         display: Optional TerminalDisplay. When given, Uvicorn's own
             startup and access lines are replaced by the display's card
             (shown once the socket is listening) and activity rail.
-        **kwargs: Additional arguments passed to uvicorn.run()
-            (e.g., workers, ssl_keyfile, reload).
+        **kwargs: Additional arguments passed to ``uvicorn.Config``
+            (e.g., ssl_keyfile, uds; ``app_dir`` as in uvicorn.run()).
+            ``workers`` and ``reload`` raise ValueError: they need an
+            import string, not an app object.
+
+    Ctrl+C or a terminal hangup stops running CLI agents (and everything they started)
+    immediately; SIGTERM lets in-flight requests finish within uvicorn's
+    graceful timeout, then stops them.
 
     Example:
         >>> from a2a_adapter import N8nAdapter, serve_agent
@@ -244,13 +311,30 @@ def serve_agent(
             url=f"http://{display_host}:{port}/",
         )
 
+    if kwargs.get("workers", 1) not in (None, 1) or kwargs.get("reload"):
+        raise ValueError("serve_agent runs one in-process server; drop workers/reload")
+    on_interrupt = getattr(adapter, "kill_children_now", None)
+
     if display is None:
         app = to_a2a(adapter, agent_card)
-        uvicorn.run(app, host=host, port=port, log_level=log_level, **kwargs)
+        # What uvicorn.run() does around Server.run(): app_dir on sys.path,
+        # Ctrl+C swallowed, the uds socket removed, exit 3 on failed startup.
+        app_dir = kwargs.pop("app_dir", None)
+        if app_dir is not None:
+            sys.path.insert(0, app_dir)
+        config = uvicorn.Config(app, host=host, port=port, log_level=log_level, **kwargs)
+        server = _ReadyServer(config, on_ready=lambda: None, on_interrupt=on_interrupt)
+        try:
+            server.run()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if config.uds and os.path.exists(config.uds):
+                os.remove(config.uds)
+        if not server.started:
+            sys.exit(_STARTUP_FAILURE)
         return
 
-    if kwargs.get("workers", 1) not in (None, 1) or kwargs.get("reload"):
-        raise ValueError("serve_agent(display=...) runs one in-process server; drop workers/reload")
     owned = sorted({"access_log", "log_config"} & kwargs.keys())
     if owned:
         raise ValueError(
@@ -268,7 +352,9 @@ def serve_agent(
             access_log=False,
             **kwargs,
         )
-        server = _ReadyServer(config, on_ready=lambda: display.ready(agent_card))
+        server = _ReadyServer(
+            config, on_ready=lambda: display.ready(agent_card), on_interrupt=on_interrupt
+        )
         try:
             server.run()
         except KeyboardInterrupt:

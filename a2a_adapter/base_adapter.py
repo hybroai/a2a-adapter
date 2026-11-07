@@ -13,12 +13,15 @@ Design philosophy:
 """
 
 import asyncio
+import atexit
 import contextlib
 import hashlib
 import json
 import logging
 import os
+import signal
 import tempfile
+import weakref
 from abc import ABC, abstractmethod
 from asyncio import wait_for
 from asyncio.subprocess import DEVNULL, PIPE, Process, create_subprocess_exec
@@ -30,6 +33,122 @@ from a2a.types import Part
 from .exceptions import CancelledByAdapterError
 
 logger = logging.getLogger(__name__)
+
+# ──── Process-tree management ────
+#
+# CLI agents (claude, codex, pi, ...) start their own children: shells, MCP
+# servers, tool processes. Signalling only the direct child leaves those
+# running and holding its stdout/stderr pipes. On POSIX each CLI therefore
+# starts in a new session, so it leads its own process group and the whole
+# tree can be signalled at once with ``os.killpg``. A CLI helper that moves
+# itself into yet another session escapes the group; Windows keeps the
+# single-process kill.
+
+_SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+_POST_KILL_WAIT = 5.0  # seconds to wait for a killed process to be reaped
+
+# Processes this module spawned as process-group leaders. Only these are ever
+# passed to ``os.killpg``; anything else (mocks with fake PIDs, processes
+# spawned elsewhere) gets the single-process path.
+_OWN_GROUPS: "weakref.WeakSet[Process]" = weakref.WeakSet()
+_atexit_registered = False
+
+
+def _register_own_group(proc: Process) -> None:
+    """Record ``proc`` as a process-group leader we may ``killpg``.
+
+    Only a real ``asyncio.subprocess.Process`` that leads its own group
+    (``pgid == pid``) is recorded.
+    """
+    global _atexit_registered
+    if os.name != "posix" or not isinstance(proc, Process):
+        return
+    try:
+        if os.getpgid(proc.pid) != proc.pid:
+            return
+    except (ProcessLookupError, PermissionError):
+        return
+    _OWN_GROUPS.add(proc)
+    if not _atexit_registered:
+        atexit.register(_kill_own_groups_at_exit)
+        _atexit_registered = True
+
+
+def _forget_own_group(proc: Process) -> None:
+    """Stop treating ``proc``'s group as ours (its run is over and reaped)."""
+    _OWN_GROUPS.discard(proc)
+
+
+def _owns_group(proc: Process) -> bool:
+    return proc in _OWN_GROUPS
+
+
+async def _spawn_cli(factory, *args, **kwargs) -> Process:
+    """Spawn a CLI with ``factory`` (a ``create_subprocess_exec``) in its own group.
+
+    Callers pass their module's own ``create_subprocess_exec`` so tests that
+    patch that name keep working.
+    """
+    if os.name == "posix":
+        kwargs["start_new_session"] = True
+    proc = await factory(*args, **kwargs)
+    _register_own_group(proc)
+    return proc
+
+
+def _kill_process_tree(proc: Process, sig: int = _SIGKILL) -> None:
+    """Signal ``proc`` and, on POSIX, every process in its group.
+
+    The group is signalled even when the leader already exited, because its
+    children can outlive it. Call this only on abnormal paths (cancel,
+    timeout, error, close, shutdown), never after a clean exit, and forget the
+    process once it is reaped: a group ID can be reused once all its members
+    are gone. Uses only calls that are safe inside a signal handler.
+    """
+    if _owns_group(proc):
+        try:
+            os.killpg(proc.pid, sig)
+            return
+        except ProcessLookupError:
+            return  # the whole group is already gone
+        except PermissionError as error:
+            logger.debug("killpg(%s) failed (%s); signalling the process only", proc.pid, error)
+    if proc.returncode is not None:
+        return
+    try:
+        if sig == _SIGKILL:
+            proc.kill()
+        elif sig == signal.SIGTERM:
+            proc.terminate()
+        else:
+            proc.send_signal(sig)
+    except ProcessLookupError:
+        pass
+
+
+async def _wait_reaped(proc: Process, timeout: float = _POST_KILL_WAIT) -> None:
+    """Wait for a killed process, bounded.
+
+    ``Process.wait()`` returns only once the process exited and all its pipes
+    closed, so a process outside the group that still holds a pipe would
+    block it forever. The leader is dead either way.
+    """
+    try:
+        await asyncio.wait_for(proc.wait(), timeout)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Process %s was killed but its pipes are still open after %ss; moving on",
+            getattr(proc, "pid", "?"),
+            timeout,
+        )
+
+
+def _kill_own_groups_at_exit() -> None:
+    """Last resort at interpreter exit: SIGKILL every group whose leader still runs."""
+    for proc in list(_OWN_GROUPS):
+        if proc.returncode is None:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, _SIGKILL)
 
 
 def default_state_dir(agent: str, working_dir: str) -> str:
@@ -279,27 +398,43 @@ class BaseA2AAdapter(ABC):
         task_id = context.task_id
 
         proc = self._active_processes.get(task_id)
-        if proc and proc.returncode is None:
+        # A group we spawned is killed even if the CLI itself already exited:
+        # its children may still be running and holding the pipes.
+        if proc and (proc.returncode is None or _owns_group(proc)):
             self._killed_tasks.add(task_id)
-            logger.debug("Killing subprocess for task %s", task_id)
-            proc.kill()
+            logger.debug("Killing subprocess tree for task %s", task_id)
+            _kill_process_tree(proc)
         else:
             self._cancelled_tasks.add(task_id)
             logger.debug("Queued cancellation for task %s", task_id)
 
+    def kill_children_now(self) -> None:
+        """SIGKILL every running CLI process tree, synchronously.
+
+        Called from the server's signal handler on Ctrl+C, so it does no
+        awaiting and clears no state; in-flight requests then fail promptly
+        and ``close()`` does the rest. No-op for non-CLI adapters.
+        """
+        if not getattr(self, "_cli_runtime_enabled", False):
+            return
+        for proc in list(self._active_processes.values()):
+            try:
+                _kill_process_tree(proc)
+            except Exception:  # never let one failure stop the others
+                logger.debug("Could not kill subprocess %s", getattr(proc, "pid", "?"))
+
     async def close(self) -> None:
-        """Kill all active subprocesses. No-op if super().__init__() wasn't called."""
+        """Kill all active subprocess trees. No-op if super().__init__() wasn't called."""
         if not getattr(self, "_cli_runtime_enabled", False):
             return
 
         for task_id, proc in list(self._active_processes.items()):
-            if proc.returncode is None:
-                logger.debug("Killing subprocess %s during close", task_id)
-                proc.kill()
-                try:
-                    await proc.wait()
-                except Exception:
-                    pass
+            logger.debug("Killing subprocess tree %s during close", task_id)
+            _kill_process_tree(proc)
+            try:
+                await _wait_reaped(proc)
+            except Exception:
+                pass
         self._active_processes.clear()
         self._cancelled_tasks.clear()
         self._killed_tasks.clear()
@@ -325,7 +460,8 @@ class BaseA2AAdapter(ABC):
 
         # 3. Spawn
         try:
-            proc = await create_subprocess_exec(
+            proc = await _spawn_cli(
+                create_subprocess_exec,
                 *cmd_result.args,
                 stdin=PIPE if stdin_bytes is not None else DEVNULL,
                 stdout=PIPE,
@@ -341,6 +477,7 @@ class BaseA2AAdapter(ABC):
 
         # 4. Track
         self._active_processes[task_id] = proc
+        aborted = False
         try:
             try:
                 communicate = (
@@ -350,25 +487,29 @@ class BaseA2AAdapter(ABC):
                 )
                 stdout_bytes, stderr_bytes = await wait_for(communicate, timeout=self.timeout)
             except asyncio.TimeoutError:
-                if proc.returncode is None:
-                    proc.kill()
-                    await proc.wait()
+                aborted = True
+                _kill_process_tree(proc)
+                await _wait_reaped(proc)
                 raise RuntimeError(f"Command timed out after {self.timeout} seconds")
             except asyncio.CancelledError:
-                # Task cancelled (tasks/cancel or shutdown): don't orphan the child
-                self._killed_tasks.discard(task_id)
-                if proc.returncode is None:
-                    proc.kill()
-                    await proc.wait()
+                # Task cancelled (tasks/cancel or shutdown): don't orphan the tree
+                aborted = True
+                _kill_process_tree(proc)
+                await _wait_reaped(proc)
                 raise
         finally:
             self._active_processes.pop(task_id, None)
-
-        # 5. Kill detection
-        if proc.returncode is not None and proc.returncode < 0:
-            if task_id in self._killed_tasks:
+            _forget_own_group(proc)
+            if aborted:
+                # After the pop, so a cancel() racing the reap can't re-add a
+                # marker that would mark a later run with this ID cancelled.
                 self._killed_tasks.discard(task_id)
-                raise CancelledByAdapterError(f"Task {task_id} was killed by cancel request")
+
+        # 5. Kill detection (the CLI may have exited on its own before cancel()
+        # killed the rest of its group, so don't require a negative exit code)
+        if task_id in self._killed_tasks:
+            self._killed_tasks.discard(task_id)
+            raise CancelledByAdapterError(f"Task {task_id} was killed by cancel request")
 
         stdout_text = stdout_bytes.decode("utf-8", errors="replace")
         stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
@@ -436,7 +577,8 @@ class BaseA2AAdapter(ABC):
 
         # 3. Spawn
         try:
-            proc = await create_subprocess_exec(
+            proc = await _spawn_cli(
+                create_subprocess_exec,
                 *cmd_result.args,
                 stdin=PIPE if cmd_result.stdin is not None else DEVNULL,
                 stdout=PIPE,
@@ -499,23 +641,23 @@ class BaseA2AAdapter(ABC):
 
         except asyncio.TimeoutError:
             aborted = True
-            if proc.returncode is None:
-                proc.kill()
+            _kill_process_tree(proc)
             raise RuntimeError(f"Command timed out after {self.timeout} seconds")
         except (GeneratorExit, asyncio.CancelledError):
             aborted = True
-            if proc.returncode is None:
-                proc.kill()
+            _kill_process_tree(proc)
             raise
         except Exception:
             aborted = True
-            if proc.returncode is None:
-                proc.kill()
+            _kill_process_tree(proc)
             raise
         finally:
             self._active_processes.pop(task_id, None)
 
             if aborted:
+                # The run ends here, so a cancel marker must not outlive it
+                # and mark a later run with the same task ID as cancelled.
+                self._killed_tasks.discard(task_id)
                 for task in (stderr_task, stdin_task):
                     if task is None:
                         continue
@@ -524,20 +666,20 @@ class BaseA2AAdapter(ABC):
                         await task
                     except asyncio.CancelledError:
                         pass
-                await proc.wait()
+                await _wait_reaped(proc)
             else:
                 await proc.wait()
                 await stderr_task
                 if stdin_task is not None:
                     await stdin_task
+            _forget_own_group(proc)
 
         stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
 
-        # Kill detection
-        if proc.returncode is not None and proc.returncode < 0:
-            if task_id in self._killed_tasks:
-                self._killed_tasks.discard(task_id)
-                raise CancelledByAdapterError(f"Task {task_id} was killed by cancel request")
+        # Kill detection (see _run_subprocess)
+        if task_id in self._killed_tasks:
+            self._killed_tasks.discard(task_id)
+            raise CancelledByAdapterError(f"Task {task_id} was killed by cancel request")
 
         # Stale retry — only when BOTH no output yielded and stderr empty.
         # If stderr has content, it signals a real error; don't mask it.

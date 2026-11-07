@@ -31,7 +31,8 @@ class DeepSeekHarnessHeadlessAdapter(BaseA2AAdapter):
     deepseek-harness-sdk directly, else ``dsh`` on PATH. On Windows the
     ``dsh`` console script waits on the runtime instead of replacing itself,
     so killing it on cancel or timeout leaves the runtime running; pass the
-    runtime executable itself as ``dsh_path`` there.
+    runtime executable itself as ``dsh_path`` there. On POSIX the whole
+    process group is killed, so this does not apply.
 
     Example::
 

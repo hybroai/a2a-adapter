@@ -79,7 +79,8 @@ A2A Client → HTTP POST / (tasks/cancel)
       → execute() waits for the cancel below before it returns,
         so the event queue stays open for the terminal state
     → AdapterAgentExecutor.cancel()
-      → adapter.cancel()          (may await)
+      → adapter.cancel()          (may await; CLI adapters kill the CLI's
+                                   process group on POSIX)
       → TaskUpdater.cancel()      (or failed, if adapter.cancel() raised)
 ```
 
@@ -100,6 +101,13 @@ class BaseA2AAdapter(ABC):
     def get_metadata(self) -> AdapterMetadata: ...
 ```
 
+CLI adapters built on the subprocess runtime (`_run_subprocess` /
+`_run_subprocess_streaming`) start the CLI in its own session on POSIX, so
+cancel, timeout, `close()` and shutdown kill the CLI's whole process group
+(shells, MCP servers, tool processes), not only the direct child. A helper
+that moves itself into a new session escapes the group; Windows still kills
+only the direct child.
+
 ### AdapterAgentExecutor (`executor.py`)
 
 Bridge between `BaseA2AAdapter` and A2A SDK's `AgentExecutor`:
@@ -115,7 +123,12 @@ Bridge between `BaseA2AAdapter` and A2A SDK's `AgentExecutor`:
 Three public functions:
 
 - **`to_a2a(adapter)`** — adapter → ASGI app (wires executor + handler + Starlette)
-- **`serve_agent(adapter, port)`** — `to_a2a()` + `uvicorn.run()`
+- **`serve_agent(adapter, port)`** — `to_a2a()` + an in-process `uvicorn.Server`.
+  Ctrl+C (or a terminal hangup, SIGHUP) stops running CLI agents and everything they started immediately
+  (`adapter.kill_children_now()` from the signal handler); SIGTERM lets
+  in-flight requests finish within uvicorn's graceful timeout, then the
+  lifespan's `adapter.close()` stops them. Apps served by another ASGI server
+  get only the lifespan `close()` and an `atexit` fallback.
 - **`build_agent_card(adapter)`** — `adapter.get_metadata()` → `AgentCard`
 
 ### CLI Entry Point (`cli.py`)

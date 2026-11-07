@@ -441,3 +441,169 @@ async def test_prompt_acceptance_timeout_terminates_uncertain_process(tmp_path):
 
 async def _collect(iterator):
     return [item async for item in iterator]
+
+
+# ── Process-tree kill (POSIX) ────────────────────────────────
+
+import os as _os  # noqa: E402
+import sys as _sys  # noqa: E402
+
+_posix_only = pytest.mark.skipif(_os.name != "posix", reason="process groups are POSIX-only")
+
+# Starts a ``sleep 30`` grandchild that shares the pipes, writes
+# "<leader pid> <grandchild pid>" to argv[1], optionally ignores SIGTERM, writes
+# the ready file argv[2], then either sleeps or exits.
+_PI_TREE_SCRIPT = r"""
+import os, signal, subprocess, sys, time
+grandchild = subprocess.Popen(["sleep", "30"])
+with open(sys.argv[1] + ".tmp", "w") as f:
+    f.write(f"{os.getpid()} {grandchild.pid}")
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+if sys.argv[3] == "ignore-term":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+open(sys.argv[2], "w").close()
+if sys.argv[3] != "exit":
+    time.sleep(30)
+"""
+
+
+async def _spawn_pi_tree(tmp_path, mode: str):
+    from asyncio.subprocess import PIPE, create_subprocess_exec
+
+    from a2a_adapter.base_adapter import _spawn_cli
+
+    pids, ready = tmp_path / "pids", tmp_path / "ready"
+    proc = await _spawn_cli(
+        create_subprocess_exec,
+        _sys.executable,
+        "-c",
+        _PI_TREE_SCRIPT,
+        str(pids),
+        str(ready),
+        mode,
+        stdin=PIPE,
+        stdout=PIPE,
+        stderr=PIPE,
+    )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5
+    while not ready.exists():
+        assert loop.time() < deadline, "child never became ready"
+        await asyncio.sleep(0.02)
+    leader, grandchild = (int(p) for p in pids.read_text().split())
+    return proc, leader, grandchild
+
+
+def _kill_test_pids(*pids: int) -> None:
+    import signal
+
+    for pid in pids:
+        with __import__("contextlib").suppress(ProcessLookupError, PermissionError):
+            _os.kill(pid, signal.SIGKILL)
+
+
+async def _wait_leader_exit(proc, timeout: float = 5) -> None:
+    # Not proc.wait(): it blocks while the grandchild holds the pipes.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while proc.returncode is None:
+        assert loop.time() < deadline, "leader did not exit"
+        await asyncio.sleep(0.02)
+
+
+@pytest.mark.asyncio
+async def test_spawn_starts_new_session(tmp_path):
+    process: FakeProcess
+
+    def on_command(command: dict) -> None:
+        if command["type"] == "get_state":
+            process.stdout.feed_json(
+                {
+                    "id": command["id"],
+                    "type": "response",
+                    "command": "get_state",
+                    "success": True,
+                    "data": {"sessionId": "session-1"},
+                }
+            )
+
+    process = FakeProcess(on_command)
+    rpc = _rpc(tmp_path)
+    with patch("a2a_adapter.integrations.pi.create_subprocess_exec", return_value=process) as spawn:
+        await rpc.start()
+    try:
+        if _os.name == "posix":
+            assert spawn.call_args.kwargs.get("start_new_session") is True
+    finally:
+        await rpc.close()
+
+
+@_posix_only
+@pytest.mark.asyncio
+async def test_terminate_signals_group_then_kills(tmp_path):
+    from tests.process_helpers import wait_dead
+
+    proc, leader, grandchild = await _spawn_pi_tree(tmp_path, "ignore-term")
+    try:
+        rpc = _rpc(tmp_path, timeout=0.2)
+        rpc._process = proc
+        await asyncio.wait_for(rpc._terminate_process(), 5)
+        assert await wait_dead(grandchild), "grandchild survived _terminate_process()"
+        assert await wait_dead(leader), "leader survived _terminate_process()"
+    finally:
+        _kill_test_pids(leader, grandchild)
+        await asyncio.wait_for(proc.wait(), 5)
+
+
+@_posix_only
+@pytest.mark.asyncio
+async def test_terminate_kills_group_after_leader_died(tmp_path):
+    from tests.process_helpers import wait_dead
+
+    proc, leader, grandchild = await _spawn_pi_tree(tmp_path, "exit")
+    try:
+        await _wait_leader_exit(proc)
+        rpc = _rpc(tmp_path, timeout=0.2)
+        rpc._process = proc
+        await asyncio.wait_for(rpc._terminate_process(), 5)
+        assert await wait_dead(grandchild), "grandchild survived after the leader exited"
+    finally:
+        _kill_test_pids(leader, grandchild)
+        await asyncio.wait_for(proc.wait(), 5)
+
+
+@_posix_only
+@pytest.mark.asyncio
+async def test_close_kills_group_after_leader_died(tmp_path):
+    from tests.process_helpers import wait_dead
+
+    proc, leader, grandchild = await _spawn_pi_tree(tmp_path, "exit")
+    try:
+        await _wait_leader_exit(proc)
+        rpc = _rpc(tmp_path, timeout=0.2)
+        rpc._process = proc
+        await asyncio.wait_for(rpc.close(), 5)
+        assert await wait_dead(grandchild), "grandchild survived rpc.close()"
+    finally:
+        _kill_test_pids(leader, grandchild)
+        await asyncio.wait_for(proc.wait(), 5)
+
+
+@_posix_only
+@pytest.mark.asyncio
+async def test_adapter_kill_children_now_kills_pi_group(tmp_path):
+    from a2a_adapter.integrations.pi import PiAdapter
+    from tests.process_helpers import wait_dead
+
+    proc, leader, grandchild = await _spawn_pi_tree(tmp_path, "sleep")
+    try:
+        rpc = _rpc(tmp_path, timeout=0.2)
+        rpc._process = proc
+        adapter = PiAdapter(working_dir=str(tmp_path))
+        adapter._rpc = rpc
+        adapter.kill_children_now()
+        assert await wait_dead(grandchild), "grandchild survived kill_children_now()"
+        assert await wait_dead(leader), "Pi survived kill_children_now()"
+    finally:
+        _kill_test_pids(leader, grandchild)
+        await asyncio.wait_for(proc.wait(), 5)

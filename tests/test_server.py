@@ -188,3 +188,195 @@ class TestPushSenderContext:
         monkeypatch.setattr(server_module.inspect, "signature", no_signature)
         server_module._push_sender(httpx.AsyncClient(), None)
         assert seen == [None]
+
+
+# ── Shutdown kills CLI children (Fix 1) ──────────────────────
+#
+# Never let a real serve()/run() finish after calling handle_exit here:
+# uvicorn re-raises every captured signal afterwards, which would signal the
+# pytest process. handle_exit is called on a constructed, never-run server.
+
+
+def _ready_server(**kwargs):
+    import uvicorn
+
+    from a2a_adapter.server import _ReadyServer
+
+    return _ReadyServer(uvicorn.Config(app=None, log_config=None), on_ready=lambda: None, **kwargs)
+
+
+class TestShutdownKillsChildren:
+    @pytest.fixture(autouse=True)
+    def _no_real_uvicorn_run(self, monkeypatch):
+        """serve_agent must never start a real server from these tests."""
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("uvicorn.run() called")
+
+        monkeypatch.setattr("a2a_adapter.server.uvicorn.run", refuse)
+
+    @pytest.fixture(autouse=True)
+    def _restore_sse_exit_flag(self, monkeypatch):
+        """sse_starlette hooks Server.handle_exit and sets a process-wide flag
+        that ends every later SSE response; put it back after each test."""
+        try:
+            from sse_starlette.sse import AppStatus
+        except ImportError:
+            return
+        monkeypatch.setattr(AppStatus, "should_exit", AppStatus.should_exit)
+
+    def test_sigint_calls_on_interrupt(self):
+        import signal
+        from unittest.mock import MagicMock
+
+        fake = MagicMock()
+        server = _ready_server(on_interrupt=fake)
+        server.handle_exit(signal.SIGINT, None)
+        fake.assert_called_once_with()
+        assert server.should_exit
+        server.handle_exit(signal.SIGINT, None)
+        fake.assert_called_once_with()
+
+    def test_sigterm_drains_then_second_signal_kills(self):
+        import signal
+        from unittest.mock import MagicMock
+
+        fake = MagicMock()
+        server = _ready_server(on_interrupt=fake)
+        server.handle_exit(signal.SIGTERM, None)
+        fake.assert_not_called()
+        assert server.should_exit
+        server.handle_exit(signal.SIGTERM, None)
+        fake.assert_called_once_with()
+
+    @pytest.mark.skipif(not hasattr(__import__("signal"), "SIGHUP"), reason="no SIGHUP")
+    def test_sighup_calls_on_interrupt(self):
+        import signal
+        from unittest.mock import MagicMock
+
+        fake = MagicMock()
+        server = _ready_server(on_interrupt=fake)
+        server.handle_exit(signal.SIGHUP, None)
+        fake.assert_called_once_with()
+        assert server.should_exit
+
+    @pytest.mark.skipif(not hasattr(__import__("signal"), "SIGHUP"), reason="no SIGHUP")
+    def test_capture_signals_also_handles_sighup(self, monkeypatch):
+        import signal
+        import threading
+
+        if threading.current_thread() is not threading.main_thread():
+            pytest.skip("signal handlers need the main thread")
+        server = _ready_server()
+        before = signal.getsignal(signal.SIGHUP)
+        server._captured_signals = []  # nothing to re-raise afterwards
+        with server.capture_signals():
+            assert signal.getsignal(signal.SIGHUP) == server.handle_exit
+        assert signal.getsignal(signal.SIGHUP) == before
+
+    @pytest.mark.skipif(not hasattr(__import__("signal"), "SIGHUP"), reason="no SIGHUP")
+    def test_ignored_sighup_stays_ignored(self):
+        import signal
+        import threading
+
+        if threading.current_thread() is not threading.main_thread():
+            pytest.skip("signal handlers need the main thread")
+        server = _ready_server()
+        server._captured_signals = []
+        previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)  # as under nohup
+        try:
+            with server.capture_signals():
+                assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+        finally:
+            signal.signal(signal.SIGHUP, previous)
+
+    def test_on_interrupt_error_is_swallowed(self):
+        import signal
+
+        def boom():
+            raise RuntimeError("boom")
+
+        server = _ready_server(on_interrupt=boom)
+        server.handle_exit(signal.SIGINT, None)
+        assert server.should_exit
+
+    @pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX process groups")
+    async def test_sigint_kills_inflight_grandchild(self, tmp_path):
+        import asyncio
+        import signal
+        from types import SimpleNamespace
+
+        from tests.process_helpers import (
+            TreeCliAdapter,
+            cancel_and_wait,
+            kill_pids,
+            wait_dead,
+            wait_for_pids,
+        )
+
+        adapter = TreeCliAdapter(tmp_path)
+        task = asyncio.create_task(adapter.invoke("hi", context=SimpleNamespace(task_id="t")))
+        try:
+            _, grandchild = await wait_for_pids(tmp_path)
+            server = _ready_server(on_interrupt=adapter.kill_children_now)
+            server.handle_exit(signal.SIGINT, None)
+            with pytest.raises(RuntimeError, match="exit code -9"):
+                await asyncio.wait_for(task, 5)
+            assert await wait_dead(grandchild)
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+    def test_serve_agent_without_display_uses_ready_server(self, monkeypatch, tmp_path):
+        import sys
+
+        from a2a_adapter import server as server_module
+
+        captured = {}
+        sock = tmp_path / "a2a.sock"
+
+        def fake_run(self):
+            captured["server"] = self
+            if self.config.uds:
+                open(self.config.uds, "w").close()
+            self.started = True
+
+        monkeypatch.setattr(server_module._ReadyServer, "run", fake_run)
+        adapter = StubAdapter()
+        server_module.serve_agent(adapter, port=9123)
+        server = captured["server"]
+        assert isinstance(server, server_module._ReadyServer)
+        assert server._on_interrupt == adapter.kill_children_now
+        assert server.config.port == 9123
+
+        server_module.serve_agent(adapter, uds=str(sock))
+        assert not sock.exists()
+
+        monkeypatch.setattr(sys, "path", list(sys.path))
+        server_module.serve_agent(adapter, app_dir=str(tmp_path))
+        assert sys.path[0] == str(tmp_path)
+
+    @pytest.mark.parametrize("kwargs", [{"workers": 2}, {"reload": True}])
+    def test_serve_agent_without_display_rejects_multi_process(self, kwargs):
+        from a2a_adapter import server as server_module
+
+        with pytest.raises(ValueError, match="workers/reload"):
+            server_module.serve_agent(StubAdapter(), **kwargs)
+
+    def test_serve_agent_without_display_failed_startup_exits_3(self, monkeypatch):
+        from a2a_adapter import server as server_module
+
+        monkeypatch.setattr(server_module._ReadyServer, "run", lambda self: None)
+        with pytest.raises(SystemExit) as exit_info:
+            server_module.serve_agent(StubAdapter())
+        assert exit_info.value.code == 3
+
+    def test_serve_agent_without_display_swallows_ctrl_c(self, monkeypatch):
+        from a2a_adapter import server as server_module
+
+        def interrupted(self):
+            self.started = True
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(server_module._ReadyServer, "run", interrupted)
+        server_module.serve_agent(StubAdapter())
