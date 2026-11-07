@@ -114,6 +114,10 @@ cancel, timeout, `close()` and shutdown kill the CLI's whole process group
 (shells, MCP servers, tool processes), not only the direct child. A helper
 that moves itself into a new session escapes the group; Windows still kills
 only the direct child.
+A cancel that finds no running CLI queues a per-task marker; the executor
+calls `_release_task(task_id)` once the task's `execute()` and `cancel()`
+have both finished, so unconsumed markers do not pile up. Adapters that keep
+their own per-task cancel markers (Pi, DeepSeek Harness) override it.
 `timeout` bounds the whole run for both invoke and stream (a streaming CLI
 that keeps printing still stops at the deadline). The stale-session retry
 gets a fresh budget.

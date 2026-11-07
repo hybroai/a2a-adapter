@@ -639,6 +639,9 @@ class PiAdapter(BaseA2AAdapter):
         if task_id == self._active_task_id and self._rpc is not None:
             await self._rpc.abort()
 
+    def _release_task(self, task_id: str) -> None:
+        self._cancelled_tasks.discard(task_id)
+
     def kill_children_now(self) -> None:
         """SIGKILL the Pi RPC process group, synchronously (no SIGTERM grace)."""
         rpc = self._rpc

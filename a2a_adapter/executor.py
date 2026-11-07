@@ -125,8 +125,18 @@ class AdapterAgentExecutor(AgentExecutor):
                 if cancelling is not None:
                     await asyncio.shield(cancelling)
             finally:
+                # Also on a second cancellation (e.g. shutdown) during the
+                # wait; cancel() then releases again, which is harmless.
                 if self._runs.get(context.task_id) is run:
                     del self._runs[context.task_id]
+                self._release(context.task_id)
+
+    def _release(self, task_id: str) -> None:
+        """Let the adapter forget the task's cancel markers."""
+        try:
+            self._adapter._release_task(task_id)
+        except Exception:
+            logger.debug("Adapter _release_task failed for task %s", task_id, exc_info=True)
 
     def _cancel_owns(self, task_id: str, run: _Run) -> bool:
         """Whether execute() must leave the terminal state alone.
@@ -451,6 +461,9 @@ class AdapterAgentExecutor(AgentExecutor):
             if self._cancelling.get(context.task_id) is cancelling:
                 del self._cancelling[context.task_id]
             cancelling.set_result(None)
+            # With an execute() in flight, it releases once it has returned.
+            if context.task_id not in self._runs:
+                self._release(context.task_id)
 
     async def _cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)

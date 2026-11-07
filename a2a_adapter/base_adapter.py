@@ -444,6 +444,20 @@ class BaseA2AAdapter(ABC):
             self._cancelled_tasks.add(task_id)
             logger.debug("Queued cancellation for task %s", task_id)
 
+    def _release_task(self, task_id: str) -> None:
+        """Forget per-task cancel markers once the task is done.
+
+        Called by the executor exactly once per task, after both execute()
+        and cancel() have finished, so a cancel that found no running CLI
+        (and queued a marker that no run consumed) does not leak. Private,
+        but adapters that keep their own per-task cancel markers may
+        override it. Without ``super().__init__()`` this is a no-op.
+        """
+        if not getattr(self, "_cli_runtime_enabled", False):
+            return
+        self._cancelled_tasks.discard(task_id)
+        self._killed_tasks.discard(task_id)
+
     def kill_children_now(self) -> None:
         """SIGKILL every running CLI process tree, synchronously.
 

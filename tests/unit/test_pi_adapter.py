@@ -180,6 +180,14 @@ class TestPiAdapter:
         assert fake_rpc.close_calls == 1
 
 
+class TestPiReleaseTask:
+    async def test_release_task_forgets_a_queued_cancel(self, adapter):
+        await adapter.cancel(context=_context("t1"))
+        assert "t1" in adapter._cancelled_tasks
+        adapter._release_task("t1")
+        assert adapter._cancelled_tasks == set()
+
+
 class TestPiMetadata:
     def test_metadata_declares_streaming(self, adapter):
         metadata = adapter.get_metadata()

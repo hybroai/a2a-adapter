@@ -831,6 +831,7 @@ class TestTerminalEnqueueRacingCancel:
     async def test_a_completed_state_being_enqueued_survives_the_cancel(self, request_context):
         adapter = StubAdapter(response="done")
         adapter.cancel = AsyncMock()
+        adapter._release_task = MagicMock()
         observer = MagicMock()
         executor = AdapterAgentExecutor(adapter, observer=observer)
         queue = _BlockingQueue(_is_status(COMPLETED))
@@ -849,6 +850,7 @@ class TestTerminalEnqueueRacingCancel:
         states = [e.status.state for e in queue.events if isinstance(e, TaskStatusUpdateEvent)]
         assert states == [WORKING, COMPLETED]
         adapter.cancel.assert_not_awaited()
+        adapter._release_task.assert_called_once_with(request_context.task_id)
         observer.task_completed.assert_called_once()
         observer.task_canceled.assert_not_called()
 
@@ -887,3 +889,89 @@ class TestTerminalEnqueueRacingCancel:
         assert finished_when_cleaned == [False]
         states = [e.status.state for e in queue.events if isinstance(e, TaskStatusUpdateEvent)]
         assert states == [WORKING, CANCELED]
+
+
+class _WaitsBeforeCli(process_helpers.TreeCliAdapter):
+    """A CLI adapter that is cancelled before it starts its CLI."""
+
+    def __init__(self, tmp_path):
+        super().__init__(tmp_path)
+        self.started = asyncio.Event()
+
+    async def stream(self, user_input, context_id=None, **kwargs):
+        self.started.set()
+        await asyncio.Event().wait()
+        async for chunk in super().stream(user_input, context_id, **kwargs):
+            yield chunk
+
+
+class TestReleaseTask:
+    async def test_a_cancel_before_the_cli_starts_leaves_no_marker(self, tmp_path):
+        adapter = _WaitsBeforeCli(tmp_path)
+        result, _, _, _ = await _run_and_cancel(adapter)  # waits for the stream to end
+
+        assert result.status.state == CANCELED
+        assert adapter._cancelled_tasks == set()
+        assert adapter._killed_tasks == set()
+
+    async def test_a_cancel_after_the_run_ended_leaves_no_marker(
+        self, tmp_path, request_context, event_queue
+    ):
+        class Quick(process_helpers.TreeCliAdapter):
+            def supports_streaming(self):
+                return False
+
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                return "done"
+
+        adapter = Quick(tmp_path)
+        executor = AdapterAgentExecutor(adapter)
+        await executor.execute(request_context, event_queue)
+        await executor.cancel(request_context, event_queue)
+
+        assert adapter._cancelled_tasks == set()
+        assert adapter._killed_tasks == set()
+
+    async def test_a_cancel_with_no_run_releases_once(self, request_context, event_queue):
+        adapter = StubAdapter()
+        adapter._release_task = MagicMock()
+        await AdapterAgentExecutor(adapter).cancel(request_context, event_queue)
+        adapter._release_task.assert_called_once_with(request_context.task_id)
+
+    async def test_a_cancel_during_a_run_releases_once_after_both_finished(
+        self, request_context, event_queue
+    ):
+        order: list[str] = []
+        started = asyncio.Event()
+
+        class Adapter(StubAdapter):
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                started.set()
+                await asyncio.Event().wait()
+
+            async def cancel(self, **kwargs):
+                await asyncio.sleep(0.01)
+                order.append("cancel done")
+
+            def _release_task(self, task_id):
+                order.append("released")
+
+        executor = AdapterAgentExecutor(Adapter())
+        run = asyncio.create_task(executor.execute(request_context, event_queue))
+        await started.wait()
+        run.cancel()
+        await executor.cancel(request_context, event_queue)
+        with pytest.raises(asyncio.CancelledError):
+            await run
+
+        assert order == ["cancel done", "released"]
+
+    async def test_a_failing_release_does_not_change_the_task_state(
+        self, request_context, event_queue
+    ):
+        adapter = StubAdapter()
+        adapter._release_task = MagicMock(side_effect=RuntimeError("cleanup broke"))
+        await AdapterAgentExecutor(adapter).cancel(request_context, event_queue)
+
+        events = await _collect_events(event_queue)
+        assert [e.status.state for e in events] == [CANCELED]
