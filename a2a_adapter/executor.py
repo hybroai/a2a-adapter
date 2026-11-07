@@ -31,8 +31,10 @@ from .exceptions import CancelledByAdapterError
 
 logger = logging.getLogger(__name__)
 
-# Upper bound for waiting on a terminal-state enqueue that was interrupted
-# by a cancellation.
+# How long a cancel whose adapter.cancel() raised waits for the interrupted
+# run to unwind before it gives up and reports the task failed. Also bounds
+# the wait for a terminal-state enqueue that a cancellation interrupted.
+# Longer than base_adapter._POST_KILL_WAIT, so a killed CLI can be reaped.
 _CANCEL_SETTLE_TIMEOUT = 10.0
 
 
@@ -331,23 +333,29 @@ class AdapterAgentExecutor(AgentExecutor):
         prev_chunk: str | Part | None = None
         artifact_id = uuid.uuid4().hex
 
+        stream = self._adapter.stream(user_input, context.context_id, context=context)
+        # Close the generator before returning, also when cancelled, so its
+        # cleanup (e.g. killing and reaping a CLI) runs before cancel()
+        # decides whether the run stopped, not later in a finalizer.
+        closing = (
+            contextlib.aclosing(stream) if hasattr(stream, "aclose") else contextlib.nullcontext()
+        )
         try:
-            async for chunk in self._adapter.stream(
-                user_input, context.context_id, context=context
-            ):
-                if self._is_empty_chunk(chunk):
-                    continue
+            async with closing:
+                async for chunk in stream:
+                    if self._is_empty_chunk(chunk):
+                        continue
 
-                if prev_chunk is not None:
-                    chunks.append(prev_chunk)
+                    if prev_chunk is not None:
+                        chunks.append(prev_chunk)
 
-                    await updater.add_artifact(
-                        self._to_parts(prev_chunk),
-                        artifact_id=artifact_id,
-                        append=len(chunks) > 1,
-                        last_chunk=False,
-                    )
-                prev_chunk = chunk
+                        await updater.add_artifact(
+                            self._to_parts(prev_chunk),
+                            artifact_id=artifact_id,
+                            append=len(chunks) > 1,
+                            last_chunk=False,
+                        )
+                    prev_chunk = chunk
         except CancelledByAdapterError:
             # cancel() already emitted the canceled state; sending the
             # held-back chunk now would follow the task's terminal state.
@@ -407,10 +415,15 @@ class AdapterAgentExecutor(AgentExecutor):
 
         Called by DefaultRequestHandler when a tasks/cancel request arrives.
         Delegates to the adapter's cancel() method, then emits canceled state.
-        If adapter.cancel() raises, the work may still be running, so the
-        task is not reported canceled: the executor sends a single failed
-        state ("Cancel failed: ...") and does not re-raise, so tasks/cancel
-        returns that failed task instead of a JSON-RPC error.
+        If adapter.cancel() raises, this waits (up to
+        ``_CANCEL_SETTLE_TIMEOUT``) for the interrupted run to unwind. If it
+        stopped (invoke() returned or raised, or the stream() generator was
+        closed), the task is canceled and the error is only logged.
+        Otherwise the work may still be running, so the task is not
+        reported canceled: the executor sends a single failed state
+        ("Cancel failed: ...") and does not re-raise, so tasks/cancel
+        returns that failed task instead of a JSON-RPC error. The decision
+        and its enqueue finish even if this call is cancelled.
 
         The interrupted execute() waits until this returns, so the event
         queue is still open for the terminal state even when
@@ -425,9 +438,16 @@ class AdapterAgentExecutor(AgentExecutor):
         # Registered before the first await, so execute() sees it.
         cancelling = asyncio.get_running_loop().create_future()
         self._cancelling[context.task_id] = cancelling
+        # execute() drops its own result while this runs, so the decision
+        # and its enqueue must finish even if this call is cancelled (e.g.
+        # on a client disconnect): run them as a shielded task.
+        decision = asyncio.ensure_future(self._cancel(context, event_queue))
         try:
-            await self._cancel(context, event_queue)
+            await asyncio.shield(decision)
         finally:
+            if not decision.done():
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await asyncio.wait_for(asyncio.shield(decision), _CANCEL_SETTLE_TIMEOUT)
             if self._cancelling.get(context.task_id) is cancelling:
                 del self._cancelling[context.task_id]
             cancelling.set_result(None)
@@ -445,24 +465,46 @@ class AdapterAgentExecutor(AgentExecutor):
         except Exception as e:
             # Not re-raised: the SDK would add a second, bare failed state
             # and hand the error to every stream subscriber.
-            logger.warning(
-                "Adapter cancel() raised for task %s; marking it failed: %s",
-                context.task_id,
-                e,
-            )
-            self._notify(
-                "task_failed",
-                context.task_id,
-                context.context_id,
-                f"cancel failed: {type(e).__name__}: {e}",
-            )
-            message = updater.new_agent_message([Part(text=f"Cancel failed: {e}")])
-            if run is not None:
-                run.terminal = True
-            await updater.failed(message=message)
-            return
+            if await self._run_stopped(run):
+                logger.warning(
+                    "Adapter cancel() raised for task %s, but the run had already "
+                    "stopped; reporting canceled: %s",
+                    context.task_id,
+                    e,
+                )
+            else:
+                logger.warning(
+                    "Adapter cancel() raised for task %s and the run is still going; "
+                    "marking it failed: %s",
+                    context.task_id,
+                    e,
+                )
+                self._notify(
+                    "task_failed",
+                    context.task_id,
+                    context.context_id,
+                    f"cancel failed: {type(e).__name__}: {e}",
+                )
+                message = updater.new_agent_message([Part(text=f"Cancel failed: {e}")])
+                if run is not None:
+                    run.terminal = True
+                await updater.failed(message=message)
+                return
 
         if run is not None:
             run.terminal = True
         self._notify("task_canceled", context.task_id, context.context_id)
         await updater.cancel()
+
+    @staticmethod
+    async def _run_stopped(run: _Run | None) -> bool:
+        """Wait, bounded, for the interrupted run to unwind; True if it did.
+
+        No run means no execute() is in flight, so nothing of ours runs.
+        """
+        if run is None:
+            return True
+        if not run.finished.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(run.finished.wait(), _CANCEL_SETTLE_TIMEOUT)
+        return run.finished.is_set()

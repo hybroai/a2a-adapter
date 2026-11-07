@@ -83,9 +83,12 @@ A2A Client → HTTP POST / (tasks/cancel)
     → AdapterAgentExecutor.cancel()
       → adapter.cancel()          (may await; CLI adapters kill the CLI's
                                    process group on POSIX)
-      → TaskUpdater.cancel()      (or one failed state, "Cancel failed: …",
-                                   if adapter.cancel() raised; the RPC
-                                   then returns that task, not an error)
+      → TaskUpdater.cancel()
+        if adapter.cancel() raised: wait (≤ _CANCEL_SETTLE_TIMEOUT, 10 s)
+        for the interrupted run to unwind; canceled if it stopped, else
+        one failed state ("Cancel failed: …"), which the RPC returns as
+        the task, not an error. The wait holds the SDK's per-task lock,
+        so a resubscribe or second cancel of that task waits too
 ```
 
 ## Core Components
@@ -130,7 +133,7 @@ Bridge between `BaseA2AAdapter` and A2A SDK's `AgentExecutor`:
 - Calls `adapter.invoke()` or `adapter.stream()`
 - Converts results to A2A events via `TaskUpdater`
 - Handles errors → `TaskUpdater.failed()`
-- Handles cancellation → `adapter.cancel()` + `TaskUpdater.cancel()`; if `adapter.cancel()` raises, the executor sends a single failed state with a "Cancel failed: …" message and does not re-raise, so `tasks/cancel` returns that failed task rather than a JSON-RPC error. The interrupted `execute()` waits for the cancel to finish, so this holds when `adapter.cancel()` awaits. While a cancel is in progress, `execute()` sends no terminal state and no late artifact (an error, or a result the adapter returns after `CancelledError`, is dropped); if `execute()` already sent its terminal state, the cancel sends none. Each run sends at most one terminal state
+- Handles cancellation → `adapter.cancel()` + `TaskUpdater.cancel()`; if `adapter.cancel()` raises, the executor waits, bounded, for the interrupted run to unwind: if it stopped, the task is canceled (the adapter error is logged); if not, the executor sends a single failed state with a "Cancel failed: …" message and does not re-raise, so `tasks/cancel` returns that failed task rather than a JSON-RPC error. "Stopped" means the adapter's `invoke()` returned or raised, or its `stream()` generator was closed (generators nested inside it are left to the event loop); an adapter that starts remote work must stop it in `cancel()` or on `CancelledError`. The interrupted `execute()` waits for the cancel to finish, so this holds when `adapter.cancel()` awaits. While a cancel is in progress, `execute()` sends no terminal state and no late artifact (an error, or a result the adapter returns after `CancelledError`, is dropped); if `execute()` already sent its terminal state, the cancel sends none. Each run sends at most one terminal state
 
 ### Server Layer (`server.py`)
 
