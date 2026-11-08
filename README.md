@@ -92,6 +92,10 @@ client can make the server send requests.
 | Python callable | `CallableAdapter` | Optional | [quickstart.py](examples/quickstart.py) |
 | Custom class | `BaseA2AAdapter` | Optional | [custom_adapter.py](examples/custom_adapter.py) |
 
+`CrewAIAdapter` runs each request on its own copy of the crew, and falls back
+to one request at a time for crews that cannot be faithfully copied (a timed-out
+kickoff may still overlap the next request there).
+
 ## 2. Use It as a CLI
 
 Start a classic local agent (Claude Code, Codex, Pi, OpenClaw, or DeepSeek
