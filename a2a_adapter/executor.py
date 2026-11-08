@@ -14,8 +14,11 @@ Design rationale:
 """
 
 import asyncio
+import contextlib
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Protocol
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -27,6 +30,20 @@ from .base_adapter import BaseA2AAdapter
 from .exceptions import CancelledByAdapterError
 
 logger = logging.getLogger(__name__)
+
+# How long a cancel whose adapter.cancel() raised waits for the interrupted
+# run to unwind before it gives up and reports the task failed. Also bounds
+# the wait for a terminal-state enqueue that a cancellation interrupted.
+# Longer than base_adapter._POST_KILL_WAIT, so a killed CLI can be reaped.
+_CANCEL_SETTLE_TIMEOUT = 10.0
+
+
+@dataclass
+class _Run:
+    """State of one execute() call, shared with a concurrent cancel()."""
+
+    finished: asyncio.Event  # set when _execute() has unwound
+    terminal: bool = False  # a terminal state was (or is being) enqueued
 
 
 class TaskObserver(Protocol):
@@ -75,6 +92,9 @@ class AdapterAgentExecutor(AgentExecutor):
         # queue once execute() returns, so execute() waits for these: the
         # terminal state that cancel() sends would otherwise be dropped.
         self._cancelling: dict[str, asyncio.Future[None]] = {}
+        # The execute() call in flight, by task id. The SDK runs at most one
+        # execute() per task at a time.
+        self._runs: dict[str, _Run] = {}
 
     def _notify(self, event: str, *args) -> None:
         if self._observer is None:
@@ -94,14 +114,69 @@ class AdapterAgentExecutor(AgentExecutor):
             context: Request context with user input, task_id, context_id.
             event_queue: Queue for publishing A2A lifecycle events.
         """
+        run = _Run(asyncio.Event())
+        self._runs[context.task_id] = run
         try:
-            await self._execute(context, event_queue)
+            await self._execute(context, event_queue, run)
         finally:
-            cancelling = self._cancelling.get(context.task_id)
-            if cancelling is not None:
-                await asyncio.shield(cancelling)
+            run.finished.set()
+            try:
+                cancelling = self._cancelling.get(context.task_id)
+                if cancelling is not None:
+                    await asyncio.shield(cancelling)
+            finally:
+                # Also on a second cancellation (e.g. shutdown) during the
+                # wait; cancel() then releases again, which is harmless.
+                if self._runs.get(context.task_id) is run:
+                    del self._runs[context.task_id]
+                self._release(context.task_id)
 
-    async def _execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+    def _release(self, task_id: str) -> None:
+        """Let the adapter forget the task's cancel markers."""
+        try:
+            self._adapter._release_task(task_id)
+        except Exception:
+            logger.debug("Adapter _release_task failed for task %s", task_id, exc_info=True)
+
+    def _cancel_owns(self, task_id: str, run: _Run) -> bool:
+        """Whether execute() must leave the terminal state alone.
+
+        True while a cancel is in progress (cancel() sends the terminal
+        state) or once a terminal state was already enqueued.
+        """
+        return task_id in self._cancelling or run.terminal
+
+    @staticmethod
+    async def _send_terminal(
+        run: _Run, send: Awaitable[None], on_sent: Callable[[], None] | None = None
+    ) -> None:
+        """Enqueue a terminal state, even if the caller is cancelled.
+
+        ``run.terminal`` is set before the first await, so a concurrent
+        cancel() defers to this state. If the caller is cancelled while the
+        enqueue is blocked (e.g. on a full queue), the enqueue keeps going
+        and is awaited, bounded, before the cancellation propagates: the
+        SDK closes the queue once execute() returns. ``on_sent`` runs once
+        the state was enqueued, also on that cancelled path.
+        """
+        run.terminal = True
+        enqueue = asyncio.ensure_future(send)
+        try:
+            await asyncio.shield(enqueue)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(enqueue), _CANCEL_SETTLE_TIMEOUT)
+            if on_sent and enqueue.done() and not enqueue.cancelled() and not enqueue.exception():
+                on_sent()
+            raise
+        except Exception:
+            # Nothing was enqueued: let the caller report the failure.
+            run.terminal = False
+            raise
+        if on_sent:
+            on_sent()
+
+    async def _execute(self, context: RequestContext, event_queue: EventQueue, run: _Run) -> None:
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)
 
         try:
@@ -130,15 +205,23 @@ class AdapterAgentExecutor(AgentExecutor):
             self._notify("task_working", context.task_id, context.context_id)
 
             if self._adapter.supports_streaming():
-                await self._execute_streaming(updater, user_input, context)
+                await self._execute_streaming(updater, user_input, context, run)
             else:
-                await self._execute_invoke(updater, user_input, context)
+                await self._execute_invoke(updater, user_input, context, run)
 
         except CancelledByAdapterError:
             # cancel() already emitted terminal canceled state.
             # Do NOT emit failed — just exit silently.
             logger.info("Task %s canceled by adapter", context.task_id)
         except Exception as e:
+            if self._cancel_owns(context.task_id, run):
+                # cancel() sends (or sent) the terminal state.
+                logger.info(
+                    "Task %s raised during cancel; ignored, cancel in progress: %s",
+                    context.task_id,
+                    e,
+                )
+                return
             logger.error(
                 "Adapter execution failed for task %s: %s",
                 context.task_id,
@@ -146,11 +229,21 @@ class AdapterAgentExecutor(AgentExecutor):
                 exc_info=True,
                 extra={"a2a_activity_reported": self._observer is not None},
             )
-            self._notify(
-                "task_failed", context.task_id, context.context_id, f"{type(e).__name__}: {e}"
-            )
+            error = f"{type(e).__name__}: {e}"
             error_msg = updater.new_agent_message([Part(text=f"Agent execution failed: {e}")])
-            await updater.failed(message=error_msg)
+            await self._send_final_state(
+                context,
+                run,
+                updater.failed(message=error_msg),
+                lambda: self._notify("task_failed", context.task_id, context.context_id, error),
+                failure=error,
+            )
+
+    def _drop_late_result(self, context: RequestContext, run: _Run) -> bool:
+        if not self._cancel_owns(context.task_id, run):
+            return False
+        logger.info("Task %s: result dropped, task is being canceled", context.task_id)
+        return True
 
     @staticmethod
     def _is_empty_chunk(chunk: str | Part) -> bool:
@@ -190,12 +283,16 @@ class AdapterAgentExecutor(AgentExecutor):
         updater: TaskUpdater,
         user_input: str,
         context: RequestContext,
+        run: _Run,
     ) -> None:
         """Non-streaming execution: invoke() -> single artifact -> complete.
 
         Handles both text-only (str) and multimodal (list[Part]) responses.
+        A result that arrives while the task is being canceled is dropped.
         """
         result = await self._adapter.invoke(user_input, context.context_id, context=context)
+        if self._drop_late_result(context, run):
+            return
 
         # Type detection: str (backward compatible) or list[Part] (multimodal)
         if isinstance(result, str):
@@ -214,11 +311,18 @@ class AdapterAgentExecutor(AgentExecutor):
         parts = [p for p in parts if not self._is_empty_chunk(p)]
         if parts:
             await updater.add_artifact(parts, name="response")
+        if self._drop_late_result(context, run):
+            return
 
         # Part(text="") would also serialize to {} in the completion message.
         message = updater.new_agent_message([Part(text=response_text or "[Empty response]")])
-        await updater.complete(message=message)
-        self._notify("task_completed", context.task_id, context.context_id, response_text, None)
+        await self._send_terminal(
+            run,
+            updater.complete(message=message),
+            lambda: self._notify(
+                "task_completed", context.task_id, context.context_id, response_text, None
+            ),
+        )
 
     def _extract_text_from_parts(self, parts: list[Part]) -> str:
         """Extract text content from multimodal parts for completion message.
@@ -241,6 +345,7 @@ class AdapterAgentExecutor(AgentExecutor):
         updater: TaskUpdater,
         user_input: str,
         context: RequestContext,
+        run: _Run,
     ) -> None:
         """Streaming execution: stream() -> incremental artifacts -> complete.
 
@@ -250,29 +355,41 @@ class AdapterAgentExecutor(AgentExecutor):
 
         If the stream raises mid-flight, the open artifact is closed with
         ``last_chunk=True`` before the exception propagates so downstream
-        consumers never see an unclosed artifact.
+        consumers never see an unclosed artifact. While the task is being
+        canceled nothing more is sent, so the artifact is left open
+        (``last_chunk=False``): no event may follow the canceled state.
         """
         chunks: list[str | Part] = []
         prev_chunk: str | Part | None = None
         artifact_id = uuid.uuid4().hex
 
+        stream = self._adapter.stream(user_input, context.context_id, context=context)
+        # Close the generator before returning, also when cancelled, so its
+        # cleanup (e.g. killing and reaping a CLI) runs before cancel()
+        # decides whether the run stopped, not later in a finalizer.
+        closing = (
+            contextlib.aclosing(stream) if hasattr(stream, "aclose") else contextlib.nullcontext()
+        )
         try:
-            async for chunk in self._adapter.stream(
-                user_input, context.context_id, context=context
-            ):
-                if self._is_empty_chunk(chunk):
-                    continue
+            async with closing:
+                async for chunk in stream:
+                    if self._cancel_owns(context.task_id, run):
+                        # A stream that ignored the cancel: stop reading it
+                        # (it is closed below) and send nothing more.
+                        break
+                    if self._is_empty_chunk(chunk):
+                        continue
 
-                if prev_chunk is not None:
-                    chunks.append(prev_chunk)
+                    if prev_chunk is not None:
+                        chunks.append(prev_chunk)
 
-                    await updater.add_artifact(
-                        self._to_parts(prev_chunk),
-                        artifact_id=artifact_id,
-                        append=len(chunks) > 1,
-                        last_chunk=False,
-                    )
-                prev_chunk = chunk
+                        await updater.add_artifact(
+                            self._to_parts(prev_chunk),
+                            artifact_id=artifact_id,
+                            append=len(chunks) > 1,
+                            last_chunk=False,
+                        )
+                    prev_chunk = chunk
         except CancelledByAdapterError:
             # cancel() already emitted the canceled state; sending the
             # held-back chunk now would follow the task's terminal state.
@@ -280,7 +397,7 @@ class AdapterAgentExecutor(AgentExecutor):
         except Exception:
             # Close the artifact with the held-back chunk, which has not
             # been sent yet; re-sending chunks[-1] would duplicate content.
-            if prev_chunk is not None:
+            if prev_chunk is not None and not self._cancel_owns(context.task_id, run):
                 chunks.append(prev_chunk)
                 await updater.add_artifact(
                     self._to_parts(prev_chunk),
@@ -290,6 +407,8 @@ class AdapterAgentExecutor(AgentExecutor):
                 )
             raise
 
+        if self._drop_late_result(context, run):
+            return
         if prev_chunk is not None:
             chunks.append(prev_chunk)
 
@@ -300,10 +419,17 @@ class AdapterAgentExecutor(AgentExecutor):
                 last_chunk=True,
             )
 
+        if self._drop_late_result(context, run):
+            return
         full_text = self._concatenate_chunks(chunks)
         message = updater.new_agent_message([Part(text=full_text)])
-        await updater.complete(message=message)
-        self._notify("task_completed", context.task_id, context.context_id, full_text, len(chunks))
+        await self._send_terminal(
+            run,
+            updater.complete(message=message),
+            lambda: self._notify(
+                "task_completed", context.task_id, context.context_id, full_text, len(chunks)
+            ),
+        )
 
     def _concatenate_chunks(self, chunks: list[str | Part]) -> str:
         """Concatenate text from streaming chunks for completion message.
@@ -328,13 +454,22 @@ class AdapterAgentExecutor(AgentExecutor):
 
         Called by DefaultRequestHandler when a tasks/cancel request arrives.
         Delegates to the adapter's cancel() method, then emits canceled state.
-        If adapter.cancel() raises, the work may still be running, so the
-        task is not reported canceled: it is marked failed and the error
-        propagates, so the SDK returns it to the caller.
+        If adapter.cancel() raises, this waits (up to
+        ``_CANCEL_SETTLE_TIMEOUT``) for the interrupted run to unwind. If it
+        stopped (invoke() returned or raised, or the stream() generator was
+        closed), the task is canceled and the error is only logged.
+        Otherwise the work may still be running, so the task is not
+        reported canceled: the executor sends a single failed state
+        ("Cancel failed: ...") and does not re-raise, so tasks/cancel
+        returns that failed task instead of a JSON-RPC error. The decision
+        and its enqueue finish even if this call is cancelled.
 
         The interrupted execute() waits until this returns, so the event
         queue is still open for the terminal state even when
-        adapter.cancel() awaits.
+        adapter.cancel() awaits. While a cancel is in progress, execute()
+        sends no terminal state and no late artifact of its own. If the
+        in-flight execute() had already sent one, this sends nothing; a
+        cancel that arrives after execute() returned is not covered.
 
         Args:
             context: Request context for the task being canceled.
@@ -343,33 +478,133 @@ class AdapterAgentExecutor(AgentExecutor):
         # Registered before the first await, so execute() sees it.
         cancelling = asyncio.get_running_loop().create_future()
         self._cancelling[context.task_id] = cancelling
+        # execute() drops its own result while this runs, so the decision
+        # and its enqueue must finish even if this call is cancelled (e.g.
+        # on a client disconnect): run them as a shielded task.
+        decision = asyncio.ensure_future(self._cancel(context, event_queue))
         try:
-            await self._cancel(context, event_queue)
+            await asyncio.shield(decision)
         finally:
+            if not decision.done():
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await asyncio.wait_for(asyncio.shield(decision), _CANCEL_SETTLE_TIMEOUT)
+            if not decision.done():
+                self._abandon(context.task_id, decision)
             if self._cancelling.get(context.task_id) is cancelling:
                 del self._cancelling[context.task_id]
             cancelling.set_result(None)
+            # With an execute() in flight, it releases once it has returned.
+            if context.task_id not in self._runs:
+                self._release(context.task_id)
+
+    def _abandon(self, task_id: str, decision: asyncio.Future[None]) -> None:
+        """Stop waiting for a cancel decision that outlasted the bounded wait.
+
+        The decision may still send its terminal state, so the run in
+        flight must send none of its own from here on; the markers that
+        adapter.cancel() may still queue are released when it finishes.
+        """
+        logger.warning("Cancel of task %s did not finish in time; left running", task_id)
+        run = self._runs.get(task_id)
+        if run is not None:
+            run.terminal = True
+
+        def done(future: asyncio.Future[None]) -> None:
+            if not future.cancelled() and future.exception() is not None:
+                logger.warning(
+                    "Abandoned cancel of task %s failed: %s", task_id, future.exception()
+                )
+            self._release(task_id)
+
+        decision.add_done_callback(done)
 
     async def _cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+        run = self._runs.get(context.task_id)
+        if run is not None and run.terminal:
+            # execute() sent (or is sending) the terminal state; the run is
+            # over. If that enqueue then fails or times out, no terminal
+            # state is sent (a known, rare gap).
+            logger.info("Task %s already reached a terminal state; not canceling", context.task_id)
+            return
 
         try:
             await self._adapter.cancel(context=context)
         except Exception as e:
-            logger.warning(
-                "Adapter cancel() raised for task %s; not marking it canceled: %s",
-                context.task_id,
-                e,
-            )
+            # Not re-raised: the SDK would add a second, bare failed state
+            # and hand the error to every stream subscriber.
+            if await self._run_stopped(run):
+                logger.warning(
+                    "Adapter cancel() raised for task %s, but the run had already "
+                    "stopped; reporting canceled: %s",
+                    context.task_id,
+                    e,
+                )
+            else:
+                logger.warning(
+                    "Adapter cancel() raised for task %s and the run is still going; "
+                    "marking it failed: %s",
+                    context.task_id,
+                    e,
+                )
+                error = f"cancel failed: {type(e).__name__}: {e}"
+                message = updater.new_agent_message([Part(text=f"Cancel failed: {e}")])
+                await self._send_final_state(
+                    context,
+                    run,
+                    updater.failed(message=message),
+                    lambda: self._notify("task_failed", context.task_id, context.context_id, error),
+                    failure=error,
+                )
+                return
+
+        await self._send_final_state(
+            context,
+            run,
+            updater.cancel(),
+            lambda: self._notify("task_canceled", context.task_id, context.context_id),
+        )
+
+    async def _send_final_state(
+        self,
+        context: RequestContext,
+        run: _Run | None,
+        send: Awaitable[None],
+        on_sent: Callable[[], None],
+        failure: str | None = None,
+    ) -> None:
+        """Send a state that nothing can recover from if its enqueue raises.
+
+        The error then leaves execute() or cancel() and the SDK adds its own
+        failed state. That one is the task's terminal state, so a run still
+        going must send no other, and the observer hears failed (``failure``,
+        or else the enqueue error) instead of what could not be sent. If the
+        cancel() call was itself cancelled the SDK never sees the error, so
+        no failed state follows that report (a known, rare gap).
+        """
+        # With no execute() in flight, nothing reads the flag.
+        owner = run if run is not None else _Run(asyncio.Event())
+        try:
+            await self._send_terminal(owner, send, on_sent)
+        except Exception as e:
+            owner.terminal = True
             self._notify(
                 "task_failed",
                 context.task_id,
                 context.context_id,
-                f"cancel failed: {type(e).__name__}: {e}",
+                failure or f"{type(e).__name__}: {e}",
             )
-            message = updater.new_agent_message([Part(text=f"Cancel failed: {e}")])
-            await updater.failed(message=message)
             raise
 
-        await updater.cancel()
-        self._notify("task_canceled", context.task_id, context.context_id)
+    @staticmethod
+    async def _run_stopped(run: _Run | None) -> bool:
+        """Wait, bounded, for the interrupted run to unwind; True if it did.
+
+        No run means no execute() is in flight, so nothing of ours runs.
+        """
+        if run is None:
+            return True
+        if not run.finished.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(run.finished.wait(), _CANCEL_SETTLE_TIMEOUT)
+        return run.finished.is_set()

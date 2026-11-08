@@ -1129,3 +1129,31 @@ async def test_atexit_kills_owned_group_after_leader_exited(tmp_path):
         if grandchild is not None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(grandchild, 9)
+
+
+# ── _release_task ─────────────────────────────────────────────
+
+
+class TestReleaseTask:
+    def test_is_a_no_op_without_the_cli_runtime(self):
+        class Plain(BaseA2AAdapter):
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                return ""
+
+        Plain()._release_task("t1")
+
+    async def test_forgets_both_cancel_markers(self, tmp_path):
+        class Cli(BaseA2AAdapter):
+            def __init__(self):
+                super().__init__(working_dir=str(tmp_path))
+
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                return ""
+
+        adapter = Cli()
+        await adapter.cancel(context=SimpleNamespace(task_id="t1"))  # queued
+        adapter._killed_tasks.add("t2")
+        adapter._release_task("t1")
+        adapter._release_task("t2")
+        assert adapter._cancelled_tasks == set()
+        assert adapter._killed_tasks == set()

@@ -1,19 +1,38 @@
 """Tests for AdapterAgentExecutor — the bridge between adapters and A2A SDK."""
 
 import asyncio
+import contextlib
+import os
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 from a2a.server.agent_execution import RequestContext
+from a2a.server.context import ServerCallContext
 from a2a.server.events import EventQueue
-from a2a.types import Part, TaskState
+from a2a.server.events.event_queue_v2 import EventQueueSource
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore
+from a2a.types import (
+    CancelTaskRequest,
+    GetTaskRequest,
+    Message,
+    Part,
+    Role,
+    SendMessageRequest,
+    Task,
+    TaskArtifactUpdateEvent,
+    TaskState,
+    TaskStatusUpdateEvent,
+)
 
+from a2a_adapter import executor as executor_module
 from a2a_adapter.base_adapter import BaseA2AAdapter
 from a2a_adapter.executor import AdapterAgentExecutor
-from a2a_adapter.server import to_a2a
+from a2a_adapter.server import build_agent_card, to_a2a
 
+from . import process_helpers
 from .conftest import (
     FailingAdapter,
     FailingStreamAdapter,
@@ -367,24 +386,24 @@ class TestCancel:
         assert [e.status.state for e in events] == [TaskState.TASK_STATE_CANCELED]
         observer.task_canceled.assert_called_once()
 
-    async def test_a_failed_adapter_cancel_is_not_reported_canceled(
-        self, request_context, event_queue
+    async def test_a_failed_cancel_with_no_run_reports_canceled(
+        self, request_context, event_queue, caplog
     ):
-        """The work may still be running, so the error propagates and the
-        SDK marks the task failed instead of canceled."""
+        """No execute() is in flight, so nothing of ours is running: the
+        task is canceled once, and the adapter error is only logged."""
         adapter = StubAdapter()
         adapter.cancel = AsyncMock(side_effect=RuntimeError("cancel failed"))
         observer = MagicMock()
         executor = AdapterAgentExecutor(adapter, observer=observer)
 
-        with pytest.raises(RuntimeError, match="cancel failed"):
+        with caplog.at_level("WARNING", logger="a2a_adapter.executor"):
             await executor.cancel(request_context, event_queue)
 
         events = await _collect_events(event_queue)
-        assert [e.status.state for e in events] == [TaskState.TASK_STATE_FAILED]
-        assert events[0].status.message.parts[0].text == "Cancel failed: cancel failed"
-        observer.task_canceled.assert_not_called()
-        assert "cancel failed" in observer.task_failed.call_args.args[2]
+        assert [e.status.state for e in events] == [TaskState.TASK_STATE_CANCELED]
+        observer.task_canceled.assert_called_once()
+        observer.task_failed.assert_not_called()
+        assert "cancel failed" in caplog.text
 
     async def test_an_interrupted_execute_waits_for_the_cancel(self, request_context, event_queue):
         """The SDK cancels execute() before it calls cancel() and closes the
@@ -479,13 +498,737 @@ class TestCancelOverJsonRpc:
         assert task["status"]["state"] == "canceled"
 
     @pytest.mark.parametrize("cancel_awaits", [False, True])
-    async def test_a_failed_adapter_cancel_fails_the_task(self, cancel_awaits):
-        adapter = self.Hanging(RuntimeError("robot did not stop"), cancel_awaits=cancel_awaits)
+    async def test_a_failed_cancel_of_a_run_that_stopped_reports_canceled(self, cancel_awaits):
+        adapter = self.Hanging(RuntimeError("already gone"), cancel_awaits=cancel_awaits)
         cancelled, task = await self._cancel(adapter)
-        assert "error" in cancelled
+        assert cancelled["result"]["status"]["state"] == "canceled"
+        assert task["status"]["state"] == "canceled"
+
+    async def test_a_failed_cancel_of_a_stuck_run_fails_the_task(self, monkeypatch):
+        monkeypatch.setattr(executor_module, "_CANCEL_SETTLE_TIMEOUT", 0.05)
+        adapter = Stubborn(RuntimeError("robot did not stop"))
+        try:
+            cancelled, task = await self._cancel(adapter)
+        finally:
+            adapter.release.set()
+        assert cancelled["result"]["status"]["state"] == "failed"
         assert task["status"]["state"] == "failed"
-        # The SDK adds its own failed status after this one, so the message
-        # may have moved to history.
-        messages = [*task.get("history", []), task["status"].get("message", {})]
-        texts = [part["text"] for m in messages for part in m.get("parts", [])]
-        assert "Cancel failed: robot did not stop" in texts
+        texts = [part["text"] for part in task["status"]["message"]["parts"]]
+        assert texts == ["Cancel failed: robot did not stop"]
+
+
+# ── tasks/cancel through the real request handler ─────────────
+
+SUBMITTED = TaskState.TASK_STATE_SUBMITTED
+WORKING = TaskState.TASK_STATE_WORKING
+CANCELED = TaskState.TASK_STATE_CANCELED
+FAILED = TaskState.TASK_STATE_FAILED
+COMPLETED = TaskState.TASK_STATE_COMPLETED
+
+
+def _status_text(status) -> str | None:
+    if not status.HasField("message"):
+        return None
+    return "".join(part.text for part in status.message.parts)
+
+
+def _describe(payload) -> tuple:
+    """A stream payload as a comparable tuple, read from public SDK types."""
+    if isinstance(payload, Task):
+        return ("task", payload.status.state)
+    if isinstance(payload, TaskStatusUpdateEvent):
+        return ("status", payload.status.state, _status_text(payload.status))
+    if isinstance(payload, TaskArtifactUpdateEvent):
+        text = "".join(part.text for part in payload.artifact.parts)
+        return ("artifact", text, payload.append, payload.last_chunk)
+    return (type(payload).__name__,)
+
+
+def _states(payloads) -> list:
+    """Status-carrying payloads as (kind, state) pairs, artifacts as ("artifact",)."""
+    return [d[:2] if d[0] != "artifact" else d[:1] for d in map(_describe, payloads)]
+
+
+async def _run_and_cancel(
+    adapter,
+    *,
+    observer=None,
+    payloads_before_cancel: int = 2,
+    wait_stream: bool = True,
+    cancel_timeout: float = 5,
+    ready=None,
+    executor=None,
+    store=None,
+):
+    """Stream a message through DefaultRequestHandler, then cancel the task.
+
+    Returns ``(cancel result or exception, stream payloads, stream task,
+    stored task)``. With ``wait_stream`` the stream is awaited first (for
+    runs that unwind); otherwise the stored task is read right after the
+    cancel, while a stuck run keeps the stream open.
+    """
+    executor = executor or AdapterAgentExecutor(adapter, observer)
+    handler = DefaultRequestHandler(
+        executor, store or InMemoryTaskStore(), build_agent_card(adapter, streaming=True)
+    )
+    call = ServerCallContext()
+    message = Message(role=Role.ROLE_USER, message_id=uuid.uuid4().hex, parts=[Part(text="hi")])
+    payloads: list = []
+
+    async def consume():
+        async for payload in handler.on_message_send_stream(
+            SendMessageRequest(message=message), call
+        ):
+            payloads.append(payload)
+
+    stream = asyncio.create_task(consume())
+    await asyncio.wait_for(ready() if ready else adapter.started.wait(), 5)
+    for _ in range(500):
+        if len(payloads) >= payloads_before_cancel:
+            break
+        await asyncio.sleep(0.01)
+    task_id = payloads[0].id
+    try:
+        result = await asyncio.wait_for(
+            handler.on_cancel_task(CancelTaskRequest(id=task_id), call), cancel_timeout
+        )
+    except Exception as e:  # the old behaviour: the cancel RPC raised
+        result = e
+    if wait_stream:
+        await asyncio.wait_for(asyncio.shield(stream), 5)
+    stored = await handler.on_get_task(GetTaskRequest(id=task_id), call)
+    return result, payloads, stream, stored
+
+
+class Stubborn(BaseA2AAdapter):
+    """invoke() ignores CancelledError until the test sets ``release``."""
+
+    def __init__(self, cancel_error: Exception | None = None):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancel_error = cancel_error
+
+    async def invoke(self, user_input, context_id=None, **kwargs):
+        self.started.set()
+        while not self.release.is_set():
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                continue
+        return "late"
+
+    async def cancel(self, context_id=None, **kwargs):
+        if self.cancel_error is not None:
+            raise self.cancel_error
+
+
+async def _finish(adapter: Stubborn, stream: asyncio.Task) -> None:
+    """Let a stubborn run finish and the stream end, whatever the test saw."""
+    adapter.release.set()
+    with contextlib.suppress(Exception, asyncio.CancelledError):
+        await asyncio.wait_for(asyncio.shield(stream), 5)
+
+
+def _refuse_status(monkeypatch, refused) -> None:
+    """Make the agent queue raise on the executor's enqueue of one state.
+
+    The SDK's own failed state carries no message and still lands.
+    """
+    original = EventQueueSource.enqueue_event
+
+    async def enqueue_event(self, event):
+        if _is_status(refused)(event) and (refused != FAILED or event.status.HasField("message")):
+            raise RuntimeError("store refused")
+        await original(self, event)
+
+    monkeypatch.setattr(EventQueueSource, "enqueue_event", enqueue_event)
+
+
+async def _stored_state(store, task_id, settled_on=FAILED):
+    """The stored state, polled: the stream can raise before the consumer saved it."""
+    for _ in range(200):
+        state = (await store.get(task_id, ServerCallContext())).status.state
+        if state == settled_on:
+            break
+        await asyncio.sleep(0.01)
+    return state
+
+
+async def _send_to_the_end(adapter, observer):
+    """Run one message through the real handler; return (error, stored state)."""
+    store = InMemoryTaskStore()
+    handler = DefaultRequestHandler(
+        AdapterAgentExecutor(adapter, observer), store, build_agent_card(adapter, streaming=True)
+    )
+    message = Message(role=Role.ROLE_USER, message_id=uuid.uuid4().hex, parts=[Part(text="hi")])
+    error = None
+    try:
+        async for _ in handler.on_message_send_stream(
+            SendMessageRequest(message=message), ServerCallContext()
+        ):
+            pass
+    except RuntimeError as e:
+        error = e
+    # The stream can raise before its first payload, so ask the observer.
+    return error, await _stored_state(store, observer.task_submitted.call_args.args[0])
+
+
+class TestCancelThroughHandler:
+    @pytest.mark.parametrize(
+        ("cancel_error", "refused", "reported"),
+        [
+            (None, CANCELED, "RuntimeError: store refused"),
+            (
+                RuntimeError("robot did not stop"),
+                FAILED,
+                "cancel failed: RuntimeError: robot did not stop",
+            ),
+        ],
+    )
+    async def test_a_refused_enqueue_in_cancel_leaves_the_sdk_failed_state_as_the_only_one(
+        self, monkeypatch, cancel_error, refused, reported
+    ):
+        """cancel() raises, so the SDK marks the task failed: the observer
+        hears failed, never canceled, and the run still going sends nothing
+        after it, even once it finishes."""
+        monkeypatch.setattr(executor_module, "_CANCEL_SETTLE_TIMEOUT", 0.05)
+        _refuse_status(monkeypatch, refused)
+        adapter = Stubborn(cancel_error)
+        observer = MagicMock()
+        executor = AdapterAgentExecutor(adapter, observer)
+        store = InMemoryTaskStore()
+        result, payloads, stream, _ = await _run_and_cancel(
+            adapter, executor=executor, store=store, wait_stream=False
+        )
+        try:
+            assert isinstance(result, RuntimeError), result
+            observer.task_canceled.assert_not_called()
+        finally:
+            await _finish(adapter, stream)
+        for _ in range(500):
+            if not executor._runs:
+                break
+            await asyncio.sleep(0.01)
+        assert not executor._runs
+
+        observer.task_completed.assert_not_called()
+        observer.task_failed.assert_called_once()
+        assert observer.task_failed.call_args.args[2] == reported
+        assert await _stored_state(store, payloads[0].id) == FAILED
+
+    async def test_a_refused_failed_enqueue_reports_the_adapter_error_once(self, monkeypatch):
+        _refuse_status(monkeypatch, FAILED)
+        observer = MagicMock()
+
+        error, stored = await _send_to_the_end(FailingAdapter(), observer)
+
+        assert isinstance(error, RuntimeError)
+        assert stored == FAILED
+        observer.task_failed.assert_called_once()
+        assert observer.task_failed.call_args.args[2] == "RuntimeError: boom"
+
+    async def test_a_refused_completed_enqueue_reports_failed_not_completed(self, monkeypatch):
+        """TaskUpdater latches on the first terminal attempt, so the executor
+        cannot send failed instead: the SDK's failed state is the result."""
+        _refuse_status(monkeypatch, COMPLETED)
+        observer = MagicMock()
+
+        error, stored = await _send_to_the_end(StubAdapter(), observer)
+
+        assert isinstance(error, RuntimeError)
+        assert stored == FAILED
+        observer.task_completed.assert_not_called()
+        observer.task_failed.assert_called_once()
+        assert observer.task_failed.call_args.args[2] == "RuntimeError: store refused"
+
+    async def test_a_failed_adapter_cancel_sends_one_failed(self, monkeypatch):
+        monkeypatch.setattr(executor_module, "_CANCEL_SETTLE_TIMEOUT", 0.05)
+        adapter = Stubborn(RuntimeError("robot did not stop"))
+        observer = MagicMock()
+        result, payloads, stream, stored = await _run_and_cancel(
+            adapter, observer=observer, wait_stream=False
+        )
+        try:
+            assert isinstance(result, Task), result
+            assert result.status.state == FAILED
+            assert stored.status.state == FAILED
+            assert _status_text(stored.status) == "Cancel failed: robot did not stop"
+            observer.task_failed.assert_called_once()
+            observer.task_canceled.assert_not_called()
+        finally:
+            await _finish(adapter, stream)
+        assert stream.exception() is None
+        # The late result is dropped: no artifact or completed after failed.
+        assert [_describe(p) for p in payloads] == [
+            ("task", SUBMITTED),
+            ("status", WORKING, None),
+            ("status", FAILED, "Cancel failed: robot did not stop"),
+        ]
+        observer.task_completed.assert_not_called()
+
+    async def test_an_error_raised_while_cancelling_does_not_fail_the_task(self):
+        class Converts(BaseA2AAdapter):
+            def __init__(self):
+                self.started = asyncio.Event()
+
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    raise RuntimeError("converted") from None
+
+        observer = MagicMock()
+        result, payloads, _, stored = await _run_and_cancel(Converts(), observer=observer)
+
+        assert result.status.state == CANCELED
+        assert _states(payloads) == [("task", SUBMITTED), ("status", WORKING), ("status", CANCELED)]
+        assert stored.status.state == CANCELED
+        observer.task_failed.assert_not_called()
+
+    async def test_an_error_raised_while_cancelling_a_stream_sends_nothing_after_canceled(self):
+        class ConvertsStream(BaseA2AAdapter):
+            def __init__(self):
+                self.started = asyncio.Event()
+
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                raise NotImplementedError
+
+            async def stream(self, user_input, context_id=None, **kwargs):
+                yield "a"
+                yield "b"
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    raise RuntimeError("converted") from None
+
+        result, payloads, _, stored = await _run_and_cancel(
+            ConvertsStream(), payloads_before_cancel=3
+        )
+
+        assert result.status.state == CANCELED
+        # The artifact stays open: nothing may follow the terminal state.
+        assert [_describe(p) for p in payloads] == [
+            ("task", SUBMITTED),
+            ("status", WORKING, None),
+            ("artifact", "a", False, False),
+            ("status", CANCELED, None),
+        ]
+        assert stored.status.state == CANCELED
+
+    async def test_a_result_returned_while_cancelling_is_dropped(self):
+        class Swallows(BaseA2AAdapter):
+            def __init__(self):
+                self.started = asyncio.Event()
+
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    return "late"
+
+        observer = MagicMock()
+        result, payloads, _, stored = await _run_and_cancel(Swallows(), observer=observer)
+
+        assert result.status.state == CANCELED
+        assert _states(payloads) == [("task", SUBMITTED), ("status", WORKING), ("status", CANCELED)]
+        assert stored.status.state == CANCELED
+        assert not stored.artifacts
+        observer.task_completed.assert_not_called()
+
+    @pytest.mark.parametrize("cancel_awaits", [False, True])
+    async def test_a_failed_cancel_after_the_run_stopped_reports_canceled(
+        self, cancel_awaits, caplog
+    ):
+        class Unwinds(BaseA2AAdapter):
+            def __init__(self):
+                self.started = asyncio.Event()
+
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    await asyncio.sleep(0.01)  # cleanup before unwinding
+                    raise
+
+            async def cancel(self, context_id=None, **kwargs):
+                if cancel_awaits:  # e.g. a remote "stop" call
+                    await asyncio.sleep(0.01)
+                raise RuntimeError("already gone")
+
+        observer = MagicMock()
+        with caplog.at_level("WARNING", logger="a2a_adapter.executor"):
+            result, payloads, _, stored = await _run_and_cancel(Unwinds(), observer=observer)
+
+        assert result.status.state == CANCELED
+        assert _states(payloads) == [("task", SUBMITTED), ("status", WORKING), ("status", CANCELED)]
+        assert stored.status.state == CANCELED
+        observer.task_canceled.assert_called_once()
+        observer.task_failed.assert_not_called()
+        assert "already gone" in caplog.text
+
+    @pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process groups")
+    async def test_a_failed_cancel_of_a_cli_run_reports_canceled(self, tmp_path):
+        class RaisingCli(process_helpers.TreeCliAdapter):
+            async def cancel(self, context_id=None, **kwargs):
+                await super().cancel(context_id, **kwargs)
+                raise RuntimeError("cancel bookkeeping failed")
+
+        adapter = RaisingCli(tmp_path)
+        pids: list[int] = []
+
+        async def ready():
+            pids.extend(await process_helpers.wait_for_pids(tmp_path))
+
+        try:
+            result, payloads, _, stored = await _run_and_cancel(adapter, ready=ready)
+            assert result.status.state == CANCELED
+            assert _states(payloads) == [
+                ("task", SUBMITTED),
+                ("status", WORKING),
+                ("status", CANCELED),
+            ]
+            assert stored.status.state == CANCELED
+            sh_pid, grandchild_pid = pids
+            assert await process_helpers.wait_dead(sh_pid)
+            assert await process_helpers.wait_dead(grandchild_pid)
+        finally:
+            process_helpers.kill_pids(tmp_path)
+
+    async def test_a_cancelled_cancel_still_sends_a_terminal_state(self, monkeypatch):
+        """The cancel RPC itself is cancelled during the settle wait (e.g. a
+        client disconnect): the decision and its enqueue still finish."""
+        monkeypatch.setattr(executor_module, "_CANCEL_SETTLE_TIMEOUT", 0.5)
+        adapter = Stubborn(RuntimeError("robot did not stop"))
+        result, payloads, stream, _ = await _run_and_cancel(
+            adapter, wait_stream=False, cancel_timeout=0.1
+        )
+        try:
+            assert isinstance(result, TimeoutError), result
+            for _ in range(300):
+                if any(_describe(p)[:2] == ("status", FAILED) for p in payloads):
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            await _finish(adapter, stream)
+        assert [_describe(p) for p in payloads] == [
+            ("task", SUBMITTED),
+            ("status", WORKING, None),
+            ("status", FAILED, "Cancel failed: robot did not stop"),
+        ]
+
+    @pytest.mark.parametrize("cancel_error", [None, RuntimeError("robot did not stop")])
+    async def test_a_stream_that_ignores_the_cancel_sends_nothing_after_it(
+        self, cancel_error, monkeypatch
+    ):
+        monkeypatch.setattr(executor_module, "_CANCEL_SETTLE_TIMEOUT", 0.05)
+
+        class StubbornStream(BaseA2AAdapter):
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                raise NotImplementedError
+
+            async def stream(self, user_input, context_id=None, **kwargs):
+                yield "a"
+                self.started.set()
+                while not self.release.is_set():
+                    try:
+                        await self.release.wait()
+                    except asyncio.CancelledError:
+                        continue
+                yield "late1"
+                yield "late2"
+
+            async def cancel(self, context_id=None, **kwargs):
+                if cancel_error is not None:
+                    raise cancel_error
+
+        adapter = StubbornStream()
+        result, payloads, stream, _ = await _run_and_cancel(adapter, wait_stream=False)
+        try:
+            expected = CANCELED if cancel_error is None else FAILED
+            assert result.status.state == expected
+        finally:
+            await _finish(adapter, stream)
+        assert stream.exception() is None
+        assert _states(payloads) == [("task", SUBMITTED), ("status", WORKING), ("status", expected)]
+
+
+class _BlockingQueue:
+    """An event queue whose enqueue blocks on ``gate`` for matching events."""
+
+    def __init__(self, blocks):
+        self.events: list = []
+        self.blocks = blocks
+        self.blocked = asyncio.Event()
+        self.gate = asyncio.Event()
+
+    async def enqueue_event(self, event):
+        if self.blocks(event) and not self.gate.is_set():
+            self.blocked.set()
+            await self.gate.wait()
+        self.events.append(event)
+
+
+def _is_status(state):
+    return lambda e: isinstance(e, TaskStatusUpdateEvent) and e.status.state == state
+
+
+class TestTerminalEnqueueRacingCancel:
+    async def test_a_refused_enqueue_under_a_cancelled_run_is_not_reported(self, request_context):
+        class BlocksThenRefuses(_BlockingQueue):
+            async def enqueue_event(self, event):
+                await super().enqueue_event(event)
+                if self.blocks(event):
+                    raise RuntimeError("store refused")
+
+        observer = MagicMock()
+        queue = BlocksThenRefuses(_is_status(FAILED))
+        executor = AdapterAgentExecutor(FailingAdapter(), observer=observer)
+        run = asyncio.create_task(executor.execute(request_context, queue))
+        await asyncio.wait_for(queue.blocked.wait(), 5)
+
+        run.cancel()
+        await asyncio.sleep(0)
+        queue.gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(run, 5)
+
+        observer.task_failed.assert_not_called()
+
+    async def test_failed_is_reported_only_once_it_was_enqueued(self, request_context):
+        observer = MagicMock()
+        queue = _BlockingQueue(_is_status(FAILED))
+        executor = AdapterAgentExecutor(FailingAdapter(), observer=observer)
+        run = asyncio.create_task(executor.execute(request_context, queue))
+        await asyncio.wait_for(queue.blocked.wait(), 5)
+
+        observer.task_failed.assert_not_called()
+
+        queue.gate.set()
+        await asyncio.wait_for(run, 5)
+        observer.task_failed.assert_called_once()
+
+    async def test_a_completed_state_being_enqueued_survives_the_cancel(self, request_context):
+        adapter = StubAdapter(response="done")
+        adapter.cancel = AsyncMock()
+        adapter._release_task = MagicMock()
+        observer = MagicMock()
+        executor = AdapterAgentExecutor(adapter, observer=observer)
+        queue = _BlockingQueue(_is_status(COMPLETED))
+
+        run = asyncio.create_task(executor.execute(request_context, queue))
+        await asyncio.wait_for(queue.blocked.wait(), 5)
+
+        run.cancel()  # what ActiveTask.cancel does, in this order
+        cancel = asyncio.create_task(executor.cancel(request_context, queue))
+        await asyncio.sleep(0.05)
+        queue.gate.set()
+        await asyncio.wait_for(cancel, 5)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(run, 5)
+
+        states = [e.status.state for e in queue.events if isinstance(e, TaskStatusUpdateEvent)]
+        assert states == [WORKING, COMPLETED]
+        adapter.cancel.assert_not_awaited()
+        adapter._release_task.assert_called_once_with(request_context.task_id)
+        observer.task_completed.assert_called_once()
+        observer.task_canceled.assert_not_called()
+
+    async def test_a_streaming_run_unwinds_before_cancel_decides(self, request_context):
+        executor_ref: list[AdapterAgentExecutor] = []
+        finished_when_cleaned: list[bool] = []
+
+        class Gen(BaseA2AAdapter):
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                raise NotImplementedError
+
+            async def stream(self, user_input, context_id=None, **kwargs):
+                try:
+                    yield "a"
+                    yield "b"
+                    yield "c"
+                finally:
+                    run = executor_ref[0]._runs[request_context.task_id]
+                    finished_when_cleaned.append(run.finished.is_set())
+
+            async def cancel(self, context_id=None, **kwargs):
+                raise RuntimeError("already gone")
+
+        executor = AdapterAgentExecutor(Gen())
+        executor_ref.append(executor)
+        queue = _BlockingQueue(lambda e: isinstance(e, TaskArtifactUpdateEvent))
+
+        run = asyncio.create_task(executor.execute(request_context, queue))
+        await asyncio.wait_for(queue.blocked.wait(), 5)
+        run.cancel()
+        cancel = asyncio.create_task(executor.cancel(request_context, queue))
+        await asyncio.wait_for(cancel, 5)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(run, 5)
+
+        assert finished_when_cleaned == [False]
+        states = [e.status.state for e in queue.events if isinstance(e, TaskStatusUpdateEvent)]
+        assert states == [WORKING, CANCELED]
+
+
+class _WaitsBeforeCli(process_helpers.TreeCliAdapter):
+    """A CLI adapter that is cancelled before it starts its CLI."""
+
+    def __init__(self, tmp_path):
+        super().__init__(tmp_path)
+        self.started = asyncio.Event()
+
+    async def stream(self, user_input, context_id=None, **kwargs):
+        self.started.set()
+        await asyncio.Event().wait()
+        async for chunk in super().stream(user_input, context_id, **kwargs):
+            yield chunk
+
+
+class TestReleaseTask:
+    async def test_a_cancel_before_the_cli_starts_leaves_no_marker(self, tmp_path):
+        adapter = _WaitsBeforeCli(tmp_path)
+        result, _, _, _ = await _run_and_cancel(adapter)  # waits for the stream to end
+
+        assert result.status.state == CANCELED
+        assert adapter._cancelled_tasks == set()
+        assert adapter._killed_tasks == set()
+
+    async def test_a_cancel_after_the_run_ended_leaves_no_marker(
+        self, tmp_path, request_context, event_queue
+    ):
+        class Quick(process_helpers.TreeCliAdapter):
+            def supports_streaming(self):
+                return False
+
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                return "done"
+
+        adapter = Quick(tmp_path)
+        executor = AdapterAgentExecutor(adapter)
+        await executor.execute(request_context, event_queue)
+        await executor.cancel(request_context, event_queue)
+
+        assert adapter._cancelled_tasks == set()
+        assert adapter._killed_tasks == set()
+
+    async def test_a_cancel_with_no_run_releases_once(self, request_context, event_queue):
+        adapter = StubAdapter()
+        adapter._release_task = MagicMock()
+        await AdapterAgentExecutor(adapter).cancel(request_context, event_queue)
+        adapter._release_task.assert_called_once_with(request_context.task_id)
+
+    async def test_a_cancel_during_a_run_releases_once_after_both_finished(
+        self, request_context, event_queue
+    ):
+        order: list[str] = []
+        started = asyncio.Event()
+
+        class Adapter(StubAdapter):
+            async def invoke(self, user_input, context_id=None, **kwargs):
+                started.set()
+                await asyncio.Event().wait()
+
+            async def cancel(self, **kwargs):
+                await asyncio.sleep(0.01)
+                order.append("cancel done")
+
+            def _release_task(self, task_id):
+                order.append("released")
+
+        executor = AdapterAgentExecutor(Adapter())
+        run = asyncio.create_task(executor.execute(request_context, event_queue))
+        await started.wait()
+        run.cancel()
+        await executor.cancel(request_context, event_queue)
+        with pytest.raises(asyncio.CancelledError):
+            await run
+
+        assert order == ["cancel done", "released"]
+
+    async def test_a_failing_release_does_not_change_the_task_state(
+        self, request_context, event_queue
+    ):
+        adapter = StubAdapter()
+        adapter._release_task = MagicMock(side_effect=RuntimeError("cleanup broke"))
+        await AdapterAgentExecutor(adapter).cancel(request_context, event_queue)
+
+        events = await _collect_events(event_queue)
+        assert [e.status.state for e in events] == [CANCELED]
+
+
+class TestCancelEdgeCases:
+    async def test_a_failing_completed_enqueue_is_not_mistaken_for_a_cancel(
+        self, request_context, caplog
+    ):
+        """Outside a cancel, a failed terminal enqueue still propagates (the
+        SDK then marks the task failed), as before; it is not swallowed as
+        "raised during cancel"."""
+
+        class RefusesCompleted(_BlockingQueue):
+            async def enqueue_event(self, event):
+                if _is_status(COMPLETED)(event):
+                    raise RuntimeError("store refused")
+                self.events.append(event)
+
+        queue = RefusesCompleted(lambda e: False)
+        observer = MagicMock()
+        executor = AdapterAgentExecutor(StubAdapter(), observer=observer)
+        with caplog.at_level("INFO", logger="a2a_adapter.executor"):
+            with pytest.raises(RuntimeError):
+                await executor.execute(request_context, queue)
+
+        assert "store refused" in caplog.text
+        assert "cancel in progress" not in caplog.text
+        observer.task_completed.assert_not_called()
+
+    async def test_a_cancel_given_up_on_drops_the_late_result(self, request_context, monkeypatch):
+        """cancel() is cancelled and its decision outlasts the bounded wait:
+        the stuck run must not send completed when it finally returns."""
+        monkeypatch.setattr(executor_module, "_CANCEL_SETTLE_TIMEOUT", 0.05)
+        adapter = Stubborn()
+        cancel_gate = asyncio.Event()
+
+        async def slow_cancel(**kwargs):
+            await cancel_gate.wait()
+
+        adapter.cancel = slow_cancel
+        released: list[str] = []
+        adapter._release_task = lambda task_id: released.append(
+            "after decision" if cancel_gate.is_set() else "before decision"
+        )
+        observer = MagicMock()
+        executor = AdapterAgentExecutor(adapter, observer=observer)
+        queue = _BlockingQueue(lambda e: False)
+
+        run = asyncio.create_task(executor.execute(request_context, queue))
+        await asyncio.wait_for(adapter.started.wait(), 5)
+        run.cancel()
+        cancel = asyncio.create_task(executor.cancel(request_context, queue))
+        await asyncio.sleep(0.01)
+        cancel.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(cancel, 5)
+
+        adapter.release.set()  # the stuck run returns "late"
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(run, 5)
+        cancel_gate.set()  # the abandoned decision finishes
+        for _ in range(100):
+            if not executor._cancelling and len(queue.events) > 2:
+                break
+            await asyncio.sleep(0.01)
+
+        states = [e.status.state for e in queue.events if isinstance(e, TaskStatusUpdateEvent)]
+        assert COMPLETED not in states
+        observer.task_completed.assert_not_called()
+        # The abandoned decision releases once it finished, so a marker
+        # its adapter.cancel() queued does not leak.
+        assert released[-1] == "after decision"

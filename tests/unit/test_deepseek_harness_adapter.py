@@ -765,6 +765,13 @@ class TestCancel:
     async def test_cancel_without_context_is_a_no_op(self, adapter, sdk):
         await adapter.cancel()
 
+    @pytest.mark.asyncio
+    async def test_release_task_forgets_a_queued_cancel(self, adapter, sdk):
+        await adapter.cancel(context=_context("t1"))
+        assert "t1" in adapter._cancelled_tasks
+        adapter._release_task("t1")
+        assert adapter._cancelled_tasks == set()
+
 
 class TestSerialization:
     @pytest.mark.asyncio

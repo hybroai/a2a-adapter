@@ -310,6 +310,9 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
         if task_id == self._active_task_id and harness is not None:
             await self._drop_harness(harness)
 
+    def _release_task(self, task_id: str) -> None:
+        self._cancelled_tasks.discard(task_id)
+
     # ──── Optional: metadata ────
 
     def get_metadata(self) -> AdapterMetadata:

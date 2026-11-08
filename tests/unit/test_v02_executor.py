@@ -339,9 +339,9 @@ async def test_cancel_delegates_to_adapter():
 
 
 @pytest.mark.asyncio
-async def test_cancel_adapter_error_is_not_reported_canceled():
-    """If adapter.cancel() raises, the work may still be running: the error
-    propagates (the SDK marks the task failed) and no canceled state is sent."""
+async def test_cancel_adapter_error_with_no_run_is_reported_canceled():
+    """If adapter.cancel() raises but no execute() is in flight, nothing of
+    ours is running: the task is canceled, not failed."""
     adapter = FailingCancelAdapter()
     executor = AdapterAgentExecutor(adapter)
 
@@ -352,10 +352,10 @@ async def test_cancel_adapter_error_is_not_reported_canceled():
         updater_instance = AsyncMock(spec=TaskUpdater)
         MockUpdater.return_value = updater_instance
 
-        with pytest.raises(RuntimeError, match="cancel failed"):
-            await executor.cancel(ctx, queue)
+        await executor.cancel(ctx, queue)
 
-        updater_instance.cancel.assert_not_awaited()
+        updater_instance.cancel.assert_awaited_once()
+        updater_instance.failed.assert_not_awaited()
 
 
 # ──── Test: Streaming Detection Routing ────

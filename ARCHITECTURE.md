@@ -77,11 +77,18 @@ A2A Client → HTTP POST / (tasks/cancel)
   → DefaultRequestHandler.on_cancel_task()
     → cancels the running execute() (CancelledError)
       → execute() waits for the cancel below before it returns,
-        so the event queue stays open for the terminal state
+        so the event queue stays open for the terminal state; until
+        then it sends no terminal state or late artifact of its own
+        (an open streaming artifact is left open)
     → AdapterAgentExecutor.cancel()
       → adapter.cancel()          (may await; CLI adapters kill the CLI's
                                    process group on POSIX)
-      → TaskUpdater.cancel()      (or failed, if adapter.cancel() raised)
+      → TaskUpdater.cancel()
+        if adapter.cancel() raised: wait (≤ _CANCEL_SETTLE_TIMEOUT, 10 s)
+        for the interrupted run to unwind; canceled if it stopped, else
+        one failed state ("Cancel failed: …"), which the RPC returns as
+        the task, not an error. The wait holds the SDK's per-task lock,
+        so a resubscribe or second cancel of that task waits too
 ```
 
 ## Core Components
@@ -107,6 +114,10 @@ cancel, timeout, `close()` and shutdown kill the CLI's whole process group
 (shells, MCP servers, tool processes), not only the direct child. A helper
 that moves itself into a new session escapes the group; Windows still kills
 only the direct child.
+A cancel that finds no running CLI queues a per-task marker; the executor
+calls `_release_task(task_id)` once the task's `execute()` and `cancel()`
+have both finished, so unconsumed markers do not pile up. Adapters that keep
+their own per-task cancel markers (Pi, DeepSeek Harness) override it.
 `timeout` bounds the whole run for both invoke and stream (a streaming CLI
 that keeps printing still stops at the deadline). The stale-session retry
 gets a fresh budget.
@@ -126,7 +137,7 @@ Bridge between `BaseA2AAdapter` and A2A SDK's `AgentExecutor`:
 - Calls `adapter.invoke()` or `adapter.stream()`
 - Converts results to A2A events via `TaskUpdater`
 - Handles errors → `TaskUpdater.failed()`
-- Handles cancellation → `adapter.cancel()` + `TaskUpdater.cancel()`; if `adapter.cancel()` raises, the task is marked failed with a "Cancel failed" message and the error propagates to the caller. The interrupted `execute()` waits for the cancel to finish, so this holds when `adapter.cancel()` awaits
+- Handles cancellation → `adapter.cancel()` + `TaskUpdater.cancel()`; if `adapter.cancel()` raises, the executor waits, bounded, for the interrupted run to unwind: if it stopped, the task is canceled (the adapter error is logged); if not, the executor sends a single failed state with a "Cancel failed: …" message and does not re-raise, so `tasks/cancel` returns that failed task rather than a JSON-RPC error. "Stopped" means the adapter's `invoke()` returned or raised, or its `stream()` generator was closed (generators nested inside it are left to the event loop); an adapter that starts remote work must stop it in `cancel()` or on `CancelledError`. The interrupted `execute()` waits for the cancel to finish, so this holds when `adapter.cancel()` awaits. While a cancel is in progress, `execute()` sends no terminal state and no late artifact (an error, or a result the adapter returns after `CancelledError`, is dropped); if `execute()` already sent its terminal state, the cancel sends none. Each run sends at most one terminal state
 
 ### Server Layer (`server.py`)
 
