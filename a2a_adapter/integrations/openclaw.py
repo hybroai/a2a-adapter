@@ -85,6 +85,9 @@ logger = logging.getLogger(__name__)
 # Valid thinking levels for OpenClaw
 VALID_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh"}
 
+# Longest JSON rendering of a structured error value kept in a failure message.
+_ERROR_JSON_MAX_LEN = 500
+
 
 def _extract_openclaw_status_hint(framework_output: Dict[str, Any]) -> str | None:
     """Extract a human-readable completion hint from OpenClaw metadata."""
@@ -103,20 +106,74 @@ def _extract_openclaw_status_hint(framework_output: Dict[str, Any]) -> str | Non
     return None
 
 
-def _extract_openclaw_failure_message(framework_output: Dict[str, Any]) -> str | None:
-    """Best-effort extraction of an explicit failure from OpenClaw JSON."""
-    for key in ("error", "error_message", "message"):
-        value = framework_output.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+def _openclaw_error_text(value: Any) -> str | None:
+    """Describe an error field's value, or return None if it reports no error."""
+    if isinstance(value, str):
+        return value.strip() or None
+    if not value:
+        return None
+    if isinstance(value, dict):
+        for key in ("message", "kind"):
+            text = value.get(key)
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+    return json.dumps(value, ensure_ascii=False)[:_ERROR_JSON_MAX_LEN]
+
+
+def _has_visible_payload(framework_output: Dict[str, Any]) -> bool:
+    """Whether any payload carries text or media the user would see."""
+    payloads = framework_output.get("payloads")
+    if not isinstance(payloads, list):
+        return False
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        text = payload.get("text")
+        if (isinstance(text, str) and text.strip()) or payload.get("mediaUrl"):
+            return True
+        if payload.get("mediaUrls"):
+            return True
+    return False
+
+
+def _all_payloads_failed(framework_output: Dict[str, Any]) -> str | None:
+    """Describe a run whose every payload is explicitly marked as an error."""
+    payloads = framework_output.get("payloads")
+    if not isinstance(payloads, list) or not payloads:
+        return None
+    if not all(isinstance(p, dict) and p.get("isError") is True for p in payloads):
+        return None
+    texts = [p["text"].strip() for p in payloads if isinstance(p.get("text"), str)]
+    return "\n\n".join(t for t in texts if t) or "Every OpenClaw payload was marked as an error"
+
+
+def _extract_openclaw_failure_message(
+    framework_output: Dict[str, Any], *, exit_failed: bool = False
+) -> str | None:
+    """Best-effort extraction of an explicit failure from OpenClaw JSON.
+
+    Only structured fields count; payload text is never inspected, so an
+    answer that talks about an error is not a failure. A top-level
+    ``message`` is too generic to outrank a visible answer, so it only counts
+    when there is none or when the run already failed (``exit_failed``).
+    """
+    for key in ("error", "error_message"):
+        text = _openclaw_error_text(framework_output.get(key))
+        if text:
+            return text
+
+    if exit_failed or not _has_visible_payload(framework_output):
+        message = framework_output.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
 
     meta = framework_output.get("meta")
     if isinstance(meta, dict):
         for key in ("error", "error_message"):
-            value = meta.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return None
+            text = _openclaw_error_text(meta.get(key))
+            if text:
+                return text
+    return _all_payloads_failed(framework_output)
 
 
 def _extract_json_from_output(stdout_text: str) -> dict:
@@ -181,6 +238,9 @@ class OpenClawAdapter(BaseA2AAdapter):
     than passed in argv, so prompts larger than the OS argument limit work.
     This needs an OpenClaw release that supports ``--message-file``; OpenClaw
     rejects prompts over 4 MiB.
+
+    A run that reports an error in its JSON output ends the task as failed,
+    even when the process exits with code 0.
 
     Example::
 
@@ -308,6 +368,14 @@ class OpenClawAdapter(BaseA2AAdapter):
 
     def _parse_invoke_output(self, stdout_text: str, context_key: str) -> ParseResult:
         parsed = _extract_json_from_output(stdout_text.strip())
+        if not isinstance(parsed, dict):
+            raise RuntimeError(f"OpenClaw returned unexpected JSON: {stdout_text[:200]}")
+        failure = _extract_openclaw_failure_message(parsed)
+        if failure:
+            raise RuntimeError(f"OpenClaw reported a failure: {failure}")
+        payloads = parsed.get("payloads", [])
+        if not isinstance(payloads, list) or not all(isinstance(p, dict) for p in payloads):
+            raise RuntimeError(f"OpenClaw returned unexpected JSON: {stdout_text[:200]}")
         return ParseResult(text=self._extract_response_text(parsed))
 
     def _extract_error(self, stdout_text: str) -> str | None:
@@ -317,7 +385,7 @@ class OpenClawAdapter(BaseA2AAdapter):
             return None
         if not isinstance(parsed, dict):
             return None
-        return _extract_openclaw_failure_message(parsed)
+        return _extract_openclaw_failure_message(parsed, exit_failed=True)
 
     def _binary_not_found_message(self) -> str:
         return (
