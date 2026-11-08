@@ -133,8 +133,8 @@ a2a-adapter codex --port 9011 -- --model <model> --sandbox workspace-write
 a2a-adapter openclaw --port 9008 --agent-id main --thinking high
 ```
 
-The adapter sends each prompt to OpenClaw on stdin, so long prompts are not
-limited by the OS command-line length; OpenClaw itself rejects prompts over
+The adapters send each prompt to Codex and OpenClaw on stdin, so long prompts
+are not limited by the OS command-line length; OpenClaw itself rejects prompts over
 4 MiB. This needs an OpenClaw release that supports
 `openclaw agent --message-file`.
 

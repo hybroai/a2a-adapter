@@ -36,6 +36,9 @@ _STALE_SESSION_PATTERNS = (
 class CodexAdapter(BaseA2AAdapter):
     """Adapter for the OpenAI Codex CLI.
 
+    Each prompt is sent on stdin, so it cannot be parsed as a CLI flag or
+    subcommand and is not limited by the OS command-line length.
+
     Args:
         bypass_approvals: Enable ``--dangerously-bypass-approvals-and-sandbox``.
             Disables all approval prompts and sandboxing. When ``None``
@@ -149,8 +152,11 @@ class CodexAdapter(BaseA2AAdapter):
             cmd.append("--dangerously-bypass-approvals-and-sandbox")
         if self.skip_git_check:
             cmd.append("--skip-git-repo-check")
-        cmd.append(message)
-        return CommandResult(args=cmd, used_resume=bool(thread_id))
+        # The prompt goes through stdin ("-" tells Codex to read it there): as
+        # an argument it could be parsed as a flag or subcommand, even a plain
+        # word like "help", and argv has a size limit.
+        cmd.append("-")
+        return CommandResult(args=cmd, used_resume=bool(thread_id), stdin=message)
 
     def _parse_invoke_output(self, stdout_text: str, context_key: str) -> ParseResult:
         thread_id: str | None = None
