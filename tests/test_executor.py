@@ -11,6 +11,7 @@ import pytest
 from a2a.server.agent_execution import RequestContext
 from a2a.server.context import ServerCallContext
 from a2a.server.events import EventQueue
+from a2a.server.events.event_queue_v2 import EventQueueSource
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import (
@@ -556,6 +557,8 @@ async def _run_and_cancel(
     wait_stream: bool = True,
     cancel_timeout: float = 5,
     ready=None,
+    executor=None,
+    store=None,
 ):
     """Stream a message through DefaultRequestHandler, then cancel the task.
 
@@ -564,9 +567,9 @@ async def _run_and_cancel(
     runs that unwind); otherwise the stored task is read right after the
     cancel, while a stuck run keeps the stream open.
     """
-    executor = AdapterAgentExecutor(adapter, observer)
+    executor = executor or AdapterAgentExecutor(adapter, observer)
     handler = DefaultRequestHandler(
-        executor, InMemoryTaskStore(), build_agent_card(adapter, streaming=True)
+        executor, store or InMemoryTaskStore(), build_agent_card(adapter, streaming=True)
     )
     call = ServerCallContext()
     message = Message(role=Role.ROLE_USER, message_id=uuid.uuid4().hex, parts=[Part(text="hi")])
@@ -626,7 +629,118 @@ async def _finish(adapter: Stubborn, stream: asyncio.Task) -> None:
         await asyncio.wait_for(asyncio.shield(stream), 5)
 
 
+def _refuse_status(monkeypatch, refused) -> None:
+    """Make the agent queue raise on the executor's enqueue of one state.
+
+    The SDK's own failed state carries no message and still lands.
+    """
+    original = EventQueueSource.enqueue_event
+
+    async def enqueue_event(self, event):
+        if _is_status(refused)(event) and (refused != FAILED or event.status.HasField("message")):
+            raise RuntimeError("store refused")
+        await original(self, event)
+
+    monkeypatch.setattr(EventQueueSource, "enqueue_event", enqueue_event)
+
+
+async def _stored_state(store, task_id, settled_on=FAILED):
+    """The stored state, polled: the stream can raise before the consumer saved it."""
+    for _ in range(200):
+        state = (await store.get(task_id, ServerCallContext())).status.state
+        if state == settled_on:
+            break
+        await asyncio.sleep(0.01)
+    return state
+
+
+async def _send_to_the_end(adapter, observer):
+    """Run one message through the real handler; return (error, stored state)."""
+    store = InMemoryTaskStore()
+    handler = DefaultRequestHandler(
+        AdapterAgentExecutor(adapter, observer), store, build_agent_card(adapter, streaming=True)
+    )
+    message = Message(role=Role.ROLE_USER, message_id=uuid.uuid4().hex, parts=[Part(text="hi")])
+    error = None
+    try:
+        async for _ in handler.on_message_send_stream(
+            SendMessageRequest(message=message), ServerCallContext()
+        ):
+            pass
+    except RuntimeError as e:
+        error = e
+    # The stream can raise before its first payload, so ask the observer.
+    return error, await _stored_state(store, observer.task_submitted.call_args.args[0])
+
+
 class TestCancelThroughHandler:
+    @pytest.mark.parametrize(
+        ("cancel_error", "refused", "reported"),
+        [
+            (None, CANCELED, "RuntimeError: store refused"),
+            (
+                RuntimeError("robot did not stop"),
+                FAILED,
+                "cancel failed: RuntimeError: robot did not stop",
+            ),
+        ],
+    )
+    async def test_a_refused_enqueue_in_cancel_leaves_the_sdk_failed_state_as_the_only_one(
+        self, monkeypatch, cancel_error, refused, reported
+    ):
+        """cancel() raises, so the SDK marks the task failed: the observer
+        hears failed, never canceled, and the run still going sends nothing
+        after it, even once it finishes."""
+        monkeypatch.setattr(executor_module, "_CANCEL_SETTLE_TIMEOUT", 0.05)
+        _refuse_status(monkeypatch, refused)
+        adapter = Stubborn(cancel_error)
+        observer = MagicMock()
+        executor = AdapterAgentExecutor(adapter, observer)
+        store = InMemoryTaskStore()
+        result, payloads, stream, _ = await _run_and_cancel(
+            adapter, executor=executor, store=store, wait_stream=False
+        )
+        try:
+            assert isinstance(result, RuntimeError), result
+            observer.task_canceled.assert_not_called()
+        finally:
+            await _finish(adapter, stream)
+        for _ in range(500):
+            if not executor._runs:
+                break
+            await asyncio.sleep(0.01)
+        assert not executor._runs
+
+        observer.task_completed.assert_not_called()
+        observer.task_failed.assert_called_once()
+        assert observer.task_failed.call_args.args[2] == reported
+        assert await _stored_state(store, payloads[0].id) == FAILED
+
+    async def test_a_refused_failed_enqueue_reports_the_adapter_error_once(self, monkeypatch):
+        _refuse_status(monkeypatch, FAILED)
+        observer = MagicMock()
+
+        error, stored = await _send_to_the_end(FailingAdapter(), observer)
+
+        assert isinstance(error, RuntimeError)
+        assert stored == FAILED
+        observer.task_failed.assert_called_once()
+        assert observer.task_failed.call_args.args[2] == "RuntimeError: boom"
+
+    async def test_a_refused_completed_enqueue_reports_failed_not_completed(self, monkeypatch):
+        """TaskUpdater latches on the first terminal attempt, so the executor
+        cannot send failed instead: the SDK's failed state is the result."""
+        _refuse_status(monkeypatch, COMPLETED)
+        observer = MagicMock()
+
+        error, stored = await _send_to_the_end(StubAdapter(), observer)
+
+        assert isinstance(error, RuntimeError)
+        assert stored == FAILED
+        observer.task_completed.assert_not_called()
+        observer.task_failed.assert_called_once()
+        assert observer.task_failed.call_args.args[2] == "RuntimeError: store refused"
+
     async def test_a_failed_adapter_cancel_sends_one_failed(self, monkeypatch):
         monkeypatch.setattr(executor_module, "_CANCEL_SETTLE_TIMEOUT", 0.05)
         adapter = Stubborn(RuntimeError("robot did not stop"))
@@ -867,6 +981,40 @@ def _is_status(state):
 
 
 class TestTerminalEnqueueRacingCancel:
+    async def test_a_refused_enqueue_under_a_cancelled_run_is_not_reported(self, request_context):
+        class BlocksThenRefuses(_BlockingQueue):
+            async def enqueue_event(self, event):
+                await super().enqueue_event(event)
+                if self.blocks(event):
+                    raise RuntimeError("store refused")
+
+        observer = MagicMock()
+        queue = BlocksThenRefuses(_is_status(FAILED))
+        executor = AdapterAgentExecutor(FailingAdapter(), observer=observer)
+        run = asyncio.create_task(executor.execute(request_context, queue))
+        await asyncio.wait_for(queue.blocked.wait(), 5)
+
+        run.cancel()
+        await asyncio.sleep(0)
+        queue.gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(run, 5)
+
+        observer.task_failed.assert_not_called()
+
+    async def test_failed_is_reported_only_once_it_was_enqueued(self, request_context):
+        observer = MagicMock()
+        queue = _BlockingQueue(_is_status(FAILED))
+        executor = AdapterAgentExecutor(FailingAdapter(), observer=observer)
+        run = asyncio.create_task(executor.execute(request_context, queue))
+        await asyncio.wait_for(queue.blocked.wait(), 5)
+
+        observer.task_failed.assert_not_called()
+
+        queue.gate.set()
+        await asyncio.wait_for(run, 5)
+        observer.task_failed.assert_called_once()
+
     async def test_a_completed_state_being_enqueued_survives_the_cancel(self, request_context):
         adapter = StubAdapter(response="done")
         adapter.cancel = AsyncMock()

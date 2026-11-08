@@ -229,11 +229,15 @@ class AdapterAgentExecutor(AgentExecutor):
                 exc_info=True,
                 extra={"a2a_activity_reported": self._observer is not None},
             )
-            self._notify(
-                "task_failed", context.task_id, context.context_id, f"{type(e).__name__}: {e}"
-            )
+            error = f"{type(e).__name__}: {e}"
             error_msg = updater.new_agent_message([Part(text=f"Agent execution failed: {e}")])
-            await self._send_terminal(run, updater.failed(message=error_msg))
+            await self._send_final_state(
+                context,
+                run,
+                updater.failed(message=error_msg),
+                lambda: self._notify("task_failed", context.task_id, context.context_id, error),
+                failure=error,
+            )
 
     def _drop_late_result(self, context: RequestContext, run: _Run) -> bool:
         if not self._cancel_owns(context.task_id, run):
@@ -543,22 +547,54 @@ class AdapterAgentExecutor(AgentExecutor):
                     context.task_id,
                     e,
                 )
-                self._notify(
-                    "task_failed",
-                    context.task_id,
-                    context.context_id,
-                    f"cancel failed: {type(e).__name__}: {e}",
-                )
+                error = f"cancel failed: {type(e).__name__}: {e}"
                 message = updater.new_agent_message([Part(text=f"Cancel failed: {e}")])
-                if run is not None:
-                    run.terminal = True
-                await updater.failed(message=message)
+                await self._send_final_state(
+                    context,
+                    run,
+                    updater.failed(message=message),
+                    lambda: self._notify("task_failed", context.task_id, context.context_id, error),
+                    failure=error,
+                )
                 return
 
-        if run is not None:
-            run.terminal = True
-        self._notify("task_canceled", context.task_id, context.context_id)
-        await updater.cancel()
+        await self._send_final_state(
+            context,
+            run,
+            updater.cancel(),
+            lambda: self._notify("task_canceled", context.task_id, context.context_id),
+        )
+
+    async def _send_final_state(
+        self,
+        context: RequestContext,
+        run: _Run | None,
+        send: Awaitable[None],
+        on_sent: Callable[[], None],
+        failure: str | None = None,
+    ) -> None:
+        """Send a state that nothing can recover from if its enqueue raises.
+
+        The error then leaves execute() or cancel() and the SDK adds its own
+        failed state. That one is the task's terminal state, so a run still
+        going must send no other, and the observer hears failed (``failure``,
+        or else the enqueue error) instead of what could not be sent. If the
+        cancel() call was itself cancelled the SDK never sees the error, so
+        no failed state follows that report (a known, rare gap).
+        """
+        # With no execute() in flight, nothing reads the flag.
+        owner = run if run is not None else _Run(asyncio.Event())
+        try:
+            await self._send_terminal(owner, send, on_sent)
+        except Exception as e:
+            owner.terminal = True
+            self._notify(
+                "task_failed",
+                context.task_id,
+                context.context_id,
+                failure or f"{type(e).__name__}: {e}",
+            )
+            raise
 
     @staticmethod
     async def _run_stopped(run: _Run | None) -> bool:
