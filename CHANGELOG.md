@@ -8,6 +8,23 @@ Conventional Commits. Earlier entries follow
 [Keep a Changelog](https://keepachangelog.com/). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1](https://github.com/hybroai/a2a-adapter/compare/v0.3.0...v0.3.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **executor:** forget an adapter's cancel markers once the task ends ([eb33770](https://github.com/hybroai/a2a-adapter/commit/eb3377038f6244b22a39cfaa0cc3f8f6ddfb1441))
+* **executor:** keep one terminal state when a cancel is abandoned or an enqueue fails ([512a408](https://github.com/hybroai/a2a-adapter/commit/512a40837983c2cdd4d459db4ab119c519637e59))
+* **executor:** leave the terminal state to cancel() while a cancel is in progress ([b811f94](https://github.com/hybroai/a2a-adapter/commit/b811f9454a75a75d67ad7f49700e5f2f863834b7))
+* **executor:** notify task_completed only once completed was enqueued ([e5a3057](https://github.com/hybroai/a2a-adapter/commit/e5a305780c2f7741ac2fc1060326ac218eb555b7))
+* **executor:** notify terminal states only after their enqueue ([8b00725](https://github.com/hybroai/a2a-adapter/commit/8b007259246f0375451d9a5ce033bfe320773c9a))
+* **executor:** report canceled when the run stopped although adapter.cancel() failed ([e0728e9](https://github.com/hybroai/a2a-adapter/commit/e0728e94a7192d0250f128af54afaa5cbeabea37))
+* **executor:** send a single failed state when adapter.cancel() fails ([0516a44](https://github.com/hybroai/a2a-adapter/commit/0516a4469b1840c8cd878a02f24ce1886052c1e3))
+* **executor:** send one consistent terminal state on task cancel ([e02ade3](https://github.com/hybroai/a2a-adapter/commit/e02ade32ebd3955bb938c085f32373150319351c))
+* **executor:** stop reading a stream that ignores the cancel ([0878516](https://github.com/hybroai/a2a-adapter/commit/0878516158b8d8858c07e18ccd5ee3d59a8d85ae))
+* **server:** pin push-notification connections to the validated IP ([8a861d7](https://github.com/hybroai/a2a-adapter/commit/8a861d76973388dbc4de68c0f2e65fe37c61c186))
+* **server:** pin push-notification connections to the validated IP ([f47b9eb](https://github.com/hybroai/a2a-adapter/commit/f47b9ebc233ff2c327f013270d6bb0f98423efd2))
+
 ## [0.3.0](https://github.com/hybroai/a2a-adapter/compare/v0.2.19...v0.3.0) (2026-11-07)
 
 
