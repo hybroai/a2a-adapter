@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter, default_state_dir
-from ..exceptions import CancelledByAdapterError
+from ..exceptions import AgentTimeoutError, CancelledByAdapterError
 
 logger = logging.getLogger(__name__)
 
@@ -470,7 +470,7 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
         if not done:
             future.add_done_callback(_consume_result)
             await self._drop_harness(harness)
-            raise TimeoutError(f"DeepSeek Harness turn timed out after {self.timeout} seconds")
+            raise AgentTimeoutError(f"DeepSeek Harness turn timed out after {self.timeout} seconds")
 
         try:
             return future.result()

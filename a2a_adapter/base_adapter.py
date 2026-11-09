@@ -30,7 +30,7 @@ from typing import AsyncIterator
 
 from a2a.types import Part
 
-from .exceptions import CancelledByAdapterError
+from .exceptions import AgentTimeoutError, CancelledByAdapterError
 
 logger = logging.getLogger(__name__)
 
@@ -545,7 +545,7 @@ class BaseA2AAdapter(ABC):
                 aborted = True
                 _kill_process_tree(proc)
                 await _wait_reaped(proc)
-                raise RuntimeError(f"Command timed out after {self.timeout} seconds")
+                raise AgentTimeoutError(f"Command timed out after {self.timeout} seconds")
             except asyncio.CancelledError:
                 # Task cancelled (tasks/cancel or shutdown): don't orphan the tree
                 aborted = True
@@ -744,7 +744,7 @@ class BaseA2AAdapter(ABC):
         except asyncio.TimeoutError:
             aborted = True
             _kill_process_tree(proc)
-            raise RuntimeError(f"Command timed out after {self.timeout} seconds")
+            raise AgentTimeoutError(f"Command timed out after {self.timeout} seconds")
         except (GeneratorExit, asyncio.CancelledError):
             aborted = True
             _kill_process_tree(proc)
@@ -787,7 +787,7 @@ class BaseA2AAdapter(ABC):
                     self._killed_tasks.discard(task_id)
 
         if tail_timed_out:
-            raise RuntimeError(f"Command timed out after {self.timeout} seconds")
+            raise AgentTimeoutError(f"Command timed out after {self.timeout} seconds")
 
         stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
 

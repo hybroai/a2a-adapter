@@ -16,6 +16,7 @@ from a2a_adapter.base_adapter import (
     ParseResult,
     default_state_dir,
 )
+from a2a_adapter.exceptions import AgentTimeoutError
 
 
 # ── AdapterMetadata defaults ─────────────────────────────────
@@ -373,7 +374,7 @@ class TestProcessTreeKill:
         task = asyncio.create_task(adapter.invoke("hi", context=SimpleNamespace(task_id="t")))
         try:
             _, grandchild = await wait_for_pids(tmp_path)
-            with pytest.raises(RuntimeError, match="timed out after 1 seconds"):
+            with pytest.raises(AgentTimeoutError, match="timed out after 1 seconds"):
                 await asyncio.wait_for(task, 5)
             assert await wait_dead(grandchild), "grandchild survived the timeout"
         finally:
@@ -623,7 +624,7 @@ class TestProcessTreeKill:
         monkeypatch.setattr(
             "a2a_adapter.base_adapter.create_subprocess_exec", AsyncMock(return_value=proc)
         )
-        with pytest.raises(RuntimeError, match="timed out"):
+        with pytest.raises(AgentTimeoutError, match="timed out"):
             await asyncio.wait_for(adapter.invoke("hi", context=context), 5)
         proc.kill.assert_called()
         assert "t-timeout" not in adapter._killed_tasks
@@ -714,7 +715,7 @@ class TestStreamingDeadline:
         loop = asyncio.get_running_loop()
         start = loop.time()
         try:
-            with pytest.raises(RuntimeError, match="timed out after 1 seconds"):
+            with pytest.raises(AgentTimeoutError, match="timed out after 1 seconds"):
                 await asyncio.wait_for(self._consume(adapter, chunks), 5)
             assert loop.time() - start < 3
             assert chunks and chunks[0] == "line 0"
@@ -724,7 +725,7 @@ class TestStreamingDeadline:
     async def test_streaming_deadline_kills_child(self, tmp_path, record_spawns):
         adapter = record_spawns(_PythonStreamAdapter(tmp_path, _TICKER, timeout=1))
         try:
-            with pytest.raises(RuntimeError, match="timed out"):
+            with pytest.raises(AgentTimeoutError, match="timed out"):
                 await asyncio.wait_for(self._consume(adapter, []), 5)
             assert adapter.spawned[0].returncode is not None
             assert adapter._active_processes == {}
@@ -736,7 +737,7 @@ class TestStreamingDeadline:
         loop = asyncio.get_running_loop()
         start = loop.time()
         try:
-            with pytest.raises(RuntimeError, match="timed out after 1 seconds"):
+            with pytest.raises(AgentTimeoutError, match="timed out after 1 seconds"):
                 await asyncio.wait_for(self._consume(adapter, []), 5)
             assert loop.time() - start < 3
             assert adapter.spawned[0].returncode is not None

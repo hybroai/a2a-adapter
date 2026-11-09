@@ -32,6 +32,7 @@ from a2a_adapter import executor as executor_module
 from a2a_adapter.base_adapter import BaseA2AAdapter
 from a2a_adapter.exceptions import UserFacingError
 from a2a_adapter.executor import AdapterAgentExecutor
+from a2a_adapter.integrations._framework import run_with_timeout
 from a2a_adapter.integrations.claude_code import ClaudeCodeAdapter
 from a2a_adapter.integrations.langgraph import LangGraphAdapter
 from a2a_adapter.integrations.n8n import N8nAdapter
@@ -1441,3 +1442,19 @@ class TestRealAdaptersHideErrors:
             result, stored = await _send(adapter)
         assert stored.status.state == FAILED
         assert "secret-token" not in _wire(result) + _wire(stored)
+
+
+async def test_an_adapter_timeout_reaches_the_client_readable():
+    class Slow(BaseA2AAdapter):
+        async def invoke(self, user_input, context_id=None, **kwargs):
+            return await run_with_timeout(asyncio.sleep(5), 0.01, "slow thing")
+
+    _, stored = await _send(Slow())
+    assert _status_text(stored.status) == (
+        "Agent execution failed: slow thing timed out after 0.01 seconds"
+    )
+
+
+async def test_an_http_library_timeout_stays_hidden():
+    _, stored = await _send(_Raises(httpx.ReadTimeout(SECRET)))
+    assert _status_text(stored.status) == _generic("Agent execution failed", stored.id)

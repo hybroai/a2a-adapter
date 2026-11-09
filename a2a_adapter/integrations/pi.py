@@ -26,7 +26,7 @@ from ..base_adapter import (
     _wait_reaped,
     default_state_dir,
 )
-from ..exceptions import CancelledByAdapterError
+from ..exceptions import CancelledByAdapterError, UserFacingError
 
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ class PiTurnAbortedError(PiRpcError):
     """The active Pi turn was aborted."""
 
 
-class PiTurnTimeoutError(PiRpcError):
+class PiTurnTimeoutError(PiRpcError, UserFacingError):
     """The active Pi turn exceeded its configured timeout."""
 
 

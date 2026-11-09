@@ -22,7 +22,7 @@ import httpx
 import pytest
 
 from a2a_adapter.base_adapter import default_state_dir
-from a2a_adapter.exceptions import CancelledByAdapterError
+from a2a_adapter.exceptions import AgentTimeoutError, CancelledByAdapterError
 from a2a_adapter.integrations.deepseek_harness import DeepSeekHarnessAdapter
 from a2a_adapter.loader import load_adapter
 from a2a_adapter.server import to_a2a
@@ -583,7 +583,7 @@ class TestRuntimeLoss:
         adapter = DeepSeekHarnessAdapter(
             working_dir=str(tmp_path), dsh_home=str(tmp_path / "h"), timeout=0.2
         )
-        with pytest.raises(TimeoutError, match="timed out"):
+        with pytest.raises(AgentTimeoutError, match="timed out"):
             await adapter.invoke("slow", context_id="ctx-1", context=_context("t1"))
         assert sdk.harnesses[0].closed is True
         assert adapter._harness is None

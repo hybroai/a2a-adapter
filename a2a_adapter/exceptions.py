@@ -32,3 +32,11 @@ class UserFacingError(RuntimeError):
     is sent as is, so it must hold nothing internal: no paths, URLs, tokens
     or tool output.
     """
+
+
+class AgentTimeoutError(UserFacingError, TimeoutError):
+    """An adapter's own deadline passed.
+
+    Readable by clients, who can act on it: the message holds only what
+    timed out and the number of seconds.
+    """
