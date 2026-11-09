@@ -174,8 +174,8 @@ class TestOpenClawAdapterContextIdMapping:
         assert ":" not in session_id
         assert "/" not in session_id
         assert " " not in session_id
-        # Should contain the sanitized version
-        assert "user-123-session-456-test" in session_id
+        # The readable head may be cut short to make room for the digest
+        assert "user-123-session" in session_id
 
     def test_context_id_to_session_id_with_none(self):
         """Test that None context_id falls back to default session."""
@@ -201,30 +201,27 @@ class TestOpenClawAdapterContextIdMapping:
         context_id = "a" * 100
         session_id = adapter._context_id_to_session_id(context_id)
 
-        # Should be truncated: 'a2a-' (4 chars) + 60 chars = 64 total
+        # Too long to keep verbatim: a shortened head plus a digest, 64 total
         assert len(session_id) == 64
         assert session_id.startswith("default-session-")
 
-    def test_context_id_to_session_id_removes_leading_trailing_hyphens(self):
-        """Test that leading/trailing hyphens are removed after sanitization."""
+    def test_context_id_to_session_id_hashes_leading_trailing_hyphens(self):
+        """Test that edge hyphens get a distinct session rather than being stripped."""
         adapter = OpenClawAgentAdapter(session_id="default-session")
 
-        # Context ID that would result in leading/trailing hyphens
-        context_id = "---test---"
-        session_id = adapter._context_id_to_session_id(context_id)
+        session_id = adapter._context_id_to_session_id("---test---")
 
-        assert session_id == "default-session-test"
+        assert session_id != "default-session-test"
+        assert session_id != adapter._context_id_to_session_id("test")
+        assert session_id[0] != "-" and session_id[-1] != "-"
 
     def test_context_id_to_session_id_handles_all_invalid_chars(self):
-        """Test that context_id with only invalid chars falls back to default."""
+        """Test that context_id with only invalid chars gets its own session."""
         adapter = OpenClawAgentAdapter(session_id="default-session")
 
-        # Context ID with only special characters
-        context_id = "::://"
-        session_id = adapter._context_id_to_session_id(context_id)
+        session_id = adapter._context_id_to_session_id("::://")
 
-        # After sanitization, nothing remains, so fall back to default
-        assert session_id == "default-session"
+        assert session_id == "default-session-h-e99b9aeeab94e15896e3ef4b"
 
     def test_context_id_to_session_id_preserves_underscores(self):
         """Test that underscores are preserved (valid in OpenClaw session IDs)."""

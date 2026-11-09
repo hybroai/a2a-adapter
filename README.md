@@ -142,6 +142,13 @@ are not limited by the OS command-line length; OpenClaw itself rejects prompts o
 4 MiB. This needs an OpenClaw release that supports
 `openclaw agent --message-file`.
 
+Each A2A context gets its own OpenClaw session: `<session_id>-<context_id>` when
+the context id is valid as it is and the result fits in 64 characters, otherwise
+a readable head plus a digest. A saved session whose context id was altered by earlier releases
+(mixed case, punctuation, edge dashes) or did not fit (including UUIDs with a
+`--session-id` over 27 characters) starts fresh on its next message. The old
+history stays on disk, unused, because it may mix several conversations.
+
 | Server option | Default | Purpose |
 |---|---|---|
 | `--cwd` | current directory | Directory the agent works in |

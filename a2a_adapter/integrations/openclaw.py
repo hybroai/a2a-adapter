@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from asyncio.subprocess import PIPE, Process as AsyncProcess
+import hashlib
 import json
 import logging
 import os
@@ -217,8 +218,38 @@ def _extract_json_from_output(stdout_text: str) -> dict:
 # Regex for sanitizing session IDs (matches OpenClaw's VALID_ID_RE pattern)
 # OpenClaw session IDs must be alphanumeric with underscores/hyphens, max 64 chars
 _INVALID_SESSION_CHARS_RE = re.compile(r"[^a-z0-9_-]+")
-_LEADING_TRAILING_DASH_RE = re.compile(r"^-+|-+$")
 _SESSION_ID_MAX_LEN = 64
+_SESSION_HASH_HEX = 24
+# Context IDs the session ID can carry unchanged. Anything else is hashed.
+_VERBATIM_CONTEXT_RE = re.compile(r"[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?")
+# A verbatim ID shaped like this could equal a hashed one, so it is hashed too.
+_HASHED_FORM_RE = re.compile(rf".*-h-[0-9a-f]{{{_SESSION_HASH_HEX}}}")
+
+
+def _context_session_id(prefix: str, context_id: str | None) -> str:
+    """Map an A2A context ID to its own OpenClaw session ID.
+
+    OpenClaw session IDs must match ``^[a-z0-9][a-z0-9_-]{0,63}$``. A context
+    ID that fits as it is gives ``<prefix>-<context_id>``. Any other gets a
+    readable head (for people reading session files) and a digest of the
+    prefix and the context ID, so two contexts never share a session or its
+    per-conversation lock. A missing context ID gives the default session.
+    """
+    if not context_id:
+        return prefix
+    verbatim = f"{prefix}-{context_id}"
+    if (
+        len(verbatim) <= _SESSION_ID_MAX_LEN
+        and _VERBATIM_CONTEXT_RE.fullmatch(context_id)
+        and not _HASHED_FORM_RE.fullmatch(verbatim)
+    ):
+        return verbatim
+    # The digest covers the prefix because the head may truncate it.
+    digest = hashlib.sha256(f"{prefix}\0{context_id}".encode("utf-8")).hexdigest()
+    tail = f"-h-{digest[:_SESSION_HASH_HEX]}"
+    readable = _INVALID_SESSION_CHARS_RE.sub("-", verbatim.lower()).strip("-_")
+    head = readable[: _SESSION_ID_MAX_LEN - len(tail)].rstrip("-_") or "a2a"
+    return f"{head}{tail}"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -241,6 +272,11 @@ class OpenClawAdapter(BaseA2AAdapter):
 
     A run that reports an error in its JSON output ends the task as failed,
     even when the process exits with code 0.
+
+    Each context ID gets its own OpenClaw session: ``<session_id>-<context_id>``
+    when the context ID is valid as it is and the result fits in 64 characters,
+    otherwise a readable head plus a digest. A verbatim ID keeps ``session_id``
+    exactly as given, so it must follow OpenClaw's rule itself.
 
     Example::
 
@@ -396,26 +432,8 @@ class OpenClawAdapter(BaseA2AAdapter):
     # ──── Internal: Session IDs ────
 
     def _context_id_to_session_id(self, context_id: str | None) -> str:
-        """Convert A2A context_id to a valid OpenClaw session_id.
-
-        OpenClaw session IDs must match: ``^[a-z0-9][a-z0-9_-]{0,63}$``
-        """
-        if not context_id:
-            return self.session_id
-
-        sanitized = _INVALID_SESSION_CHARS_RE.sub("-", context_id.lower())
-        sanitized = _LEADING_TRAILING_DASH_RE.sub("", sanitized)
-        if not sanitized:
-            return self.session_id
-
-        prefix = getattr(self, "session_id", "a2a")
-        max_suffix_len = _SESSION_ID_MAX_LEN - len(prefix) - 1
-
-        if max_suffix_len > 0:
-            sanitized = sanitized[:max_suffix_len]
-            return f"{prefix}-{sanitized}"
-        else:
-            return f"{prefix}-{sanitized}"[:_SESSION_ID_MAX_LEN]
+        """Map an A2A context_id to its own OpenClaw session_id."""
+        return _context_session_id(self.session_id, context_id)
 
     # ──── Internal: Output Extraction ────
 
@@ -1034,41 +1052,8 @@ class OpenClawAgentAdapter(BaseAgentAdapter):
         return None
 
     def _context_id_to_session_id(self, context_id: str | None) -> str:
-        """
-        Convert A2A context_id to a valid OpenClaw session_id.
-
-        OpenClaw session IDs must match the pattern: ^[a-z0-9][a-z0-9_-]{0,63}$
-        This method sanitizes the A2A context_id to conform to that format.
-
-        If context_id is provided, it's sanitized and prefixed with the adapter's
-        session_id to namespace it. If context_id is None or empty, falls back to the
-        adapter's default session_id.
-
-        Args:
-            context_id: The A2A context_id to convert
-
-        Returns:
-            A valid OpenClaw session_id
-        """
-        if not context_id:
-            return self.session_id
-
-        # Lowercase and replace invalid characters with hyphen
-        sanitized = _INVALID_SESSION_CHARS_RE.sub("-", context_id.lower())
-        # Remove leading/trailing hyphens
-        sanitized = _LEADING_TRAILING_DASH_RE.sub("", sanitized)
-
-        if not sanitized:
-            return self.session_id
-
-        prefix = getattr(self, "session_id", "a2a")
-        max_suffix_len = _SESSION_ID_MAX_LEN - len(prefix) - 1
-
-        if max_suffix_len > 0:
-            sanitized = sanitized[:max_suffix_len]
-            return f"{prefix}-{sanitized}"
-        else:
-            return f"{prefix}-{sanitized}"[:_SESSION_ID_MAX_LEN]
+        """Map an A2A context_id to its own OpenClaw session_id."""
+        return _context_session_id(self.session_id, context_id)
 
     # ---------- Input mapping ----------
 

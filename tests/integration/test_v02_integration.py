@@ -237,6 +237,60 @@ async def test_message_stream_returns_sse(stream_app):
 
 
 # ═══════════════════════════════════════════════════
+# streaming=False on a streaming adapter
+# ═══════════════════════════════════════════════════
+
+
+@pytest.fixture
+async def streaming_off_client():
+    app = to_a2a(StreamEchoAdapter(), streaming=False)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        yield client
+
+
+async def test_streaming_off_card_does_not_advertise_streaming(streaming_off_client):
+    data = (await streaming_off_client.get("/.well-known/agent.json")).json()
+    assert not data["capabilities"].get("streaming")
+
+
+async def test_streaming_off_rejects_v03_message_stream(streaming_off_client):
+    resp = await streaming_off_client.post("/", json=make_stream_payload("hello world"))
+    assert resp.status_code == 200
+    events = [
+        json.loads(line[5:]) for line in resp.text.splitlines() if line.strip().startswith("data:")
+    ]
+    assert len(events) == 1
+    assert "Streaming is not supported" in events[0]["error"]["message"]
+
+
+async def test_streaming_off_rejects_v1_send_streaming_message(streaming_off_client):
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "test-1",
+        "method": "SendStreamingMessage",
+        "params": {
+            "message": {
+                "role": "ROLE_USER",
+                "messageId": "msg-1",
+                "parts": [{"text": "hello world"}],
+            }
+        },
+    }
+    resp = await streaming_off_client.post("/", json=payload, headers={"A2A-Version": "1.0"})
+    assert resp.json()["error"]["code"] == -32004
+
+
+async def test_streaming_off_message_send_completes(streaming_off_client):
+    resp = await streaming_off_client.post("/", json=make_send_payload("hello world"))
+    result = resp.json()["result"]
+    assert result["status"]["state"] == "completed"
+    text = "".join(p.get("text", "") for p in result["status"]["message"]["parts"])
+    assert text == "hello world "
+
+
+# ═══════════════════════════════════════════════════
 # Custom Agent Card Tests
 # ═══════════════════════════════════════════════════
 

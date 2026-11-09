@@ -1,5 +1,7 @@
 """Tests for the v0.2 N8nAdapter webhook retry policy and payload building."""
 
+import json
+
 import httpx
 import pytest
 
@@ -255,3 +257,220 @@ class TestPayloadPrecedence:
             "message": "hello",
             "metadata": {"context_id": "ctx-1"},
         }
+
+
+def _json(body) -> httpx.Response:
+    # Not ``json=body``: httpx sends an empty body for ``json=None``.
+    return httpx.Response(
+        200, content=json.dumps(body), headers={"Content-Type": "application/json"}
+    )
+
+
+class TestResponseHandling:
+    """Response bodies, driven through ``invoke`` with a mocked webhook."""
+
+    async def _invoke(self, response: httpx.Response, **kwargs):
+        handler, calls = _counting_handler(lambda req, n: response)
+        adapter = _adapter_with_transport(handler, **kwargs)
+        return await adapter.invoke("hi", context_id="ctx-1"), calls
+
+    # N1: bodies that are not JSON
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            httpx.Response(200),
+            httpx.Response(204),
+            httpx.Response(200, text="  \n\t "),
+            httpx.Response(200, content=b"  \n", headers={"Content-Type": "application/json"}),
+        ],
+        ids=["empty-200", "204", "whitespace", "whitespace-declared-json"],
+    )
+    async def test_empty_bodies_give_empty_text(self, response):
+        text, calls = await self._invoke(response)
+        assert text == ""
+        assert len(calls) == 1
+
+    async def test_plain_text_returned_as_text(self):
+        text, _ = await self._invoke(httpx.Response(200, text="All done"))
+        assert text == "All done"
+
+    async def test_html_returned_as_text(self):
+        html = "<html><body>ok</body></html>"
+        response = httpx.Response(200, content=html, headers={"Content-Type": "text/html"})
+        text, _ = await self._invoke(response)
+        assert text == html
+
+    @pytest.mark.parametrize("body", ["1.10", "null", '"quoted"'])
+    async def test_plain_text_scalars_stay_as_written(self, body):
+        text, _ = await self._invoke(httpx.Response(200, text=body))
+        assert text == body
+
+    async def test_mislabelled_json_object_still_parses(self):
+        text, _ = await self._invoke(httpx.Response(200, text='{"output": "parsed"}'))
+        assert text == "parsed"
+
+    async def test_text_that_only_looks_like_json_is_kept(self):
+        text, _ = await self._invoke(httpx.Response(200, text="[note] all fine"))
+        assert text == "[note] all fine"
+
+    async def test_binary_body_raises_with_content_type(self):
+        response = httpx.Response(
+            200, content=b"\xff\xfe\x00\x80", headers={"Content-Type": "application/x-thing"}
+        )
+        with pytest.raises(RuntimeError, match="application/x-thing"):
+            await self._invoke(response)
+
+    async def test_unusable_charset_raises_runtime_error(self):
+        response = httpx.Response(
+            200, content=b"hi", headers={"Content-Type": "text/plain; charset=hex"}
+        )
+        with pytest.raises(RuntimeError, match="text/plain"):
+            await self._invoke(response)
+
+    @pytest.mark.parametrize("content_type", ["application/json", "application/problem+json"])
+    async def test_truncated_json_raises(self, content_type):
+        handler, calls = _counting_handler(
+            lambda req, n: httpx.Response(
+                200, content=b'{"output": "cut', headers={"Content-Type": content_type}
+            )
+        )
+        adapter = _adapter_with_transport(handler)
+        with pytest.raises(RuntimeError, match="req_id="):
+            await adapter.invoke("hi")
+        assert len(calls) == 1
+
+    async def test_mislabelled_json_with_bom_still_parses(self):
+        response = httpx.Response(
+            200, content=b'\xef\xbb\xbf{"output": "x"}', headers={"Content-Type": "text/plain"}
+        )
+        text, _ = await self._invoke(response)
+        assert text == "x"
+
+    @pytest.mark.parametrize("body", [b'{"a": "\\ud83d"}', b'{"output": "\\ud83d"}'])
+    async def test_lone_surrogate_gives_encodable_text(self, body):
+        response = httpx.Response(200, content=body, headers={"Content-Type": "application/json"})
+        text, _ = await self._invoke(response)
+        assert "?" in text
+        text.encode("utf-8")
+
+    # N2: JSON values must not render as Python text
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            (None, ""),
+            (True, "true"),
+            ({"output": None}, ""),
+            ({"output": None, "text": "hi"}, "hi"),
+            ([None], ""),
+            ([True], "true"),
+        ],
+    )
+    async def test_json_scalars_render_as_json(self, body, expected):
+        text, _ = await self._invoke(_json(body))
+        assert text == expected
+
+    async def test_object_answer_renders_as_json(self):
+        text, _ = await self._invoke(_json({"output": {"a": "b"}}))
+        assert json.loads(text) == {"a": "b"}
+
+    async def test_nested_list_item_renders_as_json(self):
+        text, _ = await self._invoke(_json([["x"]]))
+        assert json.loads(text) == ["x"]
+
+    async def test_json_fallback_keeps_non_ascii(self):
+        text, _ = await self._invoke(_json({"名前": "太郎"}))
+        assert "太郎" in text
+
+    async def test_json_fallback_keeps_null_next_to_values(self):
+        text, _ = await self._invoke(_json({"a": 1, "b": None}))
+        assert json.loads(text) == {"a": 1, "b": None}
+
+    # N3: workflow errors returned with HTTP 200
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"error": "x"},
+            [{"error": "x"}],
+            {"error": "x", "output": ""},
+            {"error": "x", "stack": "at node..."},
+            {"error": {"message": "x"}},
+        ],
+        ids=["object", "list", "empty-output", "stack", "error-object"],
+    )
+    async def test_workflow_error_fails_the_task(self, body):
+        with pytest.raises(RuntimeError) as exc:
+            await self._invoke(_json(body))
+        assert str(exc.value).endswith(": x")
+
+    async def test_error_with_lone_surrogate_gives_encodable_message(self):
+        response = httpx.Response(
+            200, content=b'{"error": "\\ud83d boom"}', headers={"Content-Type": "application/json"}
+        )
+        with pytest.raises(RuntimeError, match="boom") as exc:
+            await self._invoke(response)
+        str(exc.value).encode("utf-8")
+
+    async def test_error_without_message_renders_as_json(self):
+        with pytest.raises(RuntimeError, match='"code": 7'):
+            await self._invoke(_json({"error": {"code": 7}}))
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"error": "x", "output": "y"},
+            {"error": None, "output": "y"},
+            {"id": 1, "error": "row invalid"},
+            {"name": "Widget", "code": "A1", "error": "out of stock"},
+            {"message": "Report ready", "error": "partial"},
+            [{"error": "x"}, {"output": "y"}],
+        ],
+        ids=["output", "null-error", "row", "row-fields", "message", "partial-list"],
+    )
+    async def test_results_with_other_content_complete(self, body):
+        text, _ = await self._invoke(_json(body))
+        assert text
+
+    async def test_empty_list_completes(self):
+        text, _ = await self._invoke(_json([]))
+        assert text == ""
+
+    # N5: multi-item lists
+
+    async def test_mixed_list_keeps_every_item(self):
+        text, _ = await self._invoke(_json(["a", {"output": "b"}]))
+        assert text == "a\nb"
+
+    async def test_mixed_scalars_join(self):
+        text, _ = await self._invoke(_json([1, "two", None, False]))
+        assert text == "1\ntwo\nfalse"
+
+    async def test_scalar_list_joins(self):
+        text, _ = await self._invoke(_json(["a", "b"]))
+        assert text == "a\nb"
+
+    async def test_file_only_list_leaves_base64_out_of_text(self):
+        body = [{"files": [{"name": "a", "data": "QUFB"}]}, {"files": [{"data": "QkJC"}]}]
+        text, _ = await self._invoke(_json(body))
+        assert text == ""
+
+    # N7: input_mapper failures
+
+    async def test_raising_mapper_fails_without_posting(self):
+        def mapper(raw, ctx):
+            raise KeyError("missing")
+
+        handler, calls = _counting_handler(lambda req, n: _json({"output": "x"}))
+        adapter = _adapter_with_transport(handler, input_mapper=mapper)
+        with pytest.raises(RuntimeError, match="input_mapper failed: KeyError"):
+            await adapter.invoke("hi")
+        assert calls == []
+
+    async def test_non_mapping_mapper_fails_without_posting(self):
+        handler, calls = _counting_handler(lambda req, n: _json({"output": "x"}))
+        adapter = _adapter_with_transport(handler, input_mapper=lambda raw, ctx: ["nope"])
+        with pytest.raises(TypeError, match="input_mapper must return a dict"):
+            await adapter.invoke("hi")
+        assert calls == []

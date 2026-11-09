@@ -1,5 +1,5 @@
 """Helpers shared by the Python framework adapters (LangChain, LangGraph,
-CrewAI, callable)."""
+CrewAI, callable) and the n8n adapter's ``input_mapper``."""
 
 from __future__ import annotations
 

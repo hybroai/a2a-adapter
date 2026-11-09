@@ -8,12 +8,14 @@ and integration with to_a2a / build_agent_card / load_adapter.
 
 import asyncio
 import json
+import re
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from a2a_adapter.integrations.openclaw import (
     _extract_openclaw_failure_message,
     OpenClawAdapter,
+    OpenClawAgentAdapter,
     VALID_THINKING_LEVELS,
     _SESSION_ID_MAX_LEN,
 )
@@ -86,7 +88,107 @@ def test_context_id_to_session_id_truncates():
 def test_context_id_to_session_id_all_invalid_chars():
     adapter = OpenClawAdapter(session_id="fallback")
     result = adapter._context_id_to_session_id("!!!")
-    assert result == "fallback"
+    assert result != "fallback"
+    assert _VALID_SESSION_ID.fullmatch(result)
+
+
+# ──── Test: Context IDs Stay In Distinct Sessions ────
+
+_VALID_SESSION_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+_UUID = "550e8400-e29b-41d4-a716-446655440000"
+
+
+@pytest.fixture(params=[OpenClawAdapter, OpenClawAgentAdapter], ids=["v0.2", "v0.1"])
+def session_id_for(request):
+    """Map (prefix, context_id) to a session id through either adapter class."""
+
+    def _map(prefix, context_id):
+        return request.param(session_id=prefix)._context_id_to_session_id(context_id)
+
+    return _map
+
+
+@pytest.mark.parametrize(
+    "context_ids",
+    [
+        ["Ctx-1", "ctx-1"],
+        ["a.b", "a/b", "a b"],
+        ["-a", "a"],
+        ["x" * 60 + "1", "x" * 60 + "2"],
+        ["!!!", "???"],
+    ],
+    ids=["case", "replacement", "edge-strip", "truncation", "punctuation-only"],
+)
+def test_lossy_context_ids_map_to_distinct_sessions(session_id_for, context_ids):
+    results = [session_id_for("base", c) for c in context_ids]
+    assert len(set(results)) == len(results)
+    assert "base" not in results
+
+
+def test_long_prefix_keeps_context_ids_distinct(session_id_for):
+    prefix = "p" * 70
+    first = session_id_for(prefix, "one")
+    second = session_id_for(prefix, "two")
+    assert first != second
+    assert len(first) <= _SESSION_ID_MAX_LEN
+    assert len(second) <= _SESSION_ID_MAX_LEN
+
+
+def test_prefixes_differing_after_truncation_stay_distinct(session_id_for):
+    assert session_id_for("p" * 60 + "a", "ctx") != session_id_for("p" * 60 + "b", "ctx")
+
+
+@pytest.mark.parametrize(
+    "context_id",
+    ["UPPER", "héllo-wörld", "_X", "-x", "a b\tc\n", "z" * 500],
+    ids=["uppercase", "unicode", "leading-underscore", "leading-dash", "whitespace", "500-chars"],
+)
+def test_session_ids_match_openclaw_rule(session_id_for, context_id):
+    assert _VALID_SESSION_ID.fullmatch(session_id_for("base", context_id))
+
+
+@pytest.mark.parametrize("context_id", ["UPPER", "-x", "!!!", "z" * 500])
+def test_hashed_ids_match_openclaw_rule_with_punctuation_prefix(session_id_for, context_id):
+    assert _VALID_SESSION_ID.fullmatch(session_id_for("!!!", context_id))
+
+
+@pytest.mark.parametrize(
+    "context_id",
+    [_UUID, "a--b", "_x", "x_", "0123456789abcdef0123456789abcdef", "y" * 59],
+    ids=["uuid", "double-dash", "leading-underscore", "trailing-underscore", "32-hex", "fills-64"],
+)
+def test_ids_the_old_mapping_left_alone_keep_their_session(session_id_for, context_id):
+    assert session_id_for("base", context_id) == f"base-{context_id}"
+
+
+def test_verbatim_path_keeps_the_callers_prefix_as_given(session_id_for):
+    assert session_id_for("My Agent", "ctx") == "My Agent-ctx"
+
+
+def test_id_one_char_too_long_is_hashed(session_id_for):
+    context_id = "y" * 60
+    result = session_id_for("base", context_id)
+    assert result != f"base-{context_id}"[:_SESSION_ID_MAX_LEN]
+    assert len(result) <= _SESSION_ID_MAX_LEN
+    assert "-h-" in result
+
+
+@pytest.mark.parametrize("context_id", ["foo-h-" + "a" * 24, "h-" + "a" * 24])
+def test_id_shaped_like_a_hashed_one_is_not_verbatim(session_id_for, context_id):
+    assert session_id_for("base", context_id) != f"base-{context_id}"
+
+
+def test_verbatim_id_cannot_reuse_a_hashed_session(session_id_for):
+    # Truncation leaves this prefix's head ending just before its own "-h".
+    prefix = "x" * 37 + "-h"
+    hashed = session_id_for(prefix, "!!!")
+    digest = hashed.rsplit("-", 1)[1]
+    assert session_id_for(prefix, digest) != hashed
+
+
+def test_hashed_id_format_is_stable(session_id_for):
+    """A format change would silently orphan every hashed session."""
+    assert session_id_for("base", "Ctx-1") == "base-ctx-1-h-94bd5aaa3f78febcc5d6354b"
 
 
 # ──── Test: Command Building ────
@@ -318,7 +420,20 @@ async def test_invoke_uses_context_session_id():
         await adapter.invoke("hi", context_id="Ctx-1")
 
     args = spawn.call_args.args
-    assert args[args.index("--session-id") + 1] == "base-ctx-1"
+    assert args[args.index("--session-id") + 1] == "base-ctx-1-h-94bd5aaa3f78febcc5d6354b"
+
+
+@pytest.mark.asyncio
+async def test_invoke_sends_distinct_session_ids_for_lossy_contexts():
+    adapter = OpenClawAdapter(session_id="base")
+    spawn = AsyncMock(side_effect=lambda *a, **k: _finished(_ok_output("ok")))
+
+    with patch(_SPAWN, spawn):
+        await adapter.invoke("hi", context_id="A.b")
+        await adapter.invoke("hi", context_id="a-b")
+
+    sent = [c.args[c.args.index("--session-id") + 1] for c in spawn.call_args_list]
+    assert len(set(sent)) == 2
 
 
 @pytest.mark.asyncio
