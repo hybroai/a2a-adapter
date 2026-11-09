@@ -202,6 +202,25 @@ def test_build_card_streaming_override():
     assert card.capabilities.streaming is True
 
 
+def test_build_card_streaming_false_overrides_streaming_adapter():
+    card = build_agent_card(StreamAdapter(), streaming=False)
+    assert card.capabilities.streaming is False
+
+
+def test_build_card_streaming_none_auto_detects():
+    card = build_agent_card(StreamAdapter(), streaming=None)
+    assert card.capabilities.streaming is True
+
+
+def test_build_card_streaming_false_overrides_metadata():
+    class DeclaredStreaming(MinimalAdapter):
+        def get_metadata(self):
+            return AdapterMetadata(streaming=True)
+
+    card = build_agent_card(DeclaredStreaming(), streaming=False)
+    assert card.capabilities.streaming is False
+
+
 def test_build_card_skills_with_tags():
     class SkillAdapter(BaseA2AAdapter):
         async def invoke(self, user_input, context_id=None, **kwargs):

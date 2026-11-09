@@ -434,7 +434,11 @@ def to_a2a(
             push connection is checked again and pinned to a checked
             address, and ``HTTP(S)_PROXY`` env vars are not used for pushes).
         **card_overrides: Override individual AgentCard fields
-            (name, description, url, version, streaming).
+            (name, description, url, version, streaming). ``streaming=False``
+            turns off streaming on the card even if the adapter can stream,
+            so the server rejects ``message/stream`` and
+            ``SendStreamingMessage``. ``message/send`` keeps working and the
+            executor still uses the adapter's ``stream()``.
 
     Returns:
         A Starlette ASGI application ready to be served.
@@ -747,6 +751,11 @@ def build_agent_card(
             provider, documentation_url, icon_url, ``bearer_auth``
             (bool, default False) to declare a bearer-token security scheme,
             and ``push_notifications`` (bool, default False).
+            ``streaming=False`` turns off streaming on the card even if the
+            adapter can stream, so the server rejects ``message/stream`` and
+            ``SendStreamingMessage``; ``None`` or leaving it out auto-detects.
+            ``message/send`` keeps working and the executor still uses the
+            adapter's ``stream()``.
 
     Returns:
         A fully populated AgentCard.
@@ -758,10 +767,10 @@ def build_agent_card(
     """
     meta = adapter.get_metadata()
 
-    # Auto-detect streaming if not explicitly set in metadata
-    streaming = overrides.get("streaming", meta.streaming)
-    if not streaming:
-        streaming = adapter.supports_streaming()
+    # Auto-detect streaming unless an override sets it either way
+    streaming = overrides.get("streaming")
+    if streaming is None:
+        streaming = meta.streaming or adapter.supports_streaming()
 
     # Build provider from metadata or override
     provider_data = overrides.get("provider", meta.provider)
