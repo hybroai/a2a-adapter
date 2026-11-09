@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import gc
 import logging
 import os
 from types import SimpleNamespace
@@ -266,6 +267,67 @@ class TestSessionStore:
         adapter._sessions = {"ctx-1": "sess-A"}
         adapter._save_sessions()
         assert calls == ["fsync", "replace"]
+
+
+class TestContextLocks:
+    def test_concurrent_users_get_the_same_lock(self, tmp_path):
+        adapter = SleepingCliAdapter(tmp_path)
+        first = adapter._get_context_lock("ctx")
+        assert adapter._get_context_lock("ctx") is first
+        assert adapter._get_context_lock("other") is not first
+
+    async def test_a_waiter_keeps_the_entry_past_the_holders_release(self, tmp_path):
+        adapter = SleepingCliAdapter(tmp_path)
+        order = []
+        holder_in = asyncio.Event()
+        release = asyncio.Event()
+
+        async def holder():
+            async with adapter._get_context_lock("ctx"):
+                order.append("holder in")
+                holder_in.set()
+                await release.wait()
+                order.append("holder out")
+
+        async def waiter():
+            async with adapter._get_context_lock("ctx"):
+                order.append("waiter in")
+                assert "ctx" in adapter._context_locks
+
+        first = asyncio.create_task(holder())
+        await holder_in.wait()
+        second = asyncio.create_task(waiter())
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(first, second)
+        assert order == ["holder in", "holder out", "waiter in"]
+
+    async def test_an_unheld_lock_is_forgotten(self, tmp_path):
+        adapter = SleepingCliAdapter(tmp_path)
+        async with adapter._get_context_lock("ctx"):
+            assert list(adapter._context_locks) == ["ctx"]
+        gc.collect()
+        assert len(adapter._context_locks) == 0
+
+    async def test_a_finished_turn_leaves_no_lock(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from a2a_adapter.integrations.claude_code import ClaudeCodeAdapter
+
+        adapter = ClaudeCodeAdapter(
+            working_dir=str(tmp_path), session_store_path=str(tmp_path / "s.json")
+        )
+        proc = MagicMock(pid=4242, returncode=0)
+        result = (
+            b'{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}\n'
+            b'{"type":"result","result":"ok","session_id":"s1"}\n'
+        )
+        proc.communicate = AsyncMock(return_value=(result, b""))
+        proc.wait = AsyncMock(return_value=0)
+        with patch("a2a_adapter.base_adapter.create_subprocess_exec", return_value=proc):
+            await adapter.invoke("hi", context_id="c1", context=SimpleNamespace(task_id="t"))
+        gc.collect()
+        assert len(adapter._context_locks) == 0
 
 
 class TestDefaultStateDir:

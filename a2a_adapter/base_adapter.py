@@ -309,7 +309,12 @@ class BaseA2AAdapter(ABC):
         self.timeout = timeout
         self.env_vars = dict(env_vars) if env_vars else {}
 
-        self._context_locks: dict[str, asyncio.Lock] = {}
+        # Weak, so a conversation's entry lives only while a holder or waiter
+        # references the lock; an unreferenced lock is free, so a fresh one
+        # is equivalent.
+        self._context_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
         self._active_processes: dict[str, Process] = {}
         self._cancelled_tasks: set[str] = set()
         self._killed_tasks: set[str] = set()
@@ -852,9 +857,11 @@ class BaseA2AAdapter(ABC):
 
     def _get_context_lock(self, context_key: str) -> asyncio.Lock:
         """Get or create a per-context asyncio.Lock."""
-        if context_key not in self._context_locks:
-            self._context_locks[context_key] = asyncio.Lock()
-        return self._context_locks[context_key]
+        lock = self._context_locks.get(context_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._context_locks[context_key] = lock
+        return lock
 
     def _build_env(self) -> dict[str, str]:
         """Build subprocess environment: os.environ (minus server secrets) + self.env_vars."""

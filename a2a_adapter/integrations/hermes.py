@@ -21,6 +21,7 @@ adapter class always loads for registry/loader purposes.
 import asyncio
 import logging
 import uuid
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from typing import AsyncIterator
@@ -78,7 +79,11 @@ class HermesAdapter(BaseA2AAdapter):
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="hermes")
         self._session_db = None  # lazy — see _ensure_session_db()
         self._running_agents: dict[str, object] = {}  # task_id → AIAgent
-        self._session_locks: dict[str, asyncio.Lock] = {}  # context_id → lock
+        # context_id → lock. Weak: an entry lives only while a holder or waiter
+        # references the lock.
+        self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
 
     # ──── Internal helpers ────
 

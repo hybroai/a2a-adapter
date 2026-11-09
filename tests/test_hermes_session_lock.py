@@ -1,6 +1,8 @@
 """Tests for HermesAdapter per-session lock serialization."""
 
 import asyncio
+import gc
+import weakref
 
 import pytest
 
@@ -13,7 +15,7 @@ def adapter():
     a = HermesAdapter.__new__(HermesAdapter)
     a._session_db = None
     a._running_agents = {}
-    a._session_locks = {}
+    a._session_locks = weakref.WeakValueDictionary()
     a._executor = None
     return a
 
@@ -33,6 +35,14 @@ class TestSessionLock:
 
     def test_lock_is_asyncio_lock(self, adapter):
         assert isinstance(adapter._session_lock("ctx-1"), asyncio.Lock)
+
+    def test_real_adapter_forgets_an_unheld_lock(self):
+        real = HermesAdapter()
+        lock = real._session_lock("ctx-1")
+        assert list(real._session_locks) == ["ctx-1"]
+        del lock
+        gc.collect()
+        assert len(real._session_locks) == 0
 
 
 class TestSessionLockSerialization:
