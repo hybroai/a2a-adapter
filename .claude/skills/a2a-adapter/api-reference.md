@@ -307,6 +307,7 @@ serve_agent(
     push_notifications: bool | None = None,  # Default off
     allow_private_push_urls: bool = False, # Allow localhost/private push receivers
     expose_error_details: bool = False,    # Send exception text to clients (local debugging)
+    task_store: TaskStore | None = None,   # Default: in memory, 1000 newest finished tasks
     **kwargs,                              # Passed to uvicorn.Config
 )
 ```
@@ -317,7 +318,7 @@ serve_agent(
 app = to_a2a(
     adapter: BaseA2AAdapter,
     agent_card: AgentCard | None = None,
-    task_store: TaskStore | None = None,   # Default: InMemoryTaskStore
+    task_store: TaskStore | None = None,   # Default: in memory, 1000 newest finished tasks
     auth_token: str | None = None,         # Bearer token for every route but the card
     push_notifications: bool | None = None,  # Default off; a given card decides
     allow_private_push_urls: bool = False, # Allow localhost/private push receivers
@@ -333,6 +334,8 @@ app = to_a2a(
 ```
 
 `streaming=False` does not disable auto-detection; override `supports_streaming()` to turn streaming off.
+
+The default task store keeps the 1000 newest finished tasks, and `tasks/get` for an older one returns task not found. To keep everything, pass `task_store=InMemoryTaskStore()` or a database store, to `to_a2a` or `serve_agent`; the CLI has no such option.
 
 The app serves JSON-RPC at `/` (A2A 1.0 methods plus the v0.3 names for older clients), REST routes, and the AgentCard at `/.well-known/agent-card.json` (also the legacy `/.well-known/agent.json`). On the generated AgentCard, `streaming` is auto-detected and `push_notifications` is off unless you pass `push_notifications=True`. With push on, URLs on localhost and private or non-public addresses are rejected unless `allow_private_push_urls=True` (JSON-RPC `-32602` on A2A 1.0 methods, HTTP 400 on REST, `-32603` on the v0.3 method names under a2a-sdk 1.0).
 

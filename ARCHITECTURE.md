@@ -247,7 +247,7 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 | Task lifecycle (working → completed/failed/canceled) | `TaskUpdater` + `TaskStore` |
 | SSE streaming transport | `DefaultRequestHandler` + `EventQueue` |
 | Concurrent request handling | `asyncio.create_task()` per request |
-| Task persistence | `InMemoryTaskStore` (pluggable) |
+| Task persistence | `InMemoryTaskStore` (pluggable). The default keeps the 1000 newest finished tasks, so `tasks/get` for an older one returns task not found; opt out with `task_store=` on `to_a2a` or `serve_agent` (the CLI has none) |
 | AgentCard serving | `A2AStarletteApplication` at `/.well-known/agent-card.json` |
 | Push notifications (opt-in; URL checks are ours, in the config store) | `PushNotificationSender` |
 | Task resubscription | `DefaultRequestHandler.on_resubscribe` |

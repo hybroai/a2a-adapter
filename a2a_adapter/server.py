@@ -22,6 +22,7 @@ import os
 import signal
 import sys
 import threading
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -30,6 +31,7 @@ import httpcore
 import httpx
 import uvicorn
 from a2a.server.context import ServerCallContext
+from a2a.server.owner_resolver import resolve_user_scope
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_jsonrpc_routes, create_rest_routes
 from a2a.server.request_handlers.response_helpers import agent_card_to_dict
@@ -49,6 +51,8 @@ from a2a.types import (
     SecurityRequirement,
     SecurityScheme,
     StringList,
+    Task,
+    TaskState,
 )
 from a2a.utils.errors import InvalidParamsError
 from a2a.utils.constants import (
@@ -86,6 +90,15 @@ _EMBEDS_IPV4 = (
 )
 _SITE_LOCAL = ipaddress.ip_network("fec0::/10")  # deprecated; is_global says True
 _PUSH_URL_REJECTED = "Rejected push notification URL: only public http(s) URLs are allowed"
+_MAX_FINISHED_TASKS = 1000
+_TERMINAL_STATES = frozenset(
+    {
+        TaskState.TASK_STATE_COMPLETED,
+        TaskState.TASK_STATE_CANCELED,
+        TaskState.TASK_STATE_FAILED,
+        TaskState.TASK_STATE_REJECTED,
+    }
+)
 
 
 async def _resolve(host: str, port: int) -> list[str]:
@@ -255,6 +268,46 @@ class _SafeInMemoryPushNotificationConfigStore(InMemoryPushNotificationConfigSto
         await super().set_info(task_id, notification_config, context)
 
 
+class _BoundedInMemoryTaskStore(InMemoryTaskStore):
+    """In-memory task store that keeps the newest finished tasks only.
+
+    The SDK's store keeps every task, with its history and artifacts, until
+    restart. Tasks still in flight are never counted or evicted. Evicting a
+    task also removes its push configs, which the SDK deletes only on an
+    explicit client request.
+    """
+
+    def __init__(self, push_config_store: InMemoryPushNotificationConfigStore | None = None):
+        super().__init__()
+        self._push_config_store = push_config_store
+        # Insertion order is finish order. Holds only the user, to avoid
+        # keeping each request's headers alive.
+        self._finished: OrderedDict[tuple[str, str], ServerCallContext] = OrderedDict()
+
+    async def save(self, task: Task, context: ServerCallContext) -> None:
+        await super().save(task, context)
+        if task.status.state not in _TERMINAL_STATES:
+            return
+        key = (resolve_user_scope(context), task.id)
+        self._finished[key] = ServerCallContext(user=context.user)
+        self._finished.move_to_end(key)
+        while len(self._finished) > _MAX_FINISHED_TASKS:
+            (_, task_id), owner = self._finished.popitem(last=False)
+            await super().delete(task_id, owner)
+            await self._forget_push_configs(task_id, owner)
+
+    async def delete(self, task_id: str, context: ServerCallContext) -> None:
+        self._finished.pop((resolve_user_scope(context), task_id), None)
+        await super().delete(task_id, context)
+
+    async def _forget_push_configs(self, task_id: str, owner: ServerCallContext) -> None:
+        store = self._push_config_store
+        # delete_info warns about a task with no configs, which would be one
+        # log row per finished task.
+        if store is not None and await store.get_info(task_id, owner):
+            await store.delete_info(task_id, owner)
+
+
 _PUBLIC_CARD_PATHS = frozenset({AGENT_CARD_WELL_KNOWN_PATH, LEGACY_AGENT_CARD_PATH})
 
 
@@ -414,8 +467,11 @@ def to_a2a(
         adapter: Any BaseA2AAdapter implementation.
         agent_card: Optional pre-built AgentCard. If None, one is
             auto-generated from adapter.get_metadata().
-        task_store: Optional TaskStore for task persistence.
-            Defaults to InMemoryTaskStore.
+        task_store: Optional TaskStore for task persistence. The default
+            is in memory and keeps the 1000 newest finished tasks (active
+            tasks are never dropped); ``tasks/get`` for an older one returns
+            task not found. To keep everything, pass ``InMemoryTaskStore()``
+            or a database store.
         activity: Optional ActivityLog that prints one row per A2A
             operation and task state change (used by the CLI).
         auth_token: Optional bearer token. When set, every request except
@@ -466,7 +522,6 @@ def to_a2a(
         if auth_token is not None and not agent_card.security_schemes:
             logger.debug("auth_token is set but the given agent card declares no security scheme")
 
-    task_store = task_store or InMemoryTaskStore()
     push_config_store = push_sender = push_httpx_client = None
     # The SDK stores inline push configs whenever a store exists, so "off"
     # means no store and no sender, not only a card capability.
@@ -481,6 +536,7 @@ def to_a2a(
             push_kwargs["transport"] = _make_pinned_push_transport()
         push_httpx_client = _make_push_client(follow_redirects=False, **push_kwargs)
         push_sender = _push_sender(push_httpx_client, push_config_store)
+    task_store = task_store or _BoundedInMemoryTaskStore(push_config_store)
 
     executor = AdapterAgentExecutor(
         adapter, observer=activity, expose_error_details=expose_error_details
@@ -600,6 +656,7 @@ def serve_agent(
     push_notifications: bool | None = None,
     allow_private_push_urls: bool = False,
     expose_error_details: bool = False,
+    task_store: TaskStore | None = None,
     **kwargs: Any,
 ) -> None:
     """One-line A2A server startup.
@@ -627,6 +684,8 @@ def serve_agent(
             pushes do not use ``HTTP(S)_PROXY`` env vars.
         expose_error_details: Send exception text to clients, for local
             debugging (see :func:`to_a2a`); logs a warning.
+        task_store: Optional TaskStore. The default keeps the 1000 newest
+            finished tasks (see :func:`to_a2a`).
         display: Optional TerminalDisplay. When given, Uvicorn's own
             startup and access lines are replaced by the display's card
             (shown once the socket is listening) and activity rail.
@@ -658,6 +717,7 @@ def serve_agent(
     options = {
         "allow_private_push_urls": allow_private_push_urls,
         "expose_error_details": expose_error_details,
+        "task_store": task_store,
     }
 
     if kwargs.get("workers", 1) not in (None, 1) or kwargs.get("reload"):
