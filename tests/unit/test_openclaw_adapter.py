@@ -372,6 +372,32 @@ class TestOpenClawAdapterFromFramework:
         assert "without visible output" in result.status.message.parts[0].text.lower()
 
 
+class TestOpenClawAdapterFailureDetection:
+    """from_framework shares the v0.2 adapter's failure detection."""
+
+    @pytest.mark.asyncio
+    async def test_error_object_gives_failed_task(self):
+        adapter = OpenClawAgentAdapter()
+        params = make_message_send_params("hello")
+
+        result = await adapter.from_framework({"error": {"message": "quota"}}, params)
+
+        assert isinstance(result, Task)
+        assert result.status.state == TaskState.TASK_STATE_FAILED
+        assert result.status.message.parts[0].text == "quota"
+
+    @pytest.mark.asyncio
+    async def test_message_beside_a_payload_is_not_a_failure(self):
+        adapter = OpenClawAgentAdapter()
+        params = make_message_send_params("hello")
+        framework_output = {**make_openclaw_output("answer"), "message": "note"}
+
+        result = await adapter.from_framework(framework_output, params)
+
+        assert isinstance(result, Message)
+        assert result.parts[0].text == "answer"
+
+
 class TestOpenClawAdapterMimeTypeDetection:
     """Tests for MIME type detection."""
 

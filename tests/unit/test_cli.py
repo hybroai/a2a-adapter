@@ -79,7 +79,9 @@ def test_codex_cli_forwards_native_args_before_adapter_protocol_args(tmp_path):
     assert isinstance(adapter, CodexAdapter)
     assert adapter.codex_path == "/opt/codex"
     assert adapter.cli_args == ["--model", "example-model", "--sandbox", "workspace-write"]
-    assert adapter._build_command("hello", "ctx").args == [
+    first = adapter._build_command("hello", "ctx")
+    assert first.stdin == "hello"
+    assert first.args == [
         "/opt/codex",
         "exec",
         "--model",
@@ -87,11 +89,13 @@ def test_codex_cli_forwards_native_args_before_adapter_protocol_args(tmp_path):
         "--sandbox",
         "workspace-write",
         "--json",
-        "hello",
+        "-",
     ]
 
     adapter._sessions["ctx"] = "thread-1"
-    assert adapter._build_command("continue", "ctx").args == [
+    resumed = adapter._build_command("continue", "ctx")
+    assert resumed.stdin == "continue"
+    assert resumed.args == [
         "/opt/codex",
         "exec",
         "--model",
@@ -101,7 +105,7 @@ def test_codex_cli_forwards_native_args_before_adapter_protocol_args(tmp_path):
         "resume",
         "thread-1",
         "--json",
-        "continue",
+        "-",
     ]
 
 

@@ -9,6 +9,8 @@ stale session retry, session persistence, loader integration, and flat import.
 import asyncio
 import json
 import os
+import stat
+import sys
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -99,8 +101,9 @@ class TestBuildCommand:
         assert "--json" in cmd.args
         assert "--dangerously-bypass-approvals-and-sandbox" not in cmd.args
         assert "--skip-git-repo-check" not in cmd.args
-        # Prompt is ALWAYS the last argument
-        assert cmd.args[-1] == "hello world"
+        # The prompt goes through stdin; "-" tells Codex to read it from there
+        assert cmd.args[-1] == "-"
+        assert cmd.stdin == "hello world"
         assert cmd.used_resume is False
 
     def test_resume_with_thread_id(self, adapter):
@@ -114,8 +117,9 @@ class TestBuildCommand:
         assert "--json" in cmd.args
         assert "--dangerously-bypass-approvals-and-sandbox" not in cmd.args
         assert "--skip-git-repo-check" not in cmd.args
-        # Prompt is still the last argument
-        assert cmd.args[-1] == "continue"
+        # The prompt still goes through stdin
+        assert cmd.args[-1] == "-"
+        assert cmd.stdin == "continue"
         assert cmd.used_resume is True
 
     def test_custom_codex_path(self, tmp_path):
@@ -128,9 +132,10 @@ class TestBuildCommand:
         assert cmd.args[0] == "/usr/local/bin/codex"
 
     def test_prompt_with_special_chars(self, adapter):
-        """Prompt with spaces and special chars is passed as single arg."""
+        """Prompt with spaces and special chars goes through stdin unchanged."""
         cmd = adapter._build_command("fix the bug in main.py --verbose", "_default")
-        assert cmd.args[-1] == "fix the bug in main.py --verbose"
+        assert cmd.args[-1] == "-"
+        assert cmd.stdin == "fix the bug in main.py --verbose"
 
     def test_dangerous_flags_omitted_by_default(self, adapter):
         cmd = adapter._build_command("hello", "_default")
@@ -168,7 +173,8 @@ class TestBuildCommand:
         cmd = a._build_command("hello", "_default")
         assert "--dangerously-bypass-approvals-and-sandbox" in cmd.args
         assert "--skip-git-repo-check" in cmd.args
-        assert cmd.args[-1] == "hello"
+        assert cmd.args[-1] == "-"
+        assert cmd.stdin == "hello"
 
     def test_bypass_approvals_via_env_var(self, tmp_path, monkeypatch):
         monkeypatch.setenv("A2A_CODEX_BYPASS_APPROVALS", "1")
@@ -269,7 +275,8 @@ class TestBuildCommand:
                 session_store_path=str(tmp_path / "s.json"),
             )
             cmd = a._build_command("the prompt", "_default")
-            assert cmd.args[-1] == "the prompt"
+            assert cmd.args[-1] == "-"
+            assert cmd.stdin == "the prompt"
 
     def test_env_vars_param_does_not_enable_dangerous_flags(self, tmp_path, monkeypatch):
         """env_vars is for the subprocess environment, not adapter config."""
@@ -288,6 +295,137 @@ class TestBuildCommand:
         cmd = a._build_command("hello", "_default")
         assert "--dangerously-bypass-approvals-and-sandbox" not in cmd.args
         assert "--skip-git-repo-check" not in cmd.args
+
+
+# ──── Test: the prompt can never be parsed as CLI arguments ────
+
+_STUB_CODEX = """#!{python}
+# Mimics how Codex's clap parser treats the final argv element.
+import json, os, sys
+
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "argv.jsonl"), "a") as log:
+    log.write(json.dumps(sys.argv) + "\\n")
+
+last = sys.argv[-1]
+if last == "-":
+    prompt = sys.stdin.buffer.read().decode("utf-8")
+    if not prompt:
+        print("No prompt provided via stdin", file=sys.stderr)
+        sys.exit(1)
+elif last in ("--help", "--version", "help"):
+    print("usage text")
+    sys.exit(0)
+elif last in ("review", "resume", "fork"):
+    print("subcommand needs options", file=sys.stderr)
+    sys.exit(1)
+elif last.startswith("-"):
+    print("error: unexpected argument", file=sys.stderr)
+    sys.exit(2)
+else:
+    prompt = last
+
+print(json.dumps({{"type": "thread.started", "thread_id": "thread-stub"}}))
+print(json.dumps({{"type": "item.completed", "item": {{"type": "agent_message", "text": prompt}}}}))
+"""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uses a POSIX shebang script")
+class TestPromptNeverParsedAsArgs:
+    """A real subprocess, against a stub that parses argv the way Codex does."""
+
+    @pytest.fixture
+    def stub_adapter(self, tmp_path):
+        stub = tmp_path / "codex"
+        stub.write_text(_STUB_CODEX.format(python=sys.executable))
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        return CodexAdapter(
+            working_dir=str(tmp_path),
+            codex_path=str(stub),
+            session_store_path=str(tmp_path / "s.json"),
+        )
+
+    @staticmethod
+    def _recorded_argv(adapter):
+        log = os.path.join(os.path.dirname(adapter.codex_path), "argv.jsonl")
+        with open(log) as f:
+            return [json.loads(line) for line in f]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "--help",
+            "--version",
+            "-c foo=bar",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-",
+            "--",
+            "help",
+            "review",
+            "resume",
+            "fork",
+        ],
+    )
+    async def test_prompt_reaches_codex_verbatim(self, stub_adapter, prompt):
+        result = await stub_adapter.invoke(prompt, context_id="ctx")
+        assert result == prompt
+
+    @pytest.mark.asyncio
+    async def test_resumed_run_keeps_a_flag_like_prompt(self, stub_adapter):
+        stub_adapter._sessions["ctx"] = "thread-1"
+        result = await stub_adapter.invoke("--help", context_id="ctx")
+        assert result == "--help"
+        recorded = self._recorded_argv(stub_adapter)
+        assert len(recorded) == 1
+        index = recorded[0].index("resume")
+        assert recorded[0][index + 1] == "thread-1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "prompt",
+        ["x" * (2 * 1024 * 1024), "line one\nline two\n\u4f60\u597d \u00e9"],
+        ids=["2MiB", "newlines-and-non-ascii"],
+    )
+    async def test_large_and_multiline_prompts_arrive_intact(self, stub_adapter, prompt):
+        assert await stub_adapter.invoke(prompt, context_id="ctx") == prompt
+
+    @pytest.mark.asyncio
+    async def test_prompt_never_appears_in_argv(self, stub_adapter):
+        sentinel = "sentinel-3f9a1c prompt text"
+        assert await stub_adapter.invoke(sentinel, context_id="ctx") == sentinel
+        recorded = self._recorded_argv(stub_adapter)
+        assert len(recorded) == 1
+        assert not any("sentinel-3f9a1c" in element for element in recorded[0])
+
+    @pytest.mark.asyncio
+    async def test_stale_session_retry_sends_prompt_on_stdin_again(self, adapter):
+        adapter._sessions["ctx"] = "old-thread"
+        procs = []
+
+        async def spawn(*args, **kwargs):
+            proc = AsyncMock()
+            proc.pid = len(procs) + 1
+            if procs:
+                stdout = json.dumps(_item_completed_event("retried"))
+                proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
+                proc.returncode = 0
+            else:
+                proc.communicate = AsyncMock(return_value=(b"", b""))
+                proc.returncode = 1
+            proc.spawn_args = args
+            procs.append(proc)
+            return proc
+
+        with patch("a2a_adapter.base_adapter.create_subprocess_exec", side_effect=spawn):
+            result = await adapter.invoke("--help", context_id="ctx")
+
+        assert result == "retried"
+        assert len(procs) == 2
+        assert "resume" in procs[0].spawn_args
+        assert "resume" not in procs[1].spawn_args
+        for proc in procs:
+            assert proc.spawn_args[-1] == "-"
+            proc.communicate.assert_awaited_once_with(input=b"--help")
 
 
 # ──── Test: _parse_result ────
@@ -529,7 +667,7 @@ class TestPerContextSerial:
         event_first_started = asyncio.Event()
         event_release_first = asyncio.Event()
 
-        async def slow_communicate():
+        async def slow_communicate(input=None):
             execution_order.append("first_start")
             event_first_started.set()
             await event_release_first.wait()
@@ -537,7 +675,7 @@ class TestPerContextSerial:
             stdout = json.dumps(_item_completed_event("r1"))
             return (stdout.encode(), b"")
 
-        async def fast_communicate():
+        async def fast_communicate(input=None):
             execution_order.append("second_start")
             stdout = json.dumps(_item_completed_event("r2"))
             return (stdout.encode(), b"")
@@ -601,7 +739,7 @@ class TestPerContextSerial:
         started_count = 0
         release = asyncio.Event()
 
-        async def tracked_communicate():
+        async def tracked_communicate(input=None):
             nonlocal started_count
             started_count += 1
             if started_count >= 2:

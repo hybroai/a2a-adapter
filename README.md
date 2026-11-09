@@ -92,6 +92,10 @@ client can make the server send requests.
 | Python callable | `CallableAdapter` | Optional | [quickstart.py](examples/quickstart.py) |
 | Custom class | `BaseA2AAdapter` | Optional | [custom_adapter.py](examples/custom_adapter.py) |
 
+`CrewAIAdapter` runs each request on its own copy of the crew, and falls back
+to one request at a time for crews that cannot be faithfully copied (a timed-out
+kickoff may still overlap the next request there).
+
 ## 2. Use It as a CLI
 
 Start a classic local agent (Claude Code, Codex, Pi, OpenClaw, or DeepSeek
@@ -133,8 +137,8 @@ a2a-adapter codex --port 9011 -- --model <model> --sandbox workspace-write
 a2a-adapter openclaw --port 9008 --agent-id main --thinking high
 ```
 
-The adapter sends each prompt to OpenClaw on stdin, so long prompts are not
-limited by the OS command-line length; OpenClaw itself rejects prompts over
+The adapters send each prompt to Codex and OpenClaw on stdin, so long prompts
+are not limited by the OS command-line length; OpenClaw itself rejects prompts over
 4 MiB. This needs an OpenClaw release that supports
 `openclaw agent --message-file`.
 

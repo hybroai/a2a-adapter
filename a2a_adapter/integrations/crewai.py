@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict
@@ -59,6 +60,115 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Fields CrewAI overwrites on each kickoff, by the Crew collection holding them.
+_TEMPLATE_FIELDS = (
+    ("tasks", ("description", "expected_output", "output_file")),
+    ("agents", ("role", "goal", "backstory")),
+)
+
+_MEMORY_FIELDS = (
+    "memory",
+    "short_term_memory",
+    "long_term_memory",
+    "entity_memory",
+    "external_memory",
+)
+
+
+def _needs_shared_crew(crew: Any) -> bool:
+    """Whether a copy of ``crew`` would not behave like the original.
+
+    Crew-level knowledge would be re-embedded by every copy, memory would be
+    rebuilt (and its embedder called) or deep-copied and then lost with the
+    copy, a per-copy RPM controller would no longer enforce the limit across
+    requests, ``copy()`` drops an agent's ``mcps`` and ``apps``, and an agent's
+    ``from_repository`` would be fetched again by every copy.
+    """
+    if not callable(getattr(crew, "copy", None)):
+        return True
+    if getattr(crew, "knowledge_sources", None) or getattr(crew, "max_rpm", None):
+        return True
+    if any(getattr(crew, name, None) for name in _MEMORY_FIELDS):
+        return True
+    agents = [*getattr(crew, "agents", ()), getattr(crew, "manager_agent", None)]
+    return any(
+        getattr(agent, name, None)
+        for agent in agents
+        for name in ("max_rpm", "mcps", "apps", "from_repository")
+    )
+
+
+def _position(item: Any, items: list[Any]) -> int | str | None:
+    """Where ``item`` sits in ``items``, compared by identity."""
+    if item is None:
+        return None
+    return next((i for i, candidate in enumerate(items) if candidate is item), "not-in-crew")
+
+
+def _task_wiring(crew: Any) -> list[tuple[Any, Any]]:
+    """Each task's agent position and context task positions."""
+    agents = list(getattr(crew, "agents", ()))
+    tasks = list(getattr(crew, "tasks", ()))
+    wiring = []
+    for task in tasks:
+        context = getattr(task, "context", None)
+        context_positions = (
+            [_position(item, tasks) for item in context] if isinstance(context, list) else None
+        )
+        wiring.append((_position(getattr(task, "agent", None), agents), context_positions))
+    return wiring
+
+
+def _forget_finished_task_spans() -> None:
+    """Drop finished tasks from CrewAI's process-wide event listener.
+
+    It keys a span by task and never removes the key, and each task references
+    its whole crew, so every per-request copy would otherwise stay in memory
+    along with its prompts and outputs. A span is None once its task has ended.
+    """
+    try:
+        module = sys.modules.get("crewai.events.event_listener")
+        spans = getattr(getattr(module, "event_listener", None), "execution_spans", None)
+        if isinstance(spans, dict):
+            for task, span in list(spans.items()):
+                if span is None:
+                    spans.pop(task, None)
+    except Exception:
+        logger.debug("Could not clear CrewAI's finished task spans", exc_info=True)
+
+
+def _copy_crew(crew: Any) -> Any | None:
+    """Return a private copy of ``crew``, or None if it cannot be faithfully isolated."""
+    try:
+        if _needs_shared_crew(crew):
+            return None
+        _forget_finished_task_spans()
+        clone = crew.copy()
+        if clone is crew or type(clone) is not type(crew):
+            return None
+        for collection, _ in _TEMPLATE_FIELDS:
+            if len(list(getattr(clone, collection, ()))) != len(
+                list(getattr(crew, collection, ()))
+            ):
+                return None
+        # copy() rebinds agents by role and context by a hash of the task's
+        # text, so duplicates end up wired to the wrong agent or task.
+        if _task_wiring(clone) != _task_wiring(crew):
+            return None
+        # copy() dumps the fields as last interpolated; put the templates back
+        # so a crew that already ran does not answer with its previous input.
+        for collection, fields in _TEMPLATE_FIELDS:
+            pairs = zip(getattr(crew, collection, ()), getattr(clone, collection, ()))
+            for source, target in pairs:
+                for field in fields:
+                    template = getattr(source, f"_original_{field}", None)
+                    if template is not None:
+                        setattr(target, field, template)
+        return clone
+    except Exception:
+        logger.warning("Could not copy the CrewAI crew", exc_info=True)
+        return None
+
 
 # ═══════════════════════════════════════════════════════════════
 # v0.2 Adapter (new, recommended)
@@ -72,6 +182,20 @@ class CrewAIAdapter(BaseA2AAdapter):
     thread when the crew has no ``kickoff_async``)
     and returns the crew result as text. CrewAI does not support streaming,
     so only ``invoke()`` is implemented.
+
+    A kickoff mutates its Crew, so each request runs on its own ``crew.copy()``
+    and ``crew`` itself stays a pristine template: its ``usage_metrics`` and
+    task outputs are not updated, and each copy has its own tool cache. Tools,
+    callbacks and LLM clients are still shared between copies, so they must be
+    thread-safe, as with ``kickoff_for_each_async``.
+
+    A crew that cannot be faithfully copied runs on the original, one request
+    at a time, and a warning is logged once. That covers crews with no
+    ``copy()``, ``Crew`` subclasses, crew-level ``knowledge_sources`` or
+    memory, ``max_rpm`` on the crew or an agent, agents with ``mcps``,
+    ``apps`` or ``from_repository``, agents sharing a role, and tasks with identical text where one
+    is used as context. A kickoff that times out on the original may keep
+    running in its worker thread, so it can overlap the next request.
 
     Example::
 
@@ -104,7 +228,8 @@ class CrewAIAdapter(BaseA2AAdapter):
         """Initialize the CrewAI adapter.
 
         Args:
-            crew: A CrewAI Crew instance to execute.
+            crew: A CrewAI Crew instance, used as the template for a private
+                copy per request (see the class docstring for the exceptions).
             inputs_key: Key for passing text inputs to the crew (default: "inputs").
             timeout: Execution timeout in seconds (default: 300).
             parse_json_input: Auto-parse JSON input (default: True).
@@ -130,20 +255,42 @@ class CrewAIAdapter(BaseA2AAdapter):
         self._provider = provider
         self._documentation_url = documentation_url
         self._icon_url = icon_url
+        self._copy_per_request = True
+        self._shared_crew_lock = asyncio.Lock()
 
     async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
         """Execute the crew and return the result as text."""
         inputs = self._build_inputs(user_input, context_id)
+        result = await run_with_timeout(self._kickoff(inputs), self.timeout, "CrewAI crew")
+        return self._extract_output(result)
+
+    async def _kickoff(self, inputs: Dict[str, Any]) -> Any:
+        """Run one request on a private copy, or serialised on the original."""
+        if self._copy_per_request:
+            # Crew() validators can touch disk or embedders, so copy off the event loop.
+            crew = await asyncio.to_thread(_copy_crew, self.crew)
+            if crew is not None:
+                return await self._start_kickoff(crew, inputs)
+            if self._copy_per_request:
+                self._copy_per_request = False
+                logger.warning(
+                    "This CrewAI crew cannot be copied per request, so requests "
+                    "will run on it one at a time."
+                )
+        # After a timeout the lock is released while the kickoff's worker
+        # thread, which cannot be cancelled, may still be running on this crew.
+        async with self._shared_crew_lock:
+            return await self._start_kickoff(self.crew, inputs)
+
+    @staticmethod
+    async def _start_kickoff(crew: Any, inputs: Dict[str, Any]) -> Any:
         # Check up front: catching AttributeError would also catch one raised
         # inside the crew and run it a second time via the fallback.
-        if hasattr(self.crew, "kickoff_async"):
-            run = self.crew.kickoff_async(inputs=inputs)
-        else:
-            # Older CrewAI versions without async support
-            logger.warning("CrewAI kickoff_async not available, using sync fallback")
-            run = asyncio.to_thread(self.crew.kickoff, inputs=inputs)
-        result = await run_with_timeout(run, self.timeout, "CrewAI crew")
-        return self._extract_output(result)
+        if hasattr(crew, "kickoff_async"):
+            return await crew.kickoff_async(inputs=inputs)
+        # Older CrewAI versions without async support
+        logger.warning("CrewAI kickoff_async not available, using sync fallback")
+        return await asyncio.to_thread(crew.kickoff, inputs=inputs)
 
     def get_metadata(self) -> AdapterMetadata:
         """Return adapter metadata for AgentCard generation."""

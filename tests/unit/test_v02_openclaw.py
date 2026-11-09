@@ -12,6 +12,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from a2a_adapter.integrations.openclaw import (
+    _extract_openclaw_failure_message,
     OpenClawAdapter,
     VALID_THINKING_LEVELS,
     _SESSION_ID_MAX_LEN,
@@ -414,6 +415,187 @@ async def test_timeout_kills_child():
 
     assert proc.killed
     assert "t-timeout" not in adapter._active_processes
+
+
+# ──── Test: errors reported with exit code 0 ────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ({"error": "x-detail"}, "x-detail"),
+        ({"error_message": "x-detail"}, "x-detail"),
+        ({"message": "x-detail"}, "x-detail"),
+        ({"error": {"message": "x-detail"}}, "x-detail"),
+        ({"error": {"kind": "x-detail"}}, "x-detail"),
+        ({"error": {"code": 429}}, "429"),
+        ({"error": ["x-detail"]}, "x-detail"),
+        ({"error": 429}, "429"),
+        ({"error": True}, "true"),
+        ({"meta": {"error": "x-detail"}}, "x-detail"),
+        ({"meta": {"error": {"kind": "k", "message": "x-detail"}}}, "x-detail"),
+        ({"payloads": [{"text": "partial"}], "error": "x-detail"}, "x-detail"),
+        ({"payloads": [{"text": "x-detail", "isError": True}]}, "x-detail"),
+        (
+            {"payloads": [{"text": "x-detail", "isError": True}, {"isError": True}]},
+            "x-detail",
+        ),
+        ({"payloads": [{"isError": True}]}, "marked as an error"),
+    ],
+)
+async def test_invoke_exit_zero_failure_raises(output, expected):
+    adapter = OpenClawAdapter(session_id="test")
+
+    with patch(_SPAWN, AsyncMock(return_value=_finished(json.dumps(output).encode()))):
+        with pytest.raises(RuntimeError, match=f"reported a failure: .*{expected}"):
+            await adapter.invoke("test")
+
+
+@pytest.mark.asyncio
+async def test_invoke_exit_zero_error_on_stderr_raises():
+    adapter = OpenClawAdapter(session_id="test")
+    stderr = json.dumps({"error": "x-detail"}).encode()
+
+    with patch(_SPAWN, AsyncMock(return_value=_finished(b"", stderr))):
+        with pytest.raises(RuntimeError, match="x-detail"):
+            await adapter.invoke("test")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ({"payloads": [{"text": "there was an error"}]}, "there was an error"),
+        ({"payloads": [{"text": "Error: file not found"}]}, "Error: file not found"),
+        ({"payloads": [{"text": '{"error": "x"}'}]}, '{"error": "x"}'),
+        ({"error": None, "payloads": [{"text": "answer"}]}, "answer"),
+        ({"error": "", "payloads": [{"text": "answer"}]}, "answer"),
+        ({"error": "   ", "payloads": [{"text": "answer"}]}, "answer"),
+        ({"error": False, "payloads": [{"text": "answer"}]}, "answer"),
+        ({"error": 0, "payloads": [{"text": "answer"}]}, "answer"),
+        ({"error": {}, "payloads": [{"text": "answer"}]}, "answer"),
+        ({"error": [], "payloads": [{"text": "answer"}]}, "answer"),
+        ({"meta": {"error": None}, "payloads": [{"text": "answer"}]}, "answer"),
+        ({"message": "note", "payloads": [{"text": "answer"}]}, "answer"),
+        (
+            {"payloads": [{"text": "warned", "isError": True}, {"text": "answer"}]},
+            "warned\n\nanswer",
+        ),
+        ({"payloads": [{"text": "answer", "isError": "true"}]}, "answer"),
+        ({"message": {"a": 1}}, ""),
+        ({"message": True}, ""),
+        ({"payloads": [], "meta": {"stopReason": "end"}}, ""),
+    ],
+)
+async def test_invoke_exit_zero_success_returns_text(output, expected):
+    adapter = OpenClawAdapter(session_id="test")
+
+    with patch(_SPAWN, AsyncMock(return_value=_finished(json.dumps(output).encode()))):
+        assert await adapter.invoke("test") == expected
+
+
+@pytest.mark.asyncio
+async def test_invoke_json_array_raises():
+    adapter = OpenClawAdapter(session_id="test")
+
+    with patch(_SPAWN, AsyncMock(return_value=_finished(b'["a"]'))):
+        with pytest.raises(RuntimeError, match="unexpected JSON"):
+            await adapter.invoke("test")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payloads", [None, "not-a-list", [1, {"text": "answer"}]])
+async def test_invoke_malformed_payloads_raise(payloads):
+    adapter = OpenClawAdapter(session_id="test")
+    stdout = json.dumps({"payloads": payloads}).encode()
+
+    with patch(_SPAWN, AsyncMock(return_value=_finished(stdout))):
+        with pytest.raises(RuntimeError, match="unexpected JSON"):
+            await adapter.invoke("test")
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        {"message": "note", "payloads": [{"mediaUrl": "https://example.test/a.png"}]},
+        {"message": "note", "payloads": [{"mediaUrls": ["https://example.test/a.png"]}]},
+        {"message": "note", "payloads": [1, {"text": "answer"}]},
+    ],
+)
+def test_message_does_not_outrank_a_visible_payload(output):
+    assert _extract_openclaw_failure_message(output) is None
+
+
+@pytest.mark.parametrize(
+    "payloads",
+    ["not-a-list", [], [1, "x"], [{"text": "   "}], [{"mediaUrl": None, "mediaUrls": []}]],
+)
+def test_message_is_the_failure_without_a_visible_payload(payloads):
+    assert _extract_openclaw_failure_message({"message": "x", "payloads": payloads}) == "x"
+
+
+def test_error_object_without_readable_fields_is_truncated():
+    message = _extract_openclaw_failure_message({"error": {"detail": "y" * 5000}})
+    assert message.startswith('{"detail"')
+    assert len(message) < 1000
+
+
+def test_structured_error_text_stays_readable():
+    message = _extract_openclaw_failure_message({"error": {"detail": "配额不足"}})
+    assert "配额不足" in message
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ({"error": {"message": "from object"}}, "from object"),
+        ({"message": "quota", "payloads": [{"text": "partial"}]}, "quota"),
+    ],
+)
+def test_extract_error_on_nonzero_exit(output, expected):
+    adapter = OpenClawAdapter(session_id="test")
+    assert adapter._extract_error(json.dumps(output)) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output", "final", "absent"),
+    [
+        (
+            {"error": "x-detail"},
+            TaskState.TASK_STATE_FAILED,
+            TaskState.TASK_STATE_COMPLETED,
+        ),
+        (
+            {"payloads": [{"text": "fine"}]},
+            TaskState.TASK_STATE_COMPLETED,
+            TaskState.TASK_STATE_FAILED,
+        ),
+    ],
+)
+async def test_exit_zero_result_through_executor(output, final, absent):
+    from a2a_adapter.executor import AdapterAgentExecutor
+
+    executor = AdapterAgentExecutor(OpenClawAdapter())
+    ctx = MagicMock()
+    ctx.task_id = "t-exec"
+    ctx.context_id = "c-exec"
+    ctx.current_task = None
+    ctx.get_user_input.return_value = "hi"
+    queue = AsyncMock()
+
+    proc = _finished(json.dumps(output).encode())
+    with patch(_SPAWN, AsyncMock(return_value=proc)):
+        await asyncio.wait_for(executor.execute(ctx, queue), 2)
+
+    states = [
+        call.args[0].status.state
+        for call in queue.enqueue_event.call_args_list
+        if hasattr(call.args[0], "status")
+    ]
+    assert states[-1] == final
+    assert absent not in states
 
 
 # ──── Test: Cancel ────
