@@ -289,6 +289,9 @@ class BaseA2AAdapter(ABC):
         Level 3: Implement AgentExecutor directly      (full SDK access)
     """
 
+    # Saved CLI sessions kept per adapter; the oldest are evicted first.
+    _MAX_SESSIONS = 10_000
+
     def __init__(
         self,
         *,
@@ -514,6 +517,7 @@ class BaseA2AAdapter(ABC):
             raise CancelledByAdapterError(f"Task {task_id} was cancelled before execution started")
 
         # 2. Build command (subclass hook)
+        self._touch_session(context_key)
         cmd_result = self._build_command(user_input, context_key)
         logger.debug("Executing command: %s", " ".join(cmd_result.args))
         stdin_bytes = cmd_result.stdin.encode("utf-8") if cmd_result.stdin is not None else None
@@ -610,8 +614,7 @@ class BaseA2AAdapter(ABC):
 
         # 9. Persist session
         if result.session_id:
-            self._sessions[context_key] = result.session_id
-            self._save_sessions()
+            self._remember_session(context_key, result.session_id)
 
         return result.text
 
@@ -642,6 +645,7 @@ class BaseA2AAdapter(ABC):
             raise CancelledByAdapterError(f"Task {task_id} was cancelled before execution started")
 
         # 2. Build command
+        self._touch_session(context_key)
         cmd_result = self._build_command(user_input, context_key)
         logger.debug("Streaming command: %s", " ".join(cmd_result.args))
 
@@ -740,8 +744,7 @@ class BaseA2AAdapter(ABC):
                         break
                     raise RuntimeError(event.error)
                 if event.session_id:
-                    self._sessions[context_key] = event.session_id
-                    self._save_sessions()
+                    self._remember_session(context_key, event.session_id)
                 if event.text:
                     yielded_any = True
                     yield event.text
@@ -867,6 +870,20 @@ class BaseA2AAdapter(ABC):
         """Build subprocess environment: os.environ (minus server secrets) + self.env_vars."""
         return _child_env(self.env_vars)
 
+    def _touch_session(self, context_key: str) -> None:
+        """Mark a saved session as the most recently used."""
+        session_id = self._sessions.pop(context_key, None)
+        if session_id is not None:
+            self._sessions[context_key] = session_id
+
+    def _remember_session(self, context_key: str, session_id: str) -> None:
+        """Save a session as the newest one, dropping the oldest over the cap."""
+        self._sessions.pop(context_key, None)
+        self._sessions[context_key] = session_id
+        while len(self._sessions) > self._MAX_SESSIONS:
+            del self._sessions[next(iter(self._sessions))]
+        self._save_sessions()
+
     def _load_sessions(self) -> None:
         """Load session mapping from disk. Missing/corrupt -> empty dict."""
         try:
@@ -884,7 +901,16 @@ class BaseA2AAdapter(ABC):
             self._sessions = {}
             return
         if isinstance(data, dict):
-            self._sessions = {str(k): str(v) for k, v in data.items()}
+            sessions = [(str(k), str(v)) for k, v in data.items()]
+            if len(sessions) > self._MAX_SESSIONS:
+                logger.info(
+                    "Session store %s holds %d sessions; keeping the last %d in the file",
+                    self._session_store_path,
+                    len(sessions),
+                    self._MAX_SESSIONS,
+                )
+                sessions = sessions[-self._MAX_SESSIONS :]
+            self._sessions = dict(sessions)
             logger.debug(
                 "Loaded %d session(s) from %s",
                 len(self._sessions),

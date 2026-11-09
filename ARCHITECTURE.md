@@ -122,6 +122,12 @@ their own per-task cancel markers (Pi, DeepSeek Harness) override it.
 that keeps printing still stops at the deadline). The stale-session retry
 gets a fresh budget.
 
+The saved session store keeps the 10,000 most recently used conversations and
+evicts the oldest first. A conversation idle behind 10,000 newer ones starts
+fresh instead of resuming; the CLI's own transcript is untouched. Stores
+written by earlier versions have no usage order: an oversized one keeps the
+conversations first seen most recently.
+
 A resumed run whose session no longer exists is retried once without resume
 and the stored session is dropped. By default that is detected only when the
 run failed with no output at all; an adapter can override

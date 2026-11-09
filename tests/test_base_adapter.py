@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import gc
+import json
 import logging
 import os
 from types import SimpleNamespace
@@ -267,6 +268,89 @@ class TestSessionStore:
         adapter._sessions = {"ctx-1": "sess-A"}
         adapter._save_sessions()
         assert calls == ["fsync", "replace"]
+
+
+class TestSessionStoreCap:
+    def _capped(self, tmp_path, monkeypatch, cap=2):
+        monkeypatch.setattr(BaseA2AAdapter, "_MAX_SESSIONS", cap)
+        return SleepingCliAdapter(tmp_path)
+
+    def test_oldest_session_is_evicted_first(self, tmp_path, monkeypatch):
+        adapter = self._capped(tmp_path, monkeypatch)
+        for key in ("a", "b", "c"):
+            adapter._remember_session(key, f"sess-{key}")
+        assert list(adapter._sessions) == ["b", "c"]
+
+    def test_remembering_moves_a_session_to_the_end(self, tmp_path, monkeypatch):
+        adapter = self._capped(tmp_path, monkeypatch)
+        adapter._remember_session("a", "1")
+        adapter._remember_session("b", "2")
+        adapter._remember_session("a", "3")
+        adapter._remember_session("c", "4")
+        assert adapter._sessions == {"a": "3", "c": "4"}
+
+    def test_touch_protects_a_session_in_use(self, tmp_path, monkeypatch):
+        adapter = self._capped(tmp_path, monkeypatch)
+        adapter._remember_session("a", "1")
+        adapter._remember_session("b", "2")
+        adapter._touch_session("a")
+        adapter._remember_session("c", "3")
+        assert list(adapter._sessions) == ["a", "c"]
+
+    def test_touching_an_unknown_session_adds_nothing(self, tmp_path, monkeypatch):
+        adapter = self._capped(tmp_path, monkeypatch)
+        adapter._touch_session("missing")
+        assert adapter._sessions == {}
+
+    def test_an_oversized_store_keeps_the_newest_on_load(self, tmp_path, monkeypatch, caplog):
+        (tmp_path / "sessions.json").write_text(json.dumps({"a": "1", "b": "2", "c": "3"}))
+        with caplog.at_level(logging.INFO, logger="a2a_adapter.base_adapter"):
+            adapter = self._capped(tmp_path, monkeypatch)
+        assert adapter._sessions == {"b": "2", "c": "3"}
+        assert any("sessions.json" in r.getMessage() for r in caplog.records)
+
+    def test_file_is_bounded_after_eviction(self, tmp_path, monkeypatch):
+        adapter = self._capped(tmp_path, monkeypatch)
+        for key in ("a", "b", "c", "d"):
+            adapter._remember_session(key, f"sess-{key}")
+        stored = json.loads((tmp_path / "sessions.json").read_text())
+        assert list(stored) == ["c", "d"]
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_a_run_touches_its_session_before_building_the_command(
+        self, tmp_path, monkeypatch, streaming
+    ):
+        adapter = _stale_adapter(tmp_path)
+        adapter._sessions = {"ctx": "old-session", "newer": "s"}
+        seen = []
+        real = adapter._build_command
+
+        def build(message, context_key):
+            seen.append(list(adapter._sessions))
+            return real(message, context_key)
+
+        adapter._build_command = build
+        if streaming:
+            _spawning(monkeypatch, [_stream_proc([b"hello\n"], b"", 0)])
+            _ = [c async for c in adapter.stream("hi")]
+        else:
+            _spawning(monkeypatch, [_invoke_proc(b"hello", b"", 0)])
+            await adapter.invoke("hi")
+        assert seen == [["newer", "ctx"]]
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_a_run_goes_through_the_cap(self, tmp_path, monkeypatch, streaming):
+        monkeypatch.setattr(BaseA2AAdapter, "_MAX_SESSIONS", 1)
+        adapter = _stale_adapter(tmp_path)
+        adapter._sessions = {"older": "s", "ctx": "old-session"}
+        if streaming:
+            _spawning(monkeypatch, [_stream_proc([b"SID fresh\n", b"hello\n"], b"", 0)])
+            _ = [c async for c in adapter.stream("hi")]
+            assert adapter._sessions == {"ctx": "fresh"}
+        else:
+            _spawning(monkeypatch, [_invoke_proc(b"hello", b"", 0)])
+            await adapter.invoke("hi")
+            assert adapter._sessions == {"ctx": "new-session"}
 
 
 class TestContextLocks:
