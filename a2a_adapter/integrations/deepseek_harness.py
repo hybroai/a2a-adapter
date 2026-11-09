@@ -85,7 +85,11 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
     The SDK has no interrupt call, so cancelling the running task closes the
     runtime; the next turn launches a new one and resumes its session. The SDK
     has no call to close one session either, so every conversation seen since
-    the runtime launched stays open in it until the runtime is closed.
+    the runtime launched stays open in it until the runtime is closed. At 256
+    open conversations the runtime is recycled between turns: the next turn
+    launches a new one and conversations reattach when they next run. Direct
+    ``invoke`` calls with no ``context_id`` start one-off sessions, which this
+    cap does not count; the A2A server always supplies a context id.
 
     Example::
 
@@ -94,6 +98,9 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
         adapter = DeepSeekHarnessAdapter(working_dir="/path/to/project")
         serve_agent(adapter, host="127.0.0.1", port=9010)
     """
+
+    # Sessions one runtime may hold open before it is recycled.
+    _MAX_SESSION_HANDLES = 256
 
     def __init__(
         self,
@@ -428,6 +435,10 @@ class DeepSeekHarnessAdapter(BaseA2AAdapter):
         """Run one turn, relaunching once if the runtime died while idle."""
         for attempt in range(2):
             harness = await self._ensure_harness()
+            if len(self._session_handles) >= self._MAX_SESSION_HANDLES:
+                # The turn lock is held, so nothing is running on it.
+                await self._drop_harness(harness)
+                harness = await self._ensure_harness()
             if task_id in self._cancelled_tasks:
                 raise CancelledByAdapterError(f"Task {task_id} was cancelled")
             try:
