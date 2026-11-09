@@ -22,15 +22,91 @@ import asyncio
 import logging
 import uuid
 import weakref
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
-from typing import AsyncIterator
+from contextlib import suppress
+from typing import Any, AsyncIterator
 
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter
 
 logger = logging.getLogger(__name__)
 
 _SENTINEL = object()
+
+
+class _Turn:
+    """One agent run, whose session lock is held until its thread ends.
+
+    The coroutine that started the run can go away first (tasks/cancel, a
+    consumer closing the stream). ``run_conversation`` keeps going in its
+    thread, so the lock must outlive the coroutine: otherwise the next
+    message on the conversation races the run on SessionDB.
+
+    ``_started``, ``_abandoned`` and ``_finished`` are shared with the worker
+    thread. ``run`` sets started and then checks abandoned; ``abandon`` sets
+    abandoned and then checks started, so one always sees the other. The lock
+    is released only on the event loop.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, lock: asyncio.Lock | None) -> None:
+        self._loop = loop
+        self._lock = lock  # also the strong reference the weak lock dict relies on
+        self._agent: Any = None
+        self._submitted = False
+        self._started = False
+        self._abandoned = False
+        self._finished = False
+
+    def submit(
+        self, executor: ThreadPoolExecutor, agent: Any, call: Callable[[], Any]
+    ) -> asyncio.Future:
+        """Run ``call`` on the pool. Wait with ``asyncio.wait``, then use :meth:`result`."""
+        future = self._loop.run_in_executor(executor, self._run, call)
+        self._agent = agent
+        self._submitted = True
+        future.add_done_callback(self._on_done)
+        return future
+
+    @staticmethod
+    def result(future: asyncio.Future) -> Any:
+        if future.cancelled():
+            raise RuntimeError("HermesAdapter closed before the turn started")
+        return future.result()
+
+    def _run(self, call: Callable[[], Any]) -> Any:
+        self._started = True
+        try:
+            if self._abandoned:
+                return None
+            return call()
+        finally:
+            self._finished = True
+            with suppress(RuntimeError):  # the loop closed while this ran
+                self._loop.call_soon_threadsafe(self._release)
+
+    def _on_done(self, future: asyncio.Future) -> None:
+        if future.cancelled():  # close() dropped it from the pool's queue
+            self._finished = True
+            self._release()
+        else:
+            future.exception()  # retrieved, for a run nobody waits for any more
+
+    def abandon(self) -> None:
+        """The coroutine is leaving: release now, or interrupt the running thread."""
+        if not self._submitted:
+            self._release()
+            return
+        self._abandoned = True
+        if self._started and not self._finished:
+            try:
+                self._agent.interrupt()
+            except Exception:
+                logger.warning("Interrupting an abandoned Hermes run failed", exc_info=True)
+
+    def _release(self) -> None:
+        if self._lock is not None:
+            lock, self._lock = self._lock, None
+            lock.release()
 
 
 class HermesAdapter(BaseA2AAdapter):
@@ -193,6 +269,14 @@ class HermesAdapter(BaseA2AAdapter):
             return context.task_id
         return uuid.uuid4().hex
 
+    async def _begin_turn(self, session_id: str, context_id: str | None) -> _Turn:
+        # A one-off session (no context_id) is never shared, so it needs no
+        # lock, and skipping it keeps _session_locks from growing per call.
+        lock = self._session_lock(session_id) if context_id else None
+        if lock is not None:
+            await lock.acquire()
+        return _Turn(asyncio.get_running_loop(), lock)
+
     # ──── Internal: result inspection ────
 
     @staticmethod
@@ -238,32 +322,33 @@ class HermesAdapter(BaseA2AAdapter):
         in a thread, and lets the agent persist updates internally.
         """
         session_id = self._session_key(context_id)
-        # A one-off session (no context_id) is never shared, so it needs no
-        # lock, and skipping it keeps _session_locks from growing per call.
-        lock = self._session_lock(session_id) if context_id else nullcontext()
-
-        async with lock:
+        turn = await self._begin_turn(session_id, context_id)
+        task_id = self._extract_task_id(kwargs)
+        try:
             db = self._ensure_session_db()
             history = db.get_messages_as_conversation(session_id) or []
 
             agent = self._make_agent(session_id)
-            task_id = self._extract_task_id(kwargs)
             self._running_agents[task_id] = agent
 
-            loop = asyncio.get_running_loop()
-            try:
-                result = await loop.run_in_executor(
-                    self._executor,
-                    lambda: agent.run_conversation(
-                        user_message=user_input,
-                        conversation_history=history,
-                        task_id=session_id,
-                    ),
-                )
-            finally:
-                self._running_agents.pop(task_id, None)
+            future = turn.submit(
+                self._executor,
+                agent,
+                lambda: agent.run_conversation(
+                    user_message=user_input,
+                    conversation_history=history,
+                    task_id=session_id,
+                ),
+            )
+            await asyncio.wait({future})
+            result = turn.result(future)
+        except BaseException:
+            turn.abandon()
+            raise
+        finally:
+            self._running_agents.pop(task_id, None)
 
-            return self._check_hermes_result(result, session_id)
+        return self._check_hermes_result(result, session_id)
 
     # ──── Optional: streaming ────
 
@@ -277,23 +362,21 @@ class HermesAdapter(BaseA2AAdapter):
         async iterator for the bridge layer.
         """
         session_id = self._session_key(context_id)
-        # A one-off session (no context_id) is never shared, so it needs no
-        # lock, and skipping it keeps _session_locks from growing per call.
-        lock = self._session_lock(session_id) if context_id else nullcontext()
-
-        async with lock:
+        turn = await self._begin_turn(session_id, context_id)
+        task_id = self._extract_task_id(kwargs)
+        try:
             db = self._ensure_session_db()
             history = db.get_messages_as_conversation(session_id) or []
 
             agent = self._make_agent(session_id)
-            task_id = self._extract_task_id(kwargs)
             self._running_agents[task_id] = agent
 
             loop = asyncio.get_running_loop()
             queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-            def emit(chunk: str):
-                loop.call_soon_threadsafe(queue.put_nowait, chunk)
+            def post(item) -> None:
+                with suppress(RuntimeError):  # an abandoned run can outlive the loop
+                    loop.call_soon_threadsafe(queue.put_nowait, item)
 
             def _run():
                 try:
@@ -301,27 +384,36 @@ class HermesAdapter(BaseA2AAdapter):
                         user_message=user_input,
                         conversation_history=history,
                         task_id=session_id,
-                        stream_callback=emit,
+                        stream_callback=post,
                     )
                 finally:
-                    loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
+                    post(_SENTINEL)
 
-            task = loop.run_in_executor(self._executor, _run)
+            future = turn.submit(self._executor, agent, _run)
 
-            try:
-                while True:
-                    chunk = await queue.get()
-                    if chunk is _SENTINEL:
-                        break
-                    if not chunk:
-                        continue
-                    yield chunk
+            def wake_if_dropped(done: asyncio.Future) -> None:
+                if done.cancelled():  # _run never ran, so it sent no sentinel
+                    queue.put_nowait(_SENTINEL)
 
-                result = await task
-                if result:
-                    self._check_hermes_result(result, session_id)
-            finally:
-                self._running_agents.pop(task_id, None)
+            future.add_done_callback(wake_if_dropped)
+
+            while True:
+                chunk = await queue.get()
+                if chunk is _SENTINEL:
+                    break
+                if not chunk:
+                    continue
+                yield chunk
+
+            await asyncio.wait({future})
+            result = turn.result(future)
+            if result:
+                self._check_hermes_result(result, session_id)
+        except BaseException:
+            turn.abandon()
+            raise
+        finally:
+            self._running_agents.pop(task_id, None)
 
     # ──── Optional: cancel ────
 
@@ -330,6 +422,10 @@ class HermesAdapter(BaseA2AAdapter):
 
         Calls AIAgent.interrupt() which is thread-safe — it sets an atomic
         flag checked between tool-use iterations.
+
+        The conversation's lock stays held until the run's thread ends, so
+        the next message on it waits, with no time limit: a tool call that
+        never returns blocks that conversation until the server restarts.
         """
         task_id = self._extract_task_id(kwargs)
         agent = self._running_agents.get(task_id)

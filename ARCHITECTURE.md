@@ -230,7 +230,7 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 | `ClaudeCodeAdapter` | `claude` subprocess + stream-json parsing and resume | Yes |
 | `CodexAdapter` | `codex exec --json` subprocess + thread resume | No |
 | `OpenClawAdapter` | Subprocess exec + JSON parse + cancel (kill) | No |
-| `HermesAdapter` | Gateway pattern: `SessionDB` + `AIAgent.run_conversation()` in a thread pool; requires Hermes on `PYTHONPATH` | Yes (callback → queue) |
+| `HermesAdapter` | Gateway pattern: `SessionDB` + `AIAgent.run_conversation()` in a thread pool; requires Hermes on `PYTHONPATH`. A canceled run keeps its conversation's lock until its thread ends, so the next message waits, with no limit, for a tool call that has not returned | Yes (callback → queue) |
 | `OllamaAdapter` | Wraps `OllamaClient` HTTP client (`/api/chat`) | Yes (NDJSON streaming) |
 | `PiAdapter` | One persistent `pi --mode rpc` process and session | Yes (JSONL events) |
 | `DeepSeekHarnessAdapter` | One `deepseek-harness-sdk` runtime (`dsh` over stdio JSON-RPC) on a single worker thread; one durable session per `context_id`; streams each assistant message | Yes |
