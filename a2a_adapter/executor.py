@@ -27,7 +27,7 @@ from a2a.server.tasks import TaskUpdater
 from a2a.types import Part, Task, TaskState, TaskStatus
 
 from .base_adapter import BaseA2AAdapter
-from .exceptions import CancelledByAdapterError
+from .exceptions import CancelledByAdapterError, UserFacingError
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +84,16 @@ class AdapterAgentExecutor(AgentExecutor):
         6. Handle cancellation by delegating to adapter.cancel()
     """
 
-    def __init__(self, adapter: BaseA2AAdapter, observer: TaskObserver | None = None) -> None:
+    def __init__(
+        self,
+        adapter: BaseA2AAdapter,
+        observer: TaskObserver | None = None,
+        *,
+        expose_error_details: bool = False,
+    ) -> None:
         self._adapter = adapter
         self._observer = observer
+        self._expose_error_details = expose_error_details
         # tasks/cancel calls in progress, by task id. The SDK cancels the
         # running execute() before it calls cancel(), and closes the event
         # queue once execute() returns, so execute() waits for these: the
@@ -130,6 +137,17 @@ class AdapterAgentExecutor(AgentExecutor):
                 if self._runs.get(context.task_id) is run:
                     del self._runs[context.task_id]
                 self._release(context.task_id)
+
+    def _client_error(self, prefix: str, task_id: str, e: Exception) -> str:
+        """The failure text sent to the client.
+
+        Exception text can hold URLs, paths, tokens or tool output, so it
+        stays in the server log unless the adapter marked it safe or the
+        operator opted in. The task id lets a person find the log line.
+        """
+        if self._expose_error_details or isinstance(e, UserFacingError):
+            return f"{prefix}: {e}"
+        return f"{prefix} (task {task_id}). Details are in the server log."
 
     def _release(self, task_id: str) -> None:
         """Let the adapter forget the task's cancel markers."""
@@ -230,7 +248,9 @@ class AdapterAgentExecutor(AgentExecutor):
                 extra={"a2a_activity_reported": self._observer is not None},
             )
             error = f"{type(e).__name__}: {e}"
-            error_msg = updater.new_agent_message([Part(text=f"Agent execution failed: {e}")])
+            error_msg = updater.new_agent_message(
+                [Part(text=self._client_error("Agent execution failed", context.task_id, e))]
+            )
             await self._send_final_state(
                 context,
                 run,
@@ -460,7 +480,7 @@ class AdapterAgentExecutor(AgentExecutor):
         closed), the task is canceled and the error is only logged.
         Otherwise the work may still be running, so the task is not
         reported canceled: the executor sends a single failed state
-        ("Cancel failed: ...") and does not re-raise, so tasks/cancel
+        ("Cancel failed ...") and does not re-raise, so tasks/cancel
         returns that failed task instead of a JSON-RPC error. The decision
         and its enqueue finish even if this call is cancelled.
 
@@ -546,9 +566,12 @@ class AdapterAgentExecutor(AgentExecutor):
                     "marking it failed: %s",
                     context.task_id,
                     e,
+                    exc_info=True,
                 )
                 error = f"cancel failed: {type(e).__name__}: {e}"
-                message = updater.new_agent_message([Part(text=f"Cancel failed: {e}")])
+                message = updater.new_agent_message(
+                    [Part(text=self._client_error("Cancel failed", context.task_id, e))]
+                )
                 await self._send_final_state(
                     context,
                     run,

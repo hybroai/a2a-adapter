@@ -8,6 +8,8 @@ import logging
 from collections.abc import Mapping
 from typing import Any, AsyncIterable, AsyncIterator, Awaitable, Callable, Dict, TypeVar
 
+from ..exceptions import UserFacingError
+
 T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
@@ -85,9 +87,13 @@ def apply_input_mapper(
 
     Raises ``RuntimeError("input_mapper failed: <type>: <message>")`` chained
     to the original exception, or ``TypeError`` if it returns a non-mapping.
+    A ``UserFacingError`` passes through unwrapped, so a mapper can reject
+    bad input with a message the client sees.
     """
     try:
         mapped = mapper(user_input, context_id)
+    except UserFacingError:
+        raise
     except Exception as e:
         raise RuntimeError(f"input_mapper failed: {type(e).__name__}: {e}") from e
     if not isinstance(mapped, Mapping):

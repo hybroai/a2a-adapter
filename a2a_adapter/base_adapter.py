@@ -366,7 +366,9 @@ class BaseA2AAdapter(ABC):
 
         Raises:
             Any exception will be caught by the bridge layer and converted
-            to a Task with state=failed.
+            to a Task with state=failed. The client gets a generic message
+            and the exception goes to the server log; raise
+            ``UserFacingError`` to show the client your own message.
         """
         ...
 

@@ -75,3 +75,17 @@ async def test_cleanup_error_surfaces_after_normal_end():
 
     with pytest.raises(RuntimeError, match="teardown failed"):
         _ = [i async for i in iter_with_timeout(Iter(), 5, "x")]
+
+
+def test_input_mapper_user_facing_error_passes_through_unwrapped():
+    from a2a_adapter.exceptions import UserFacingError
+    from a2a_adapter.integrations._framework import apply_input_mapper
+
+    error = UserFacingError("Expected JSON input")
+
+    def reject(raw, context_id):
+        raise error
+
+    with pytest.raises(UserFacingError) as exc:
+        apply_input_mapper(reject, "x", None)
+    assert exc.value is error

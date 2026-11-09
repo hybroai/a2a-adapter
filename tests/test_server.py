@@ -627,6 +627,63 @@ class TestServeAgentBind:
         async with _client(app, "s3cret") as client:
             assert (await client.post("/", json=_SEND)).status_code == 200
 
+    @staticmethod
+    def _quiet_display():
+        import io
+
+        from a2a_adapter.terminal import ActivityLog
+
+        class QuietDisplay:
+            activity = ActivityLog(io.StringIO(), color=False)
+
+            def install_logging(self, level):
+                pass
+
+            def ready(self, card):
+                pass
+
+            def close(self):
+                pass
+
+            def uninstall_logging(self):
+                pass
+
+        return QuietDisplay()
+
+    @pytest.mark.parametrize("with_display", [False, True])
+    @pytest.mark.parametrize("value", [False, True])
+    def test_serve_agent_passes_expose_error_details(self, monkeypatch, with_display, value):
+        from a2a_adapter import server as server_module
+
+        seen = []
+        real_to_a2a = server_module.to_a2a
+
+        def spy(adapter, agent_card=None, *args, **kwargs):
+            seen.append(kwargs.get("expose_error_details"))
+            return real_to_a2a(adapter, agent_card, *args, **kwargs)
+
+        monkeypatch.setattr(server_module, "to_a2a", spy)
+        kwargs = {"display": self._quiet_display()} if with_display else {}
+        server_module.serve_agent(StubAdapter(), expose_error_details=value, **kwargs)
+        assert seen == [value]
+        assert "expose_error_details" not in vars(self.servers[-1].config)
+
+    @pytest.mark.parametrize("with_display", [False, True])
+    def test_serve_agent_warns_when_exposing_errors(self, caplog, with_display):
+        from a2a_adapter.server import serve_agent
+
+        kwargs = {"display": self._quiet_display()} if with_display else {}
+        with caplog.at_level("WARNING", logger="a2a_adapter.server"):
+            serve_agent(StubAdapter(), expose_error_details=True, **kwargs)
+        assert "expose_error_details" in caplog.text
+
+    def test_serve_agent_is_quiet_about_errors_by_default(self, caplog):
+        from a2a_adapter.server import serve_agent
+
+        with caplog.at_level("WARNING", logger="a2a_adapter.server"):
+            serve_agent(StubAdapter())
+        assert "expose_error_details" not in caplog.text
+
     def test_serve_agent_card_declares_bearer(self, monkeypatch):
         from a2a_adapter import server as server_module
 

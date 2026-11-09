@@ -400,6 +400,7 @@ def to_a2a(
     auth_token: str | None = None,
     push_notifications: bool | None = None,
     allow_private_push_urls: bool = False,
+    expose_error_details: bool = False,
     **card_overrides: Any,
 ) -> Any:
     """Convert any adapter into an A2A Protocol ASGI application.
@@ -433,6 +434,11 @@ def to_a2a(
             methods and -32603 on the v0.3 names under a2a-sdk 1.0; each
             push connection is checked again and pinned to a checked
             address, and ``HTTP(S)_PROXY`` env vars are not used for pushes).
+        expose_error_details: Send exception text to clients, for local
+            debugging. Off by default: a failed task reports a generic
+            message with its task id, the exception stays in the server log,
+            and only ``UserFacingError`` messages reach the client. Exception
+            text can hold URLs, paths and tokens.
         **card_overrides: Override individual AgentCard fields
             (name, description, url, version, streaming). ``streaming=False``
             turns off streaming on the card even if the adapter can stream,
@@ -476,7 +482,9 @@ def to_a2a(
         push_httpx_client = _make_push_client(follow_redirects=False, **push_kwargs)
         push_sender = _push_sender(push_httpx_client, push_config_store)
 
-    executor = AdapterAgentExecutor(adapter, observer=activity)
+    executor = AdapterAgentExecutor(
+        adapter, observer=activity, expose_error_details=expose_error_details
+    )
     handler = DefaultRequestHandler(
         agent_executor=executor,
         task_store=task_store,
@@ -591,6 +599,7 @@ def serve_agent(
     auth_token: str | None = None,
     push_notifications: bool | None = None,
     allow_private_push_urls: bool = False,
+    expose_error_details: bool = False,
     **kwargs: Any,
 ) -> None:
     """One-line A2A server startup.
@@ -616,6 +625,8 @@ def serve_agent(
         allow_private_push_urls: Accept push URLs on private and loopback
             addresses (see :func:`to_a2a`); logs a warning. Without it,
             pushes do not use ``HTTP(S)_PROXY`` env vars.
+        expose_error_details: Send exception text to clients, for local
+            debugging (see :func:`to_a2a`); logs a warning.
         display: Optional TerminalDisplay. When given, Uvicorn's own
             startup and access lines are replaced by the display's card
             (shown once the socket is listening) and activity rail.
@@ -644,16 +655,20 @@ def serve_agent(
         )
     else:
         _check_card_push(agent_card, push_notifications)
-    push = {"allow_private_push_urls": allow_private_push_urls}
+    options = {
+        "allow_private_push_urls": allow_private_push_urls,
+        "expose_error_details": expose_error_details,
+    }
 
     if kwargs.get("workers", 1) not in (None, 1) or kwargs.get("reload"):
         raise ValueError("serve_agent runs one in-process server; drop workers/reload")
     on_interrupt = getattr(adapter, "kill_children_now", None)
 
     if display is None:
-        app = to_a2a(adapter, agent_card, auth_token=auth_token, **push)
+        app = to_a2a(adapter, agent_card, auth_token=auth_token, **options)
         _warn_if_exposed(host, auth_token, kwargs)
         _warn_about_push(agent_card, auth_token, allow_private_push_urls)
+        _warn_about_error_details(expose_error_details)
         # What uvicorn.run() does around Server.run(): app_dir on sys.path,
         # Ctrl+C swallowed, the uds socket removed, exit 3 on failed startup.
         app_dir = kwargs.pop("app_dir", None)
@@ -677,11 +692,12 @@ def serve_agent(
         raise ValueError(
             f"serve_agent(display=...) sets Uvicorn logging itself; drop {', '.join(owned)}"
         )
-    app = to_a2a(adapter, agent_card, activity=display.activity, auth_token=auth_token, **push)
+    app = to_a2a(adapter, agent_card, activity=display.activity, auth_token=auth_token, **options)
     display.install_logging(log_level)
     try:
         _warn_if_exposed(host, auth_token, kwargs)
         _warn_about_push(agent_card, auth_token, allow_private_push_urls)
+        _warn_about_error_details(expose_error_details)
         config = uvicorn.Config(
             app,
             host=host,
@@ -728,6 +744,14 @@ def _warn_about_push(agent_card: AgentCard, auth_token: str | None, allow_privat
         logger.warning(
             "Push notifications may target private and loopback addresses "
             "(allow_private_push_urls): clients can make this server call internal services."
+        )
+
+
+def _warn_about_error_details(expose_error_details: bool) -> None:
+    if expose_error_details:
+        logger.warning(
+            "expose_error_details is on: clients see raw exception text, "
+            "which can hold URLs, paths and tokens. Use it for local debugging only."
         )
 
 

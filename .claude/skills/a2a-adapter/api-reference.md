@@ -14,6 +14,7 @@ from a2a_adapter import (
     BaseA2AAdapter,           # Abstract base -- subclass for custom adapters
     AdapterMetadata,          # Dataclass for AgentCard auto-generation
     CancelledByAdapterError,  # Raise from invoke()/stream() when cancel() stopped the task
+    UserFacingError,          # Raise to show the client this message; other exception text stays in the log
     # Server
     serve_agent,       # One-line server: adapter -> uvicorn
     to_a2a,            # Adapter -> ASGI app (for production deployment)
@@ -269,6 +270,7 @@ Run it from the project directory the agent should work in. Options before `--` 
 | `--cwd` | current directory | Directory the agent works in |
 | `--host` / `--port` | `127.0.0.1` / `9000` | Bind address; `--host 0.0.0.0` with `--auth-token` accepts remote connections |
 | `--auth-token` | none, or `$A2A_AUTH_TOKEN` | Require `Authorization: Bearer <token>` on every request except the Agent Card |
+| `--expose-error-details` | off | Send exception text to clients, for local debugging only |
 | `--name` | `<Agent> (<folder>)` | Agent Card display name |
 | `--description` | `<Agent> agent working in <folder>` | Agent Card description |
 | `--skill` | one skill from the card name and description | Agent Card skill as JSON (`id`, `name`, `description`, at least one `tags` entry, optional `examples`); repeatable |
@@ -304,6 +306,7 @@ serve_agent(
     auth_token: str | None = None,         # Bearer token for every route but the card
     push_notifications: bool | None = None,  # Default off
     allow_private_push_urls: bool = False, # Allow localhost/private push receivers
+    expose_error_details: bool = False,    # Send exception text to clients (local debugging)
     **kwargs,                              # Passed to uvicorn.Config
 )
 ```
@@ -318,6 +321,7 @@ app = to_a2a(
     auth_token: str | None = None,         # Bearer token for every route but the card
     push_notifications: bool | None = None,  # Default off; a given card decides
     allow_private_push_urls: bool = False, # Allow localhost/private push receivers
+    expose_error_details: bool = False,    # Send exception text to clients (local debugging)
     **card_overrides,                      # name=, description=, url=, version=, streaming=,
                                            # provider=, documentation_url=, icon_url=,
                                            # bearer_auth= (declare the bearer scheme)
@@ -566,8 +570,8 @@ The `AdapterAgentExecutor` bridge handles:
 - Extracting user text from `RequestContext` via `context.get_user_input()`
 - Routing to `stream()` when `adapter.supports_streaming()`, else `invoke()`
 - Converting text/multimodal responses to A2A events via `TaskUpdater`
-- Error handling (exception -> Task with state=failed, error message preserved)
-- Cancellation (`adapter.cancel()` -> Task with state=canceled; if `adapter.cancel()` raises -> Task with state=failed, a "Cancel failed" message, and the cancel request returns the error; both hold when `adapter.cancel()` awaits)
+- Error handling (exception -> Task with state=failed; the client gets a generic message with the task id and the exception goes to the server log, unless it is a `UserFacingError` or `expose_error_details=True`)
+- Cancellation (`adapter.cancel()` -> Task with state=canceled; if `adapter.cancel()` raises -> Task with state=failed, a "Cancel failed" message, and the cancel request returns that failed task; both hold when `adapter.cancel()` awaits)
 
 Users never interact with the bridge layer directly.
 

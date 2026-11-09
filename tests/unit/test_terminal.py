@@ -821,3 +821,41 @@ def test_rejected_request_row_cuts_long_paths():
     output = stream.getvalue()
     assert "401 GET /" in output
     assert len(output.splitlines()[-1]) < 300
+
+
+async def test_failed_row_shows_full_task_id_and_error_at_default_verbosity():
+    """The executor's traceback is dropped from the rail below --debug."""
+    import uuid
+
+    from a2a.server.agent_execution import RequestContext
+    from a2a.server.context import ServerCallContext
+    from a2a.server.events.event_queue_v2 import EventQueueSource
+    from a2a.types import Message, Part, Role, SendMessageRequest
+
+    from a2a_adapter.base_adapter import BaseA2AAdapter
+    from a2a_adapter.executor import AdapterAgentExecutor
+
+    class Fails(BaseA2AAdapter):
+        async def invoke(self, user_input, context_id=None, **kwargs):
+            raise RuntimeError("agent died")
+
+    log, stream, _ = _log()
+    handler = RailLogHandler(log)
+    executor_logger = logging.getLogger("a2a_adapter.executor")
+    executor_logger.addHandler(handler)
+    task_id = str(uuid.uuid4())
+    context = RequestContext(
+        ServerCallContext(),
+        SendMessageRequest(
+            message=Message(role=Role.ROLE_USER, message_id="m1", parts=[Part(text="hi")])
+        ),
+        task_id=task_id,
+        context_id="c1",
+    )
+    try:
+        await AdapterAgentExecutor(Fails(), log).execute(context, EventQueueSource())
+    finally:
+        executor_logger.removeHandler(handler)
+    failed = [line for line in _rows(stream) if "failed" in line]
+    assert len(failed) == 1
+    assert task_id in failed[0] and "RuntimeError: agent died" in failed[0]
