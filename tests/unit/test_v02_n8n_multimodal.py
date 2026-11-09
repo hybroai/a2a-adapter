@@ -1,6 +1,7 @@
 """Tests for N8nAdapter V0.2 multimodal methods after V1.0 proto migration."""
 
 import base64
+import json
 from unittest.mock import MagicMock
 
 import httpx
@@ -367,3 +368,101 @@ class TestExtractResponseMalformedRefs:
         output = {"files": [{"url": {"bad": 1}, "uri": "http://x/a.pdf"}]}
         parts = adapter._extract_response(output)
         assert [p.url for p in parts] == ["http://x/a.pdf"]
+
+
+class TestInvokeResponses:
+    """Multimodal responses, driven through ``invoke`` with a mocked webhook."""
+
+    FILE = {"url": "http://x/a.pdf", "name": "a.pdf", "mime_type": "application/pdf"}
+    IMAGE = {"url": "http://x/b.png", "name": "b.png"}
+
+    async def _invoke(self, response: httpx.Response) -> list[Part]:
+        adapter = N8nAdapter(webhook_url="http://n8n/hook", multimodal_mode=True)
+        adapter._client = _client_for(lambda request: response)
+        return await adapter.invoke("hi")
+
+    async def test_list_keeps_text_and_all_parts_in_order(self):
+        body = [{"output": "see file", "files": [self.FILE], "images": [self.IMAGE]}]
+        parts = await self._invoke(httpx.Response(200, json=body))
+        assert parts[0].text == "see file"
+        assert [p.url for p in parts[1:]] == [self.FILE["url"], self.IMAGE["url"]]
+        assert parts[2].media_type == "image/png"
+
+    async def test_multi_item_list_collects_files_from_every_item(self):
+        body = [{"output": "a", "files": [self.FILE]}, {"output": "b", "images": [self.IMAGE]}]
+        parts = await self._invoke(httpx.Response(200, json=body))
+        assert parts[0].text == "a\nb"
+        assert [p.url for p in parts[1:]] == [self.FILE["url"], self.IMAGE["url"]]
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            httpx.Response(200),
+            httpx.Response(200, content=b"null", headers={"Content-Type": "application/json"}),
+            httpx.Response(200, json=[]),
+        ],
+        ids=["empty-body", "null", "empty-list"],
+    )
+    async def test_empty_response_placeholder(self, response):
+        parts = await self._invoke(response)
+        assert [p.text for p in parts] == ["[Empty response]"]
+
+    async def test_null_answer_with_file_gives_only_the_file(self):
+        parts = await self._invoke(httpx.Response(200, json={"output": None, "files": [self.FILE]}))
+        assert [p.url for p in parts] == [self.FILE["url"]]
+
+    async def test_lone_surrogate_in_file_ref_keeps_the_answer(self):
+        body = b'{"output": "ok", "files": [{"name": "\\ud83d", "url": "http://x/a\\ud83d"}]}'
+        response = httpx.Response(200, content=body, headers={"Content-Type": "application/json"})
+        parts = await self._invoke(response)
+        assert parts[0].text == "ok"
+        assert parts[1].filename == "?"
+        assert parts[1].url == "http://x/a?"
+
+    @pytest.mark.parametrize("body", [{"error": "x"}, [{"error": "x"}]])
+    async def test_workflow_error_fails_the_task(self, body):
+        with pytest.raises(RuntimeError, match="x"):
+            await self._invoke(httpx.Response(200, json=body))
+
+
+class TestUnencodedFiles:
+    """encode_files_base64=False cannot embed bytes in a JSON payload."""
+
+    @staticmethod
+    def _adapter(handler, **kwargs) -> N8nAdapter:
+        adapter = N8nAdapter(
+            webhook_url="http://n8n/hook",
+            multimodal_mode=True,
+            encode_files_base64=False,
+            **kwargs,
+        )
+        adapter._client = _client_for(handler)
+        return adapter
+
+    @staticmethod
+    def _context(part: Part) -> MagicMock:
+        ctx = MagicMock()
+        ctx.message.parts = [part]
+        return ctx
+
+    async def test_raw_part_rejected_before_any_request(self):
+        adapter = self._adapter(_fail_if_called)
+        with pytest.raises(ValueError, match="encode_files_base64"):
+            await adapter.invoke("hi", context=self._context(Part(raw=b"bytes")))
+
+    async def test_fetch_file_urls_rejected_before_any_request(self):
+        adapter = self._adapter(_fail_if_called, fetch_file_urls=True)
+        with pytest.raises(ValueError, match="encode_files_base64"):
+            await adapter.invoke("hi", context=self._context(Part(url="http://x/a.pdf")))
+
+    async def test_url_pass_through_still_works(self):
+        sent = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            sent.append(json.loads(request.content))
+            return httpx.Response(200, json={"output": "ok"})
+
+        adapter = self._adapter(handler)
+        parts = await adapter.invoke("hi", context=self._context(Part(url="http://x/a.pdf")))
+        assert parts[0].text == "ok"
+        assert sent[0]["files"][0]["uri"] == "http://x/a.pdf"

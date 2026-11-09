@@ -67,6 +67,7 @@ except ImportError:
 
 from ..adapter import BaseAgentAdapter
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter
+from ._framework import apply_input_mapper
 
 # Lazy import for TaskStore to avoid hard dependency
 try:
@@ -79,6 +80,47 @@ except ImportError:
     InMemoryTaskStore = None  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+
+def _encodable(text: str) -> str:
+    """Replace lone surrogates, which JSON can carry but a Part cannot encode."""
+    return text.encode("utf-8", "replace").decode("utf-8")
+
+
+def _value_text(value: Any) -> str:
+    """Render a JSON value as answer text: null is empty, objects stay JSON."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, indent=2, ensure_ascii=False)
+
+
+def _workflow_error_text(item: Any) -> str | None:
+    """Return the error text if ``item`` is only a workflow error report.
+
+    A truthy ``error`` next to any other non-empty field (except ``stack``) is
+    a result, not a failure: real rows can carry a field named ``error``.
+    ``false`` and ``0`` count as content, so ``{"error": "x", "success": false}``
+    completes.
+    """
+    if not isinstance(item, dict) or not item.get("error"):
+        return None
+    if any(v not in (None, "", [], {}) for k, v in item.items() if k not in ("error", "stack")):
+        return None
+    error = item["error"]
+    if isinstance(error, dict) and isinstance(error.get("message"), str) and error["message"]:
+        return error["message"]
+    return _value_text(error)
+
+
+def _raise_if_workflow_error(output: Any) -> None:
+    """Raise if every item of the body is only a workflow error report."""
+    items = output if isinstance(output, list) else [output]
+    errors = [_workflow_error_text(item) for item in items]
+    if errors and all(e is not None for e in errors):
+        detail = _encodable("; ".join(dict.fromkeys(errors)))
+        raise RuntimeError(f"n8n workflow reported an error: {detail}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -117,6 +159,15 @@ class N8nAdapter(BaseA2AAdapter):
     internal addresses are NOT blocked, so enabling this lets clients make
     the server request any host it can reach; enable it only for trusted
     clients or behind an egress proxy.
+
+    Responses: an empty body is an empty answer and a non-JSON body is
+    returned as text, but a body declared JSON that does not parse, or one
+    that cannot be decoded, fails the task. So does a body whose every item
+    has a truthy ``error`` and no other non-empty field except ``stack``.
+    Multi-item lists join the text of every item with newlines.
+
+    An ``input_mapper`` that raises or returns a non-mapping fails the
+    request; nothing is sent to the webhook.
 
     Example::
 
@@ -180,12 +231,15 @@ class N8nAdapter(BaseA2AAdapter):
             parse_json_input: Auto-parse JSON input (default: True).
             input_mapper: Custom function for input transformation.
                 Signature: (raw_input: str, context_id: str | None) -> dict.
+                If it raises or returns a non-mapping, the request fails.
             default_inputs: Default values to merge into payload. Client JSON
                 may override them.
             multimodal_mode: Enable multimodal support for files/images (default: False).
             file_field: JSON field name for file attachments (default: "files").
             image_field: JSON field name for image attachments (default: "images").
             encode_files_base64: Encode files as base64 in JSON (default: True).
+                JSON cannot carry raw bytes, so with False only URL parts can
+                be sent; a raw part or fetch_file_urls raises ValueError.
             fetch_file_urls: Download client-supplied file URLs and embed the
                 content instead of passing the URL through (default: False).
                 Each download must finish within ``timeout`` seconds.
@@ -247,6 +301,7 @@ class N8nAdapter(BaseA2AAdapter):
 
         # Send to n8n webhook
         response = await self._post_with_retry(payload)
+        _raise_if_workflow_error(response)
 
         # Extract response (text or multimodal)
         if self.multimodal_mode:
@@ -313,11 +368,8 @@ class N8nAdapter(BaseA2AAdapter):
         """
         # Priority 1: Custom input_mapper
         if self.input_mapper is not None:
-            try:
-                mapped = self.input_mapper(user_input, context_id)
-                return {**self.default_inputs, **mapped, **self.payload_template}
-            except Exception as e:
-                logger.warning("input_mapper failed: %s, falling back", e)
+            mapped = apply_input_mapper(self.input_mapper, user_input, context_id)
+            return {**self.default_inputs, **mapped, **self.payload_template}
 
         # Priority 2: Auto JSON parsing
         if self.parse_json_input and user_input.strip().startswith("{"):
@@ -399,11 +451,14 @@ class N8nAdapter(BaseA2AAdapter):
             }
 
             if part.HasField("raw") or self.fetch_file_urls:
+                if not self.encode_files_base64:
+                    raise ValueError(
+                        "encode_files_base64=False cannot send file bytes in a JSON "
+                        "payload: set it to True, or send only URL parts without "
+                        "fetch_file_urls"
+                    )
                 file_data = await self._fetch_file_content(part)
-                if self.encode_files_base64:
-                    file_entry["data"] = base64.b64encode(file_data).decode("utf-8")
-                else:
-                    file_entry["data"] = file_data
+                file_entry["data"] = base64.b64encode(file_data).decode("utf-8")
 
             if part.HasField("url"):
                 file_entry["uri"] = part.url
@@ -529,7 +584,7 @@ class N8nAdapter(BaseA2AAdapter):
                     )
 
                 resp.raise_for_status()
-                return resp.json()
+                return self._decode_body(resp, req_id)
 
             except HTTPStatusError as e:
                 if self.retry_on_server_error and attempt < self.max_retries:
@@ -564,21 +619,47 @@ class N8nAdapter(BaseA2AAdapter):
 
     # ──── Internal: Response Extraction ────
 
+    @staticmethod
+    def _decode_body(resp: httpx.Response, req_id: str) -> Any:
+        """Read a 2xx body: parsed JSON, text as written, or None when empty.
+
+        The workflow has already run, so only a body that cannot be trusted
+        raises: one declared JSON that does not parse, or undecodable bytes.
+        """
+        body = resp.content
+        if not body.strip():
+            return None
+
+        content_type = resp.headers.get("Content-Type", "")
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type.endswith(("/json", "+json")):
+            try:
+                return resp.json()
+            except ValueError as e:
+                raise RuntimeError(f"n8n returned invalid JSON (req_id={req_id}): {e}") from e
+
+        try:
+            text = body.decode(resp.encoding or "utf-8")
+        except (UnicodeError, LookupError) as e:
+            raise RuntimeError(
+                f"n8n returned an undecodable {content_type or 'untyped'} body "
+                f"(req_id={req_id}): {e}"
+            ) from e
+
+        # Objects and lists mislabelled as text; scalars stay as written.
+        candidate = text.removeprefix("\ufeff").lstrip()
+        if candidate.startswith(("{", "[")):
+            try:
+                return json.loads(candidate)
+            except ValueError:
+                pass
+        return text
+
     def _extract_response_text(self, output: Any) -> str:
-        """Extract text from n8n webhook response."""
-        if isinstance(output, list):
-            if len(output) == 0:
-                return ""
-            elif len(output) == 1:
-                return self._extract_text_from_item(output[0])
-            else:
-                texts = [
-                    self._extract_text_from_item(item) for item in output if isinstance(item, dict)
-                ]
-                return "\n".join(t for t in texts if t) or json.dumps(output, indent=2)
-        elif isinstance(output, dict):
-            return self._extract_text_from_item(output)
-        return str(output)
+        """Extract text from n8n webhook response, joining list items."""
+        items = output if isinstance(output, list) else [output]
+        texts = [self._extract_text_from_item(item) for item in items]
+        return _encodable("\n".join(t for t in texts if t))
 
     def _extract_text_from_item(self, item: Any) -> str:
         """Extract text from a single n8n output item.
@@ -587,31 +668,29 @@ class N8nAdapter(BaseA2AAdapter):
         serializing file metadata as text content.
         """
         if not isinstance(item, dict):
-            return str(item)
+            return _value_text(item)
         for key in ("output", "result", "message", "text", "response", "content"):
-            if key in item:
-                return str(item[key])
+            if item.get(key) is not None:
+                return _value_text(item[key])
         filtered = {k: v for k, v in item.items() if k not in (self.file_field, self.image_field)}
-        return json.dumps(filtered, indent=2) if filtered else ""
+        if all(v is None for v in filtered.values()):
+            return ""
+        return json.dumps(filtered, indent=2, ensure_ascii=False)
 
     def _extract_response(self, output: Any) -> list[Part]:
-        """Extract response with multimodal content detection."""
-        if not isinstance(output, dict):
-            text = self._extract_response_text(output)
-            return [Part(text=text)]
-
+        """Extract text, then file and image refs from every item."""
         parts: list[Part] = []
 
-        text = self._extract_text_from_item(output)
+        text = self._extract_response_text(output)
         if text:
             parts.append(Part(text=text))
 
-        parts.extend(self._file_ref_parts(output.get(self.file_field), None))
-        parts.extend(self._file_ref_parts(output.get(self.image_field), "image/png"))
+        for item in output if isinstance(output, list) else [output]:
+            if isinstance(item, dict):
+                parts.extend(self._file_ref_parts(item.get(self.file_field), None))
+                parts.extend(self._file_ref_parts(item.get(self.image_field), "image/png"))
 
-        if not parts:
-            return [Part(text="[Empty response]")]
-        return parts
+        return parts or [Part(text="[Empty response]")]
 
     def _file_ref_parts(self, refs: Any, default_media_type: str | None) -> list[Part]:
         """Convert response file refs to Parts, skipping unusable ones.
@@ -659,7 +738,7 @@ class N8nAdapter(BaseA2AAdapter):
         for key in keys:
             value = ref.get(key)
             if isinstance(value, str) and value:
-                return value
+                return _encodable(value)
         return None
 
 
