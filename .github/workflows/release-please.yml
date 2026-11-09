@@ -68,6 +68,7 @@ jobs:
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           version: '0.7.13'
+          python-version: '3.12'
 
       - name: Commit the bumped version to uv.lock
         if: steps.find.outputs.branch != ''
