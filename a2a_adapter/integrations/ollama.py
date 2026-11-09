@@ -103,7 +103,12 @@ class OllamaClient:
                 json=payload,
                 timeout=self.timeout,
             ) as resp:
-                resp.raise_for_status()
+                try:
+                    resp.raise_for_status()
+                except httpx.HTTPStatusError:
+                    # Unread here, the body is gone once the block exits.
+                    await resp.aread()
+                    raise
                 async for line in resp.aiter_lines():
                     if not line.strip():
                         continue
@@ -111,11 +116,19 @@ class OllamaClient:
                         chunk = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    content = chunk.get("message", {}).get("content", "")
+                    if not isinstance(chunk, dict):
+                        continue
+                    if chunk.get("error"):
+                        # Ollama reports mid-stream failures with HTTP 200.
+                        raise RuntimeError(
+                            f"Ollama error for model '{self.model}': {chunk['error']}"
+                        )
+                    content = (chunk.get("message") or {}).get("content", "")
                     if content:
                         yield content
                     if chunk.get("done", False):
                         return
+                raise RuntimeError("Ollama stream ended before it was done")
         except httpx.ConnectError as e:
             raise RuntimeError(
                 f"Cannot connect to Ollama at {self.base_url}. "

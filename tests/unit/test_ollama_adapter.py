@@ -269,3 +269,87 @@ class TestLoading:
 async def _async_iter(items):
     for item in items:
         yield item
+
+
+# ══════════════════════════════════════════════════════════════
+# chat_stream error handling
+# ══════════════════════════════════════════════════════════════
+
+
+def _streaming_client(body: bytes, status: int = 200) -> OllamaClient:
+    client = OllamaClient(model="llama3.2")
+    client._client = httpx.AsyncClient(
+        # stream=, not content=: like the network, the body starts unread.
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(status, stream=httpx.ByteStream(body))
+        )
+    )
+    return client
+
+
+def _ndjson(*lines) -> bytes:
+    return b"".join(
+        (line if isinstance(line, bytes) else json.dumps(line).encode()) + b"\n" for line in lines
+    )
+
+
+_TOKEN = {"message": {"content": "partial"}, "done": False}
+_DONE = {"message": {"content": ""}, "done": True}
+
+
+class TestChatStreamErrors:
+    async def _collect(self, client):
+        return [token async for token in client.chat_stream("hi")]
+
+    async def test_a_mid_stream_error_line_raises(self):
+        client = _streaming_client(_ndjson(_TOKEN, {"error": "model crashed"}))
+        tokens = []
+        with pytest.raises(RuntimeError, match="Ollama error for model 'llama3.2': model crashed"):
+            async for token in client.chat_stream("hi"):
+                tokens.append(token)
+        assert tokens == ["partial"]
+
+    async def test_a_mid_stream_error_fails_the_task(self):
+        from a2a.server.context import ServerCallContext
+        from a2a.server.request_handlers import DefaultRequestHandler
+        from a2a.server.tasks import InMemoryTaskStore
+        from a2a.types import GetTaskRequest, Message, Part, Role, SendMessageRequest, TaskState
+
+        from a2a_adapter.executor import AdapterAgentExecutor
+        from a2a_adapter.server import build_agent_card
+
+        adapter = OllamaAdapter(client=_streaming_client(_ndjson(_TOKEN, {"error": "crashed"})))
+        handler = DefaultRequestHandler(
+            AdapterAgentExecutor(adapter),
+            InMemoryTaskStore(),
+            build_agent_card(adapter),
+        )
+        call = ServerCallContext()
+        message = Message(role=Role.ROLE_USER, message_id="m1", parts=[Part(text="hi")])
+        result = await handler.on_message_send(SendMessageRequest(message=message), call)
+        stored = await handler.on_get_task(GetTaskRequest(id=result.id), call)
+        assert stored.status.state == TaskState.TASK_STATE_FAILED
+
+    @pytest.mark.parametrize("line", [[1, 2], "text", 7, None])
+    async def test_non_dict_lines_are_skipped(self, line):
+        client = _streaming_client(_ndjson(_TOKEN, line, _DONE))
+        assert await self._collect(client) == ["partial"]
+
+    async def test_a_null_message_is_skipped(self):
+        client = _streaming_client(_ndjson({"message": None}, _TOKEN, _DONE))
+        assert await self._collect(client) == ["partial"]
+
+    async def test_an_all_garbage_stream_raises(self):
+        client = _streaming_client(b"not json\nstill not\n")
+        with pytest.raises(RuntimeError, match="ended before it was done"):
+            await self._collect(client)
+
+    async def test_eof_without_done_raises(self):
+        client = _streaming_client(_ndjson(_TOKEN))
+        with pytest.raises(RuntimeError, match="ended before it was done"):
+            await self._collect(client)
+
+    async def test_a_streaming_404_carries_ollamas_error_text(self):
+        client = _streaming_client(_ndjson({"error": "model 'x' not found"}), status=404)
+        with pytest.raises(RuntimeError, match="model 'x' not found"):
+            await self._collect(client)
