@@ -16,7 +16,7 @@ __version__ = "0.3.1"
 
 # ──── v0.2 Core Exports (eager, no optional deps) ────
 from .base_adapter import AdapterMetadata, BaseA2AAdapter
-from .exceptions import CancelledByAdapterError
+from .exceptions import CancelledByAdapterError, UserFacingError
 from .server import build_agent_card, serve_agent, to_a2a
 
 # ──── v0.2 Loader Exports ────
@@ -87,6 +87,7 @@ __all__ = [
     "BaseA2AAdapter",
     "AdapterMetadata",
     "CancelledByAdapterError",
+    "UserFacingError",
     # v0.2 Server
     "serve_agent",
     "to_a2a",

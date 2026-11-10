@@ -8,6 +8,8 @@ import logging
 from collections.abc import Mapping
 from typing import Any, AsyncIterable, AsyncIterator, Awaitable, Callable, Dict, TypeVar
 
+from ..exceptions import AgentTimeoutError, UserFacingError
+
 T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
@@ -18,7 +20,7 @@ async def run_with_timeout(
     timeout: float | None,
     what: str,
 ) -> T:
-    """Await ``awaitable``, raising ``TimeoutError("<what> timed out after
+    """Await ``awaitable``, raising ``AgentTimeoutError("<what> timed out after
     N seconds")`` if it takes longer than ``timeout`` (``None``: no limit).
 
     A ``TimeoutError`` raised by the awaitable itself propagates unchanged.
@@ -29,7 +31,7 @@ async def run_with_timeout(
             return await awaitable
     except TimeoutError as e:
         if scope.expired():
-            raise TimeoutError(f"{what} timed out after {timeout} seconds") from e
+            raise AgentTimeoutError(f"{what} timed out after {timeout} seconds") from e
         raise
 
 
@@ -40,7 +42,7 @@ async def iter_with_timeout(
 ) -> AsyncIterator[T]:
     """Yield from ``iterable`` with ``timeout`` seconds for the whole stream.
 
-    Raises the same ``TimeoutError`` as :func:`run_with_timeout` once the
+    Raises the same ``AgentTimeoutError`` as :func:`run_with_timeout` once the
     deadline passes, and closes the underlying iterator however iteration
     ends. Time the consumer spends between items counts toward the deadline.
     """
@@ -57,7 +59,7 @@ async def iter_with_timeout(
                 break
             except TimeoutError as e:
                 if scope.expired():
-                    raise TimeoutError(f"{what} timed out after {timeout} seconds") from e
+                    raise AgentTimeoutError(f"{what} timed out after {timeout} seconds") from e
                 raise
             yield item
     except BaseException:
@@ -85,9 +87,13 @@ def apply_input_mapper(
 
     Raises ``RuntimeError("input_mapper failed: <type>: <message>")`` chained
     to the original exception, or ``TypeError`` if it returns a non-mapping.
+    A ``UserFacingError`` passes through unwrapped, so a mapper can reject
+    bad input with a message the client sees.
     """
     try:
         mapped = mapper(user_input, context_id)
+    except UserFacingError:
+        raise
     except Exception as e:
         raise RuntimeError(f"input_mapper failed: {type(e).__name__}: {e}") from e
     if not isinstance(mapped, Mapping):

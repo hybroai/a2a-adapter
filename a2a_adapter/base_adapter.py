@@ -30,7 +30,7 @@ from typing import AsyncIterator
 
 from a2a.types import Part
 
-from .exceptions import CancelledByAdapterError
+from .exceptions import AgentTimeoutError, CancelledByAdapterError
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +289,9 @@ class BaseA2AAdapter(ABC):
         Level 3: Implement AgentExecutor directly      (full SDK access)
     """
 
+    # Saved CLI sessions kept per adapter; the oldest are evicted first.
+    _MAX_SESSIONS = 10_000
+
     def __init__(
         self,
         *,
@@ -309,7 +312,12 @@ class BaseA2AAdapter(ABC):
         self.timeout = timeout
         self.env_vars = dict(env_vars) if env_vars else {}
 
-        self._context_locks: dict[str, asyncio.Lock] = {}
+        # Weak, so a conversation's entry lives only while a holder or waiter
+        # references the lock; an unreferenced lock is free, so a fresh one
+        # is equivalent.
+        self._context_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
         self._active_processes: dict[str, Process] = {}
         self._cancelled_tasks: set[str] = set()
         self._killed_tasks: set[str] = set()
@@ -366,7 +374,9 @@ class BaseA2AAdapter(ABC):
 
         Raises:
             Any exception will be caught by the bridge layer and converted
-            to a Task with state=failed.
+            to a Task with state=failed. The client gets a generic message
+            and the exception goes to the server log; raise
+            ``UserFacingError`` to show the client your own message.
         """
         ...
 
@@ -507,6 +517,7 @@ class BaseA2AAdapter(ABC):
             raise CancelledByAdapterError(f"Task {task_id} was cancelled before execution started")
 
         # 2. Build command (subclass hook)
+        self._touch_session(context_key)
         cmd_result = self._build_command(user_input, context_key)
         logger.debug("Executing command: %s", " ".join(cmd_result.args))
         stdin_bytes = cmd_result.stdin.encode("utf-8") if cmd_result.stdin is not None else None
@@ -543,7 +554,7 @@ class BaseA2AAdapter(ABC):
                 aborted = True
                 _kill_process_tree(proc)
                 await _wait_reaped(proc)
-                raise RuntimeError(f"Command timed out after {self.timeout} seconds")
+                raise AgentTimeoutError(f"Command timed out after {self.timeout} seconds")
             except asyncio.CancelledError:
                 # Task cancelled (tasks/cancel or shutdown): don't orphan the tree
                 aborted = True
@@ -603,8 +614,7 @@ class BaseA2AAdapter(ABC):
 
         # 9. Persist session
         if result.session_id:
-            self._sessions[context_key] = result.session_id
-            self._save_sessions()
+            self._remember_session(context_key, result.session_id)
 
         return result.text
 
@@ -635,6 +645,7 @@ class BaseA2AAdapter(ABC):
             raise CancelledByAdapterError(f"Task {task_id} was cancelled before execution started")
 
         # 2. Build command
+        self._touch_session(context_key)
         cmd_result = self._build_command(user_input, context_key)
         logger.debug("Streaming command: %s", " ".join(cmd_result.args))
 
@@ -733,8 +744,7 @@ class BaseA2AAdapter(ABC):
                         break
                     raise RuntimeError(event.error)
                 if event.session_id:
-                    self._sessions[context_key] = event.session_id
-                    self._save_sessions()
+                    self._remember_session(context_key, event.session_id)
                 if event.text:
                     yielded_any = True
                     yield event.text
@@ -742,7 +752,7 @@ class BaseA2AAdapter(ABC):
         except asyncio.TimeoutError:
             aborted = True
             _kill_process_tree(proc)
-            raise RuntimeError(f"Command timed out after {self.timeout} seconds")
+            raise AgentTimeoutError(f"Command timed out after {self.timeout} seconds")
         except (GeneratorExit, asyncio.CancelledError):
             aborted = True
             _kill_process_tree(proc)
@@ -785,7 +795,7 @@ class BaseA2AAdapter(ABC):
                     self._killed_tasks.discard(task_id)
 
         if tail_timed_out:
-            raise RuntimeError(f"Command timed out after {self.timeout} seconds")
+            raise AgentTimeoutError(f"Command timed out after {self.timeout} seconds")
 
         stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
 
@@ -850,13 +860,29 @@ class BaseA2AAdapter(ABC):
 
     def _get_context_lock(self, context_key: str) -> asyncio.Lock:
         """Get or create a per-context asyncio.Lock."""
-        if context_key not in self._context_locks:
-            self._context_locks[context_key] = asyncio.Lock()
-        return self._context_locks[context_key]
+        lock = self._context_locks.get(context_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._context_locks[context_key] = lock
+        return lock
 
     def _build_env(self) -> dict[str, str]:
         """Build subprocess environment: os.environ (minus server secrets) + self.env_vars."""
         return _child_env(self.env_vars)
+
+    def _touch_session(self, context_key: str) -> None:
+        """Mark a saved session as the most recently used."""
+        session_id = self._sessions.pop(context_key, None)
+        if session_id is not None:
+            self._sessions[context_key] = session_id
+
+    def _remember_session(self, context_key: str, session_id: str) -> None:
+        """Save a session as the newest one, dropping the oldest over the cap."""
+        self._sessions.pop(context_key, None)
+        self._sessions[context_key] = session_id
+        while len(self._sessions) > self._MAX_SESSIONS:
+            del self._sessions[next(iter(self._sessions))]
+        self._save_sessions()
 
     def _load_sessions(self) -> None:
         """Load session mapping from disk. Missing/corrupt -> empty dict."""
@@ -875,7 +901,16 @@ class BaseA2AAdapter(ABC):
             self._sessions = {}
             return
         if isinstance(data, dict):
-            self._sessions = {str(k): str(v) for k, v in data.items()}
+            sessions = [(str(k), str(v)) for k, v in data.items()]
+            if len(sessions) > self._MAX_SESSIONS:
+                logger.info(
+                    "Session store %s holds %d sessions; keeping the last %d in the file",
+                    self._session_store_path,
+                    len(sessions),
+                    self._MAX_SESSIONS,
+                )
+                sessions = sessions[-self._MAX_SESSIONS :]
+            self._sessions = dict(sessions)
             logger.debug(
                 "Loaded %d session(s) from %s",
                 len(self._sessions),

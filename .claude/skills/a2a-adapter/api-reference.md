@@ -14,6 +14,7 @@ from a2a_adapter import (
     BaseA2AAdapter,           # Abstract base -- subclass for custom adapters
     AdapterMetadata,          # Dataclass for AgentCard auto-generation
     CancelledByAdapterError,  # Raise from invoke()/stream() when cancel() stopped the task
+    UserFacingError,          # Raise to show the client this message; other exception text stays in the log
     # Server
     serve_agent,       # One-line server: adapter -> uvicorn
     to_a2a,            # Adapter -> ASGI app (for production deployment)
@@ -269,6 +270,7 @@ Run it from the project directory the agent should work in. Options before `--` 
 | `--cwd` | current directory | Directory the agent works in |
 | `--host` / `--port` | `127.0.0.1` / `9000` | Bind address; `--host 0.0.0.0` with `--auth-token` accepts remote connections |
 | `--auth-token` | none, or `$A2A_AUTH_TOKEN` | Require `Authorization: Bearer <token>` on every request except the Agent Card |
+| `--expose-error-details` | off | Send exception text to clients, for local debugging only |
 | `--name` | `<Agent> (<folder>)` | Agent Card display name |
 | `--description` | `<Agent> agent working in <folder>` | Agent Card description |
 | `--skill` | one skill from the card name and description | Agent Card skill as JSON (`id`, `name`, `description`, at least one `tags` entry, optional `examples`); repeatable |
@@ -304,6 +306,8 @@ serve_agent(
     auth_token: str | None = None,         # Bearer token for every route but the card
     push_notifications: bool | None = None,  # Default off
     allow_private_push_urls: bool = False, # Allow localhost/private push receivers
+    expose_error_details: bool = False,    # Send exception text to clients (local debugging)
+    task_store: TaskStore | None = None,   # Default: in memory, 1000 newest finished tasks
     **kwargs,                              # Passed to uvicorn.Config
 )
 ```
@@ -314,10 +318,11 @@ serve_agent(
 app = to_a2a(
     adapter: BaseA2AAdapter,
     agent_card: AgentCard | None = None,
-    task_store: TaskStore | None = None,   # Default: InMemoryTaskStore
+    task_store: TaskStore | None = None,   # Default: in memory, 1000 newest finished tasks
     auth_token: str | None = None,         # Bearer token for every route but the card
     push_notifications: bool | None = None,  # Default off; a given card decides
     allow_private_push_urls: bool = False, # Allow localhost/private push receivers
+    expose_error_details: bool = False,    # Send exception text to clients (local debugging)
     **card_overrides,                      # name=, description=, url=, version=, streaming=,
                                            # provider=, documentation_url=, icon_url=,
                                            # bearer_auth= (declare the bearer scheme)
@@ -329,6 +334,8 @@ app = to_a2a(
 ```
 
 `streaming=False` does not disable auto-detection; override `supports_streaming()` to turn streaming off.
+
+The default task store keeps the 1000 newest finished tasks, and `tasks/get` for an older one returns task not found. To keep everything, pass `task_store=InMemoryTaskStore()` or a database store, to `to_a2a` or `serve_agent`; the CLI has no such option.
 
 The app serves JSON-RPC at `/` (A2A 1.0 methods plus the v0.3 names for older clients), REST routes, and the AgentCard at `/.well-known/agent-card.json` (also the legacy `/.well-known/agent.json`). On the generated AgentCard, `streaming` is auto-detected and `push_notifications` is off unless you pass `push_notifications=True`. With push on, URLs on localhost and private or non-public addresses are rejected unless `allow_private_push_urls=True` (JSON-RPC `-32602` on A2A 1.0 methods, HTTP 400 on REST, `-32603` on the v0.3 method names under a2a-sdk 1.0).
 
@@ -566,8 +573,8 @@ The `AdapterAgentExecutor` bridge handles:
 - Extracting user text from `RequestContext` via `context.get_user_input()`
 - Routing to `stream()` when `adapter.supports_streaming()`, else `invoke()`
 - Converting text/multimodal responses to A2A events via `TaskUpdater`
-- Error handling (exception -> Task with state=failed, error message preserved)
-- Cancellation (`adapter.cancel()` -> Task with state=canceled; if `adapter.cancel()` raises -> Task with state=failed, a "Cancel failed" message, and the cancel request returns the error; both hold when `adapter.cancel()` awaits)
+- Error handling (exception -> Task with state=failed; the client gets a generic message with the task id and the exception goes to the server log, unless it is a `UserFacingError` or `expose_error_details=True`)
+- Cancellation (`adapter.cancel()` -> Task with state=canceled; if `adapter.cancel()` raises -> Task with state=failed, a "Cancel failed" message, and the cancel request returns that failed task; both hold when `adapter.cancel()` awaits)
 
 Users never interact with the bridge layer directly.
 

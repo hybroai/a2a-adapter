@@ -156,6 +156,7 @@ history stays on disk, unused, because it may mix several conversations.
 | `--auth-token` | none, or `$A2A_AUTH_TOKEN` | Require `Authorization: Bearer <token>` on every request except the Agent Card; prefer the variable, since argv is visible in `ps` |
 | `--push-notifications` | off | Accept push-notification configs and POST task updates to them |
 | `--allow-private-push-urls` | off | With `--push-notifications`, also allow receivers on localhost and private networks |
+| `--expose-error-details` | off | Send exception text to clients, for local debugging only |
 | `--name` | `<Agent> (<folder>)`, e.g. `Claude Code (my-app)` | Agent Card display name |
 | `--description` | `<Agent> agent working in <folder>` | Agent Card description |
 | `--skill` | one skill from the card name and description | Agent Card skill as JSON (`id`, `name`, `description`, at least one entry in `tags`, optional `examples`); repeatable |
@@ -168,6 +169,13 @@ immediately; SIGTERM lets in-flight requests finish (uvicorn's graceful
 timeout), then stops them.
 Agents run detached from the server's terminal, so a tool that prompts on
 `/dev/tty` (an SSH passphrase, a GPG pinentry) fails instead of prompting.
+
+**Errors.** When a task fails, the client gets a generic message with the task
+id, and the exception goes to the server log: exception text can hold URLs,
+paths and tokens. In your own adapter, raise `UserFacingError("...")` to show
+the client that message. `--expose-error-details` (`expose_error_details=True`
+on `to_a2a` / `serve_agent`) sends the raw text, for local debugging only. The
+CLI's failed row always shows the error; the traceback needs `--debug`.
 
 Pi source commands can be selected without a shell wrapper:
 

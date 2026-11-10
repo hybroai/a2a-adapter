@@ -3,10 +3,17 @@
 import httpcore
 import httpx
 import pytest
-from a2a.types import AgentCard
+from a2a.server.context import ServerCallContext
+from a2a.server.tasks import InMemoryTaskStore
+from a2a.types import AgentCard, Task, TaskPushNotificationConfig, TaskState, TaskStatus
 
 from a2a_adapter.base_adapter import AdapterMetadata, BaseA2AAdapter
-from a2a_adapter.server import build_agent_card, to_a2a
+from a2a_adapter.server import (
+    _BoundedInMemoryTaskStore,
+    _SafeInMemoryPushNotificationConfigStore,
+    build_agent_card,
+    to_a2a,
+)
 
 from .conftest import StubAdapter, StreamingStubAdapter
 
@@ -626,6 +633,63 @@ class TestServeAgentBind:
             assert (await client.post("/", json=_SEND)).status_code == 401
         async with _client(app, "s3cret") as client:
             assert (await client.post("/", json=_SEND)).status_code == 200
+
+    @staticmethod
+    def _quiet_display():
+        import io
+
+        from a2a_adapter.terminal import ActivityLog
+
+        class QuietDisplay:
+            activity = ActivityLog(io.StringIO(), color=False)
+
+            def install_logging(self, level):
+                pass
+
+            def ready(self, card):
+                pass
+
+            def close(self):
+                pass
+
+            def uninstall_logging(self):
+                pass
+
+        return QuietDisplay()
+
+    @pytest.mark.parametrize("with_display", [False, True])
+    @pytest.mark.parametrize("value", [False, True])
+    def test_serve_agent_passes_expose_error_details(self, monkeypatch, with_display, value):
+        from a2a_adapter import server as server_module
+
+        seen = []
+        real_to_a2a = server_module.to_a2a
+
+        def spy(adapter, agent_card=None, *args, **kwargs):
+            seen.append(kwargs.get("expose_error_details"))
+            return real_to_a2a(adapter, agent_card, *args, **kwargs)
+
+        monkeypatch.setattr(server_module, "to_a2a", spy)
+        kwargs = {"display": self._quiet_display()} if with_display else {}
+        server_module.serve_agent(StubAdapter(), expose_error_details=value, **kwargs)
+        assert seen == [value]
+        assert "expose_error_details" not in vars(self.servers[-1].config)
+
+    @pytest.mark.parametrize("with_display", [False, True])
+    def test_serve_agent_warns_when_exposing_errors(self, caplog, with_display):
+        from a2a_adapter.server import serve_agent
+
+        kwargs = {"display": self._quiet_display()} if with_display else {}
+        with caplog.at_level("WARNING", logger="a2a_adapter.server"):
+            serve_agent(StubAdapter(), expose_error_details=True, **kwargs)
+        assert "expose_error_details" in caplog.text
+
+    def test_serve_agent_is_quiet_about_errors_by_default(self, caplog):
+        from a2a_adapter.server import serve_agent
+
+        with caplog.at_level("WARNING", logger="a2a_adapter.server"):
+            serve_agent(StubAdapter())
+        assert "expose_error_details" not in caplog.text
 
     def test_serve_agent_card_declares_bearer(self, monkeypatch):
         from a2a_adapter import server as server_module
@@ -1513,3 +1577,161 @@ class TestServeAgentPush:
                 StubAdapter(), push_notifications=True, allow_private_push_urls=True, auth_token="t"
             )
         assert any("private" in r.getMessage().lower() for r in caplog.records)
+
+
+class TestBoundedTaskStore:
+    COMPLETED = TaskState.TASK_STATE_COMPLETED
+    WORKING = TaskState.TASK_STATE_WORKING
+
+    @staticmethod
+    def _task(task_id: str, state) -> Task:
+        return Task(id=task_id, context_id="c", status=TaskStatus(state=state))
+
+    @pytest.fixture(autouse=True)
+    def _small_cap(self, monkeypatch):
+        monkeypatch.setattr("a2a_adapter.server._MAX_FINISHED_TASKS", 2)
+
+    async def test_oldest_finished_task_is_evicted(self):
+        store = _BoundedInMemoryTaskStore()
+        context = ServerCallContext()
+        for name in ("a", "b", "c"):
+            await store.save(self._task(name, self.COMPLETED), context)
+        assert await store.get("a", context) is None
+        assert (await store.get("b", context)).id == "b"
+        assert (await store.get("c", context)).id == "c"
+
+    async def test_active_tasks_are_never_counted_or_evicted(self):
+        store = _BoundedInMemoryTaskStore()
+        context = ServerCallContext()
+        await store.save(self._task("running", self.WORKING), context)
+        for name in ("a", "b", "c"):
+            await store.save(self._task(name, self.COMPLETED), context)
+        assert (await store.get("running", context)).id == "running"
+        assert await store.get("b", context) is not None
+
+    async def test_saving_a_finished_task_again_counts_once(self):
+        store = _BoundedInMemoryTaskStore()
+        context = ServerCallContext()
+        for name in ("a", "a", "a", "b"):
+            await store.save(self._task(name, self.COMPLETED), context)
+        assert await store.get("a", context) is not None
+        assert await store.get("b", context) is not None
+
+    async def test_delete_forgets_the_tracking_entry(self):
+        store = _BoundedInMemoryTaskStore()
+        context = ServerCallContext()
+        for name in ("a", "b"):
+            await store.save(self._task(name, self.COMPLETED), context)
+        await store.delete("b", context)
+        await store.save(self._task("c", self.COMPLETED), context)
+        # A stale entry for "b" would have filled the cap and evicted "a".
+        assert await store.get("a", context) is not None
+        assert await store.get("c", context) is not None
+
+    async def test_eviction_uses_the_owning_user(self):
+        from a2a.auth.user import User
+
+        class Named(User):
+            def __init__(self, name):
+                self.name = name
+
+            @property
+            def is_authenticated(self):
+                return True
+
+            @property
+            def user_name(self):
+                return self.name
+
+        store = _BoundedInMemoryTaskStore()
+        alice = ServerCallContext(user=Named("alice"), state={"headers": {"x": "y"}})
+        bob = ServerCallContext(user=Named("bob"))
+        await store.save(self._task("a", self.COMPLETED), alice)
+        await store.save(self._task("b", self.COMPLETED), bob)
+        await store.save(self._task("c", self.COMPLETED), bob)
+        assert await store.get("a", alice) is None
+        assert await store.get("b", bob) is not None
+        assert all(owner.state == {} for owner in store._finished.values())
+
+    async def test_eviction_removes_push_configs(self):
+        push = _SafeInMemoryPushNotificationConfigStore(allow_private_urls=True)
+        store = _BoundedInMemoryTaskStore(push)
+        context = ServerCallContext()
+        config = TaskPushNotificationConfig(url="http://127.0.0.1:9/hook")
+        await push.set_info("a", config, context)
+        for name in ("a", "b", "c"):
+            await store.save(self._task(name, self.COMPLETED), context)
+        assert await push.get_info("a", context) == []
+
+    async def test_eviction_without_push_config_logs_no_warning(self, caplog):
+        push = _SafeInMemoryPushNotificationConfigStore(allow_private_urls=True)
+        store = _BoundedInMemoryTaskStore(push)
+        context = ServerCallContext()
+        with caplog.at_level("WARNING"):
+            for name in ("a", "b", "c"):
+                await store.save(self._task(name, self.COMPLETED), context)
+        assert not caplog.records
+
+    async def _send_three(self, app):
+        ids = []
+        async with _client(app) as client:
+            for index in range(3):
+                body = {**_SEND, "id": index}
+                body["params"] = {
+                    "message": {**_SEND["params"]["message"], "messageId": f"m{index}"}
+                }
+                response = await client.post("/", json=body)
+                ids.append(response.json()["result"]["id"])
+            results = []
+            for task_id in ids:
+                response = await client.post(
+                    "/",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": "g",
+                        "method": "tasks/get",
+                        "params": {"id": task_id},
+                    },
+                )
+                results.append(response.json())
+        return results
+
+    async def test_default_store_evicts_through_the_app(self):
+        first, second, third = await self._send_three(to_a2a(StubAdapter()))
+        assert "error" in first and "not found" in first["error"]["message"].lower()
+        assert "result" in second and "result" in third
+
+    def test_to_a2a_gives_the_default_store_its_push_config_store(self, monkeypatch):
+        built = []
+
+        class Spy(_BoundedInMemoryTaskStore):
+            def __init__(self, push_config_store=None):
+                built.append(push_config_store)
+                super().__init__(push_config_store)
+
+        monkeypatch.setattr("a2a_adapter.server._BoundedInMemoryTaskStore", Spy)
+        to_a2a(StubAdapter(), push_notifications=True, allow_private_push_urls=True)
+        assert isinstance(built[0], _SafeInMemoryPushNotificationConfigStore)
+
+    async def test_a_callers_store_is_left_alone(self):
+        results = await self._send_three(to_a2a(StubAdapter(), task_store=InMemoryTaskStore()))
+        assert all("result" in result for result in results)
+
+    @pytest.mark.parametrize("with_display", [False, True])
+    def test_serve_agent_passes_task_store(self, monkeypatch, with_display):
+        from a2a_adapter import server as server_module
+
+        seen = []
+        real_to_a2a = server_module.to_a2a
+
+        def spy(adapter, agent_card=None, *args, **kwargs):
+            seen.append(kwargs.get("task_store"))
+            return real_to_a2a(adapter, agent_card, *args, **kwargs)
+
+        monkeypatch.setattr(server_module, "to_a2a", spy)
+        monkeypatch.setattr(server_module._ReadyServer, "run", _fake_started_run([]))
+        display = TestServeAgentBind._quiet_display()
+        kwargs = {"display": display} if with_display else {}
+        store = InMemoryTaskStore()
+        server_module.serve_agent(StubAdapter(), task_store=store, **kwargs)
+        assert seen == [store]

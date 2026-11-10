@@ -2,6 +2,8 @@
 
 import asyncio
 import contextlib
+import gc
+import json
 import logging
 import os
 from types import SimpleNamespace
@@ -16,6 +18,7 @@ from a2a_adapter.base_adapter import (
     ParseResult,
     default_state_dir,
 )
+from a2a_adapter.exceptions import AgentTimeoutError
 
 
 # ── AdapterMetadata defaults ─────────────────────────────────
@@ -267,6 +270,150 @@ class TestSessionStore:
         assert calls == ["fsync", "replace"]
 
 
+class TestSessionStoreCap:
+    def _capped(self, tmp_path, monkeypatch, cap=2):
+        monkeypatch.setattr(BaseA2AAdapter, "_MAX_SESSIONS", cap)
+        return SleepingCliAdapter(tmp_path)
+
+    def test_oldest_session_is_evicted_first(self, tmp_path, monkeypatch):
+        adapter = self._capped(tmp_path, monkeypatch)
+        for key in ("a", "b", "c"):
+            adapter._remember_session(key, f"sess-{key}")
+        assert list(adapter._sessions) == ["b", "c"]
+
+    def test_remembering_moves_a_session_to_the_end(self, tmp_path, monkeypatch):
+        adapter = self._capped(tmp_path, monkeypatch)
+        adapter._remember_session("a", "1")
+        adapter._remember_session("b", "2")
+        adapter._remember_session("a", "3")
+        adapter._remember_session("c", "4")
+        assert adapter._sessions == {"a": "3", "c": "4"}
+
+    def test_touch_protects_a_session_in_use(self, tmp_path, monkeypatch):
+        adapter = self._capped(tmp_path, monkeypatch)
+        adapter._remember_session("a", "1")
+        adapter._remember_session("b", "2")
+        adapter._touch_session("a")
+        adapter._remember_session("c", "3")
+        assert list(adapter._sessions) == ["a", "c"]
+
+    def test_touching_an_unknown_session_adds_nothing(self, tmp_path, monkeypatch):
+        adapter = self._capped(tmp_path, monkeypatch)
+        adapter._touch_session("missing")
+        assert adapter._sessions == {}
+
+    def test_an_oversized_store_keeps_the_newest_on_load(self, tmp_path, monkeypatch, caplog):
+        (tmp_path / "sessions.json").write_text(json.dumps({"a": "1", "b": "2", "c": "3"}))
+        with caplog.at_level(logging.INFO, logger="a2a_adapter.base_adapter"):
+            adapter = self._capped(tmp_path, monkeypatch)
+        assert adapter._sessions == {"b": "2", "c": "3"}
+        assert any("sessions.json" in r.getMessage() for r in caplog.records)
+
+    def test_file_is_bounded_after_eviction(self, tmp_path, monkeypatch):
+        adapter = self._capped(tmp_path, monkeypatch)
+        for key in ("a", "b", "c", "d"):
+            adapter._remember_session(key, f"sess-{key}")
+        stored = json.loads((tmp_path / "sessions.json").read_text())
+        assert list(stored) == ["c", "d"]
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_a_run_touches_its_session_before_building_the_command(
+        self, tmp_path, monkeypatch, streaming
+    ):
+        adapter = _stale_adapter(tmp_path)
+        adapter._sessions = {"ctx": "old-session", "newer": "s"}
+        seen = []
+        real = adapter._build_command
+
+        def build(message, context_key):
+            seen.append(list(adapter._sessions))
+            return real(message, context_key)
+
+        adapter._build_command = build
+        if streaming:
+            _spawning(monkeypatch, [_stream_proc([b"hello\n"], b"", 0)])
+            _ = [c async for c in adapter.stream("hi")]
+        else:
+            _spawning(monkeypatch, [_invoke_proc(b"hello", b"", 0)])
+            await adapter.invoke("hi")
+        assert seen == [["newer", "ctx"]]
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_a_run_goes_through_the_cap(self, tmp_path, monkeypatch, streaming):
+        monkeypatch.setattr(BaseA2AAdapter, "_MAX_SESSIONS", 1)
+        adapter = _stale_adapter(tmp_path)
+        adapter._sessions = {"older": "s", "ctx": "old-session"}
+        if streaming:
+            _spawning(monkeypatch, [_stream_proc([b"SID fresh\n", b"hello\n"], b"", 0)])
+            _ = [c async for c in adapter.stream("hi")]
+            assert adapter._sessions == {"ctx": "fresh"}
+        else:
+            _spawning(monkeypatch, [_invoke_proc(b"hello", b"", 0)])
+            await adapter.invoke("hi")
+            assert adapter._sessions == {"ctx": "new-session"}
+
+
+class TestContextLocks:
+    def test_concurrent_users_get_the_same_lock(self, tmp_path):
+        adapter = SleepingCliAdapter(tmp_path)
+        first = adapter._get_context_lock("ctx")
+        assert adapter._get_context_lock("ctx") is first
+        assert adapter._get_context_lock("other") is not first
+
+    async def test_a_waiter_keeps_the_entry_past_the_holders_release(self, tmp_path):
+        adapter = SleepingCliAdapter(tmp_path)
+        order = []
+        holder_in = asyncio.Event()
+        release = asyncio.Event()
+
+        async def holder():
+            async with adapter._get_context_lock("ctx"):
+                order.append("holder in")
+                holder_in.set()
+                await release.wait()
+                order.append("holder out")
+
+        async def waiter():
+            async with adapter._get_context_lock("ctx"):
+                order.append("waiter in")
+                assert "ctx" in adapter._context_locks
+
+        first = asyncio.create_task(holder())
+        await holder_in.wait()
+        second = asyncio.create_task(waiter())
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(first, second)
+        assert order == ["holder in", "holder out", "waiter in"]
+
+    async def test_an_unheld_lock_is_forgotten(self, tmp_path):
+        adapter = SleepingCliAdapter(tmp_path)
+        async with adapter._get_context_lock("ctx"):
+            assert list(adapter._context_locks) == ["ctx"]
+        gc.collect()
+        assert len(adapter._context_locks) == 0
+
+    async def test_a_finished_turn_leaves_no_lock(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from a2a_adapter.integrations.claude_code import ClaudeCodeAdapter
+
+        adapter = ClaudeCodeAdapter(
+            working_dir=str(tmp_path), session_store_path=str(tmp_path / "s.json")
+        )
+        proc = MagicMock(pid=4242, returncode=0)
+        result = (
+            b'{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}\n'
+            b'{"type":"result","result":"ok","session_id":"s1"}\n'
+        )
+        proc.communicate = AsyncMock(return_value=(result, b""))
+        proc.wait = AsyncMock(return_value=0)
+        with patch("a2a_adapter.base_adapter.create_subprocess_exec", return_value=proc):
+            await adapter.invoke("hi", context_id="c1", context=SimpleNamespace(task_id="t"))
+        gc.collect()
+        assert len(adapter._context_locks) == 0
+
+
 class TestDefaultStateDir:
     def test_outside_working_dir_and_per_project(self, tmp_path, monkeypatch):
         state = tmp_path / "state"
@@ -373,7 +520,7 @@ class TestProcessTreeKill:
         task = asyncio.create_task(adapter.invoke("hi", context=SimpleNamespace(task_id="t")))
         try:
             _, grandchild = await wait_for_pids(tmp_path)
-            with pytest.raises(RuntimeError, match="timed out after 1 seconds"):
+            with pytest.raises(AgentTimeoutError, match="timed out after 1 seconds"):
                 await asyncio.wait_for(task, 5)
             assert await wait_dead(grandchild), "grandchild survived the timeout"
         finally:
@@ -623,7 +770,7 @@ class TestProcessTreeKill:
         monkeypatch.setattr(
             "a2a_adapter.base_adapter.create_subprocess_exec", AsyncMock(return_value=proc)
         )
-        with pytest.raises(RuntimeError, match="timed out"):
+        with pytest.raises(AgentTimeoutError, match="timed out"):
             await asyncio.wait_for(adapter.invoke("hi", context=context), 5)
         proc.kill.assert_called()
         assert "t-timeout" not in adapter._killed_tasks
@@ -714,7 +861,7 @@ class TestStreamingDeadline:
         loop = asyncio.get_running_loop()
         start = loop.time()
         try:
-            with pytest.raises(RuntimeError, match="timed out after 1 seconds"):
+            with pytest.raises(AgentTimeoutError, match="timed out after 1 seconds"):
                 await asyncio.wait_for(self._consume(adapter, chunks), 5)
             assert loop.time() - start < 3
             assert chunks and chunks[0] == "line 0"
@@ -724,7 +871,7 @@ class TestStreamingDeadline:
     async def test_streaming_deadline_kills_child(self, tmp_path, record_spawns):
         adapter = record_spawns(_PythonStreamAdapter(tmp_path, _TICKER, timeout=1))
         try:
-            with pytest.raises(RuntimeError, match="timed out"):
+            with pytest.raises(AgentTimeoutError, match="timed out"):
                 await asyncio.wait_for(self._consume(adapter, []), 5)
             assert adapter.spawned[0].returncode is not None
             assert adapter._active_processes == {}
@@ -736,7 +883,7 @@ class TestStreamingDeadline:
         loop = asyncio.get_running_loop()
         start = loop.time()
         try:
-            with pytest.raises(RuntimeError, match="timed out after 1 seconds"):
+            with pytest.raises(AgentTimeoutError, match="timed out after 1 seconds"):
                 await asyncio.wait_for(self._consume(adapter, []), 5)
             assert loop.time() - start < 3
             assert adapter.spawned[0].returncode is not None

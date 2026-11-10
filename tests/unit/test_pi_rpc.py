@@ -10,6 +10,7 @@ import pytest
 from a2a_adapter.integrations.pi import (
     PiCommandTimeoutError,
     PiProcessLostError,
+    PiRpcError,
     PiRpcProcess,
     PiTurnAbortedError,
 )
@@ -845,3 +846,11 @@ async def test_close_forgets_group_after_killing_it(tmp_path):
         if not dead:
             _kill_test_pids(grandchild)
         await _stop_watchers(rpc)
+
+
+def test_turn_timeout_is_readable_for_clients():
+    from a2a_adapter.exceptions import UserFacingError
+    from a2a_adapter.integrations.pi import PiTurnTimeoutError
+
+    assert issubclass(PiTurnTimeoutError, UserFacingError)
+    assert issubclass(PiTurnTimeoutError, PiRpcError)

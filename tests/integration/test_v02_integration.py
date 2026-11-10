@@ -206,6 +206,58 @@ async def test_message_send_error_handling(fail_app):
         assert result["status"]["state"] == "failed"
 
 
+SECRET_ADAPTER_TEXT = "secret-token-XYZ"
+
+
+class SecretFailAdapter(BaseA2AAdapter):
+    async def invoke(self, user_input, context_id=None, **kwargs):
+        raise RuntimeError(SECRET_ADAPTER_TEXT)
+
+
+_V1_SEND = {
+    "jsonrpc": "2.0",
+    "id": "v1",
+    "method": "SendMessage",
+    "params": {
+        "message": {
+            "role": "ROLE_USER",
+            "messageId": "msg-1",
+            "parts": [{"text": "hi"}],
+        }
+    },
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload, headers, state",
+    [
+        (make_send_payload("x"), {}, "failed"),
+        (_V1_SEND, {"A2A-Version": "1.0"}, "TASK_STATE_FAILED"),
+    ],
+    ids=["v0.3", "v1.0"],
+)
+async def test_exception_text_stays_off_the_wire(payload, headers, state):
+    app = to_a2a(SecretFailAdapter())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        resp = await client.post("/", json=payload, headers=headers)
+    assert state in resp.text
+    assert SECRET_ADAPTER_TEXT not in resp.text
+    assert "Details are in the server log" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_to_a2a_expose_error_details_opts_in():
+    app = to_a2a(SecretFailAdapter(), expose_error_details=True)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        resp = await client.post("/", json=make_send_payload("x"))
+    assert SECRET_ADAPTER_TEXT in resp.text
+
+
 # ═══════════════════════════════════════════════════
 # message/stream Tests (SSE)
 # ═══════════════════════════════════════════════════

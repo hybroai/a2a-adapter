@@ -162,6 +162,11 @@ def _add_server_options(
         default=None,
         help="Also allow push URLs on localhost and private networks (default: rejected)",
     )
+    parser.add_argument(
+        "--expose-error-details",
+        action="store_true",
+        help="Send exception text to clients, for local debugging (default: generic message)",
+    )
     parser.add_argument("--port", type=_port, default=9000, help="A2A server port")
     parser.add_argument(
         "--timeout", type=_positive_float, default=600.0, help="Agent timeout in seconds"
@@ -476,6 +481,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         display=display,
         auth_token=auth_token,
         **_push_options(args),
+        **({"expose_error_details": True} if args.expose_error_details else {}),
     )
     return 0
 

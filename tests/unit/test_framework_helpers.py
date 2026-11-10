@@ -4,7 +4,8 @@ import asyncio
 
 import pytest
 
-from a2a_adapter.integrations._framework import iter_with_timeout
+from a2a_adapter.exceptions import AgentTimeoutError, UserFacingError
+from a2a_adapter.integrations._framework import iter_with_timeout, run_with_timeout
 
 
 class Source:
@@ -57,7 +58,7 @@ async def test_cleanup_error_does_not_mask_stream_error():
 
 @pytest.mark.asyncio
 async def test_cleanup_error_does_not_mask_timeout():
-    with pytest.raises(TimeoutError, match="x timed out after 0.05 seconds"):
+    with pytest.raises(AgentTimeoutError, match="x timed out after 0.05 seconds"):
         _ = [i async for i in iter_with_timeout(BadCloseIter(), 0.05, "x")]
 
 
@@ -75,3 +76,25 @@ async def test_cleanup_error_surfaces_after_normal_end():
 
     with pytest.raises(RuntimeError, match="teardown failed"):
         _ = [i async for i in iter_with_timeout(Iter(), 5, "x")]
+
+
+@pytest.mark.asyncio
+async def test_run_with_timeout_raises_a_readable_timeout():
+    with pytest.raises(AgentTimeoutError, match="x timed out after 0.01 seconds") as exc:
+        await run_with_timeout(asyncio.sleep(5), 0.01, "x")
+    assert isinstance(exc.value, UserFacingError)
+    assert isinstance(exc.value, TimeoutError)
+
+
+def test_input_mapper_user_facing_error_passes_through_unwrapped():
+    from a2a_adapter.exceptions import UserFacingError
+    from a2a_adapter.integrations._framework import apply_input_mapper
+
+    error = UserFacingError("Expected JSON input")
+
+    def reject(raw, context_id):
+        raise error
+
+    with pytest.raises(UserFacingError) as exc:
+        apply_input_mapper(reject, "x", None)
+    assert exc.value is error
