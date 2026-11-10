@@ -156,7 +156,11 @@ Three public functions:
   in-flight requests finish within uvicorn's graceful timeout, then the
   lifespan's `adapter.close()` stops them. Apps served by another ASGI server
   get only the lifespan `close()` and an `atexit` fallback.
-- **`build_agent_card(adapter)`** — `adapter.get_metadata()` → `AgentCard`
+- **`build_agent_card(adapter)`** — `adapter.get_metadata()` → `AgentCard`. `AdapterMetadata.extensions`
+  (dicts with `uri`, `description`, `required`, `params`) become the card's
+  `capabilities.extensions`, for
+  [A2A extensions](https://a2a-protocol.org/latest/topics/extensions/) such as
+  data-only card fields.
 
 `serve_agent()` binds `127.0.0.1` by default. `to_a2a(auth_token=...)` /
 `serve_agent(auth_token=...)` add a pure-ASGI bearer-token middleware,
