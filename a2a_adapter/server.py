@@ -42,6 +42,7 @@ from a2a.server.tasks.task_store import TaskStore
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
+    AgentExtension,
     AgentInterface,
     AgentProvider,
     AgentSkill,
@@ -800,6 +801,15 @@ def build_agent_card(
         capabilities=AgentCapabilities(
             streaming=streaming,
             push_notifications=overrides.get("push_notifications", False),
+            extensions=[
+                AgentExtension(
+                    uri=e["uri"],
+                    description=e.get("description", ""),
+                    required=e.get("required", False),
+                    params=e.get("params"),
+                )
+                for e in meta.extensions
+            ],
         ),
         supported_interfaces=[
             AgentInterface(

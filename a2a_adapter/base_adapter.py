@@ -223,6 +223,10 @@ class AdapterMetadata:
         provider: Optional dict with 'organization' and 'url' keys.
         documentation_url: Optional URL to the agent's documentation.
         icon_url: Optional URL to an icon for the agent.
+        extensions: A2A extensions the agent supports, as dicts with 'uri'
+            (required), 'description', 'required' (default False) and
+            'params' (a JSON object defined by the extension). They are
+            published under ``capabilities.extensions`` on the card.
     """
 
     name: str = ""
@@ -235,6 +239,7 @@ class AdapterMetadata:
     provider: dict | None = None
     documentation_url: str | None = None
     icon_url: str | None = None
+    extensions: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)

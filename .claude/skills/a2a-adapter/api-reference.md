@@ -425,7 +425,18 @@ AdapterMetadata(
     provider=None,                    # Dict with "organization" and "url" keys
     documentation_url=None,           # URL to agent documentation
     icon_url=None,                    # URL to agent icon
+    extensions=[],                    # A2A extension dicts (see below)
 )
+```
+
+**Extension dict format** (published under `capabilities.extensions` on the card):
+```python
+{
+    "uri": "https://example.com/ext/limits/v1",  # required; names the extension and its version
+    "description": "Motion limits",              # optional
+    "required": False,                           # optional, default False
+    "params": {"max_step_m": 0.01},              # optional JSON object defined by the extension
+}
 ```
 
 **Skill dict format:**

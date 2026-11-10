@@ -4,6 +4,7 @@ import httpcore
 import httpx
 import pytest
 from a2a.types import AgentCard
+from google.protobuf import json_format
 
 from a2a_adapter.base_adapter import AdapterMetadata, BaseA2AAdapter
 from a2a_adapter.server import build_agent_card, to_a2a
@@ -12,6 +13,22 @@ from .conftest import StubAdapter, StreamingStubAdapter
 
 
 # ── build_agent_card ─────────────────────────────────────────
+
+
+class ExtensionAdapter(BaseA2AAdapter):
+    async def invoke(self, user_input, context_id=None, **kwargs):
+        return "ok"
+
+    def get_metadata(self):
+        return AdapterMetadata(
+            extensions=[
+                {
+                    "uri": "https://example.com/ext/limits/v1",
+                    "description": "Motion limits",
+                    "params": {"max_step_m": 0.01, "box": {"min": [0, -0.5, 0]}},
+                }
+            ]
+        )
 
 
 class TestBuildAgentCard:
@@ -88,6 +105,20 @@ class TestBuildAgentCard:
         assert card.documentation_url == "https://docs.example.com"
         assert card.icon_url == "https://icon.example.com/logo.png"
 
+    def test_metadata_extensions(self):
+        card = build_agent_card(ExtensionAdapter())
+        (ext,) = card.capabilities.extensions
+        assert ext.uri == "https://example.com/ext/limits/v1"
+        assert ext.description == "Motion limits"
+        assert ext.required is False
+        assert json_format.MessageToDict(ext.params) == {
+            "max_step_m": 0.01,
+            "box": {"min": [0, -0.5, 0]},
+        }
+
+    def test_no_extensions_by_default(self):
+        assert list(build_agent_card(StubAdapter()).capabilities.extensions) == []
+
 
 # ── to_a2a ───────────────────────────────────────────────────
 
@@ -124,6 +155,26 @@ class TestToA2a:
         data = resp.json()
         assert data["skills"] == []
         assert data["url"] == data["supportedInterfaces"][0]["url"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["/.well-known/agent-card.json", "/.well-known/agent.json"])
+    async def test_served_card_lists_extensions(self, path):
+        app = to_a2a(ExtensionAdapter())
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            resp = await client.get(path)
+
+        assert resp.status_code == 200
+        assert resp.json()["capabilities"]["extensions"] == [
+            {
+                "uri": "https://example.com/ext/limits/v1",
+                "description": "Motion limits",
+                "params": {"max_step_m": 0.01, "box": {"min": [0, -0.5, 0]}},
+            }
+        ]
 
 
 class TestPushSenderContext:
