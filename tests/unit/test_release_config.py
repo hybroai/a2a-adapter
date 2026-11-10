@@ -32,6 +32,24 @@ def _lock_version() -> str:
     return next(p["version"] for p in packages if p["name"] == "a2a-adapter")
 
 
+# Extras that [all] leaves out on purpose. deepseek-harness pulls a prerelease
+# runtime that ships binary-only wheels for a few platforms.
+EXCLUDED_FROM_ALL = {"deepseek-harness"}
+
+
+def test_all_extra_covers_every_framework_extra():
+    with open(ROOT / "pyproject.toml", "rb") as f:
+        extras = tomllib.load(f)["project"]["optional-dependencies"]
+    assert EXCLUDED_FROM_ALL <= extras.keys()
+    expected = {
+        requirement
+        for name, requirements in extras.items()
+        if name not in {"all", "dev"} | EXCLUDED_FROM_ALL
+        for requirement in requirements
+    }
+    assert set(extras["all"]) == expected
+
+
 def test_manifest_matches_package_version():
     manifest = json.loads((ROOT / ".release-please-manifest.json").read_text())
     assert manifest == {".": _pyproject_version()}
