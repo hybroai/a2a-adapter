@@ -142,6 +142,17 @@ def _take(text: str, width: int) -> str:
     return text
 
 
+def _take_from(text: str, start: int, width: int) -> tuple[int, int]:
+    """Like ``_take`` from ``start``: the end index and cells of the longest fit."""
+    used = 0
+    for index in range(start, len(text)):
+        cells = _char_cells(text[index])
+        if used + cells > width:
+            return index, used
+        used += cells
+    return len(text), used
+
+
 def _cut_end(text: str, width: int) -> str:
     if _cells(text) <= width:
         return text
@@ -586,26 +597,49 @@ def _wrap_cells(text: str, width: int) -> list[str]:
     indent = text[: len(text) - len(text.lstrip(" "))]
     if _cells(indent) > width // 2:
         indent = ""
+    indent_w = _cells(indent)
     lines: list[str] = []
-    current = indent
+    # The current line, kept as parts with a running width so each character
+    # is measured a constant number of times. ``has_text`` is
+    # ``bool(current.strip())`` for the joined line.
+    parts = [indent]
+    cur_w = indent_w
+    has_text = False
     for word in text[len(indent) :].split(" "):
-        candidate = f"{current} {word}" if current.strip() else (current + word)
-        if _cells(candidate) <= width:
-            current = candidate
+        word_w = _cells(word)
+        if cur_w + (1 if has_text else 0) + word_w <= width:
+            if has_text:
+                parts.append(" ")
+                cur_w += 1
+            parts.append(word)
+            cur_w += word_w
+            has_text = has_text or bool(word.strip())
             continue
-        if current.strip():
-            lines.append(current)
-            current = indent
-        room = width - _cells(current)
-        while _cells(word) > room:
-            piece = _take(word, room) or word[0]
-            lines.append(current + piece)
-            word = word[len(piece) :]
-            current = indent
-            room = width - _cells(current)
-        current += word
-    if current.strip() or not lines:
-        lines.append(current)
+        if has_text:
+            lines.append("".join(parts))
+            parts = [indent]
+            cur_w = indent_w
+        room = width - cur_w
+        pos = 0
+        while word_w > room:
+            end, used = _take_from(word, pos, room)
+            if end == pos:
+                end, used = pos + 1, _char_cells(word[pos])
+            parts.append(word[pos:end])
+            lines.append("".join(parts))
+            pos = end
+            word_w -= used
+            parts = [indent]
+            cur_w = indent_w
+            room = width - indent_w
+        rest = word[pos:]
+        parts.append(rest)
+        cur_w += word_w
+        # Not ``has_text or ...``: the line before ``rest`` is whitespace-only
+        # here, since it was either just flushed or never had text.
+        has_text = bool(rest.strip())
+    if has_text or not lines:
+        lines.append("".join(parts))
     return lines
 
 

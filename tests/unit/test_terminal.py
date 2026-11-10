@@ -859,3 +859,128 @@ async def test_failed_row_shows_full_task_id_and_error_at_default_verbosity():
     failed = [line for line in _rows(stream) if "failed" in line]
     assert len(failed) == 1
     assert task_id in failed[0] and "RuntimeError: agent died" in failed[0]
+
+
+# ── _wrap_cells ──────────────────────────────────────────────
+
+
+def _reference_wrap(text: str, width: int) -> list[str]:
+    """The quadratic ``_wrap_cells`` from 0.4.1, kept as the oracle for the rewrite."""
+    from a2a_adapter.terminal import _cells, _take
+
+    if _cells(text) <= width:
+        return [text]
+    indent = text[: len(text) - len(text.lstrip(" "))]
+    if _cells(indent) > width // 2:
+        indent = ""
+    lines: list[str] = []
+    current = indent
+    for word in text[len(indent) :].split(" "):
+        candidate = f"{current} {word}" if current.strip() else (current + word)
+        if _cells(candidate) <= width:
+            current = candidate
+            continue
+        if current.strip():
+            lines.append(current)
+            current = indent
+        room = width - _cells(current)
+        while _cells(word) > room:
+            piece = _take(word, room) or word[0]
+            lines.append(current + piece)
+            word = word[len(piece) :]
+            current = indent
+            room = width - _cells(current)
+        current += word
+    if current.strip() or not lines:
+        lines.append(current)
+    return lines
+
+
+@pytest.mark.parametrize(
+    "text, width, expected",
+    [
+        # A line that fits is kept exactly, double spaces included.
+        ("a  b", 10, ["a  b"]),
+        # Word wrap.
+        ("aaa bbb ccc ddd", 10, ["aaa bbb", "ccc ddd"]),
+        # Continuation lines keep the indent.
+        ("  aaa bbb ccc ddd", 10, ["  aaa bbb", "  ccc ddd"]),
+        # An indent wider than half the width is dropped.
+        ("      aaa bbb", 10, ["aaa bbb"]),
+        # A long word after text, and at line start.
+        ("ab cdefghijklmn", 5, ["ab", "cdefg", "hijkl", "mn"]),
+        ("abcdefghijkl", 5, ["abcde", "fghij", "kl"]),
+        # A long word after an indent.
+        ("  abcdefghij", 6, ["  abcd", "  efgh", "  ij"]),
+        # CJK takes two cells per character.
+        ("智能体" * 7, 10, ["智能体智能", "体智能体智", "能体智能体", "智能体智能", "体"]),
+        # A 2-cell character cannot fit in 1 remaining cell.
+        ("中中中", 5, ["中中", "中"]),
+        # room == 1 and a 2-cell character: the one-character fallback runs one cell over.
+        (" 中", 2, [" 中"]),
+        # Consecutive spaces mid-line in a line that wraps.
+        ("aa  bb cc dd", 6, ["aa  bb", "cc dd"]),
+        # A double space at the break: the extra space is swallowed.
+        ("abcde  fg", 5, ["abcde", "fg"]),
+        # Empty and space-only input keep one line.
+        ("", 5, [""]),
+        ("       ", 3, [""]),
+        # Zero-width and combining characters stay with the slice before them.
+        ("abca\u0301def", 4, ["abca\u0301", "def"]),
+        ("abcd\u200befgh", 4, ["abcd\u200b", "efgh"]),
+        # NBSP and U+3000 are whitespace to strip() but not split points.
+        ("\u00a0 aaaa", 4, ["\u00a0aaa", "a"]),
+        ("\u3000 ab cd", 3, ["\u3000a", "b", "cd"]),
+    ],
+)
+def test_wrap_cells_pinned_outputs(text, width, expected):
+    from a2a_adapter.terminal import _wrap_cells
+
+    assert _wrap_cells(text, width) == expected
+
+
+def test_wrap_cells_matches_reference():
+    import random
+
+    from a2a_adapter.terminal import _wrap_cells
+
+    alphabet = [
+        "a",
+        "b",
+        " ",
+        " ",
+        "\u4e2d",  # 中, two cells
+        "\u3000",  # ideographic space, two cells
+        "\u00a0",  # NBSP
+        "\u200b",  # zero-width space
+        "\u0301",  # combining acute accent
+        "\U0001f44d",  # 👍, two cells
+    ]
+    rng = random.Random(0)
+    for _ in range(20_000):
+        body = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 60)))
+        text = " " * rng.randint(0, 15) + body
+        width = rng.randint(1, 25)
+        assert _wrap_cells(text, width) == _reference_wrap(text, width), (text, width)
+
+
+@pytest.mark.parametrize(
+    "text, width",
+    [("x" * 20_000, 80), ("a " * 10_000, 80), ("中" * 10_000, 81)],
+    ids=["long-word", "spaced", "cjk-odd-width"],
+)
+def test_wrap_cells_does_linear_work(monkeypatch, text, width):
+    from a2a_adapter import terminal
+
+    calls = 0
+    original = terminal._char_cells
+
+    def counting(char):
+        nonlocal calls
+        calls += 1
+        return original(char)
+
+    monkeypatch.setattr(terminal, "_char_cells", counting)
+    lines = terminal._wrap_cells(text, width)
+    assert "".join(lines).replace(" ", "") == text.replace(" ", "")
+    assert calls <= 4 * len(text)
