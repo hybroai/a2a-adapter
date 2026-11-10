@@ -8,6 +8,36 @@ Conventional Commits. Earlier entries follow
 [Keep a Changelog](https://keepachangelog.com/). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0](https://github.com/hybroai/a2a-adapter/compare/v0.3.1...v0.4.0) (2026-11-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* **server:** clients no longer receive exception text in failed task messages. Raise UserFacingError to show a message, or pass expose_error_details=True for local debugging.
+
+### Features
+
+* **server:** stop sending exception text to A2A clients ([f91be76](https://github.com/hybroai/a2a-adapter/commit/f91be76d0a8569d9ece90f1b0060fbfcba603974))
+
+
+### Bug Fixes
+
+* **adapter:** cap the saved session store ([c1aa685](https://github.com/hybroai/a2a-adapter/commit/c1aa6855a0164628c5931454cdb5208a53048837))
+* **adapter:** forget conversation locks that nothing holds ([19761bf](https://github.com/hybroai/a2a-adapter/commit/19761bf43081286c3b54486d42434801c13949b2))
+* **adapter:** keep adapter timeouts readable for clients ([d740d5b](https://github.com/hybroai/a2a-adapter/commit/d740d5b9d6581f70c4367ebf2cc7d8a5f20c8517))
+* codex prompt on stdin, openclaw exit-0 errors, per-request crewai copies ([a99f34e](https://github.com/hybroai/a2a-adapter/commit/a99f34e51e60ac6e51f2bcdcc054aeba199ec0c8))
+* **codex:** send the prompt on stdin so it cannot be parsed as a flag ([e1fa369](https://github.com/hybroai/a2a-adapter/commit/e1fa369217bfbe1115635a00ded99ce6233c53d5))
+* **crewai:** run each request on its own copy of the crew ([34d42ad](https://github.com/hybroai/a2a-adapter/commit/34d42ad46699b86504a1a3e5202399d933dfc601))
+* **deepseek:** recycle the runtime before open sessions pile up ([5ea4a3c](https://github.com/hybroai/a2a-adapter/commit/5ea4a3c99fba2346e323f37a840da2b284a73c86))
+* distinct openclaw sessions, honor streaming=False, n8n response handling ([62e8740](https://github.com/hybroai/a2a-adapter/commit/62e8740625bcf5cf8a24d706f58e01a2ea7718e8))
+* **hermes:** interrupt abandoned runs and hold the session until the thread ends ([ce776b7](https://github.com/hybroai/a2a-adapter/commit/ce776b74b34ef23517a7e9b89d46b84bf3619ee7))
+* **n8n:** handle non-JSON, empty and error workflow responses ([9ad15f1](https://github.com/hybroai/a2a-adapter/commit/9ad15f1c96851a6088e562333d73e1de2c6030e8))
+* **ollama:** fail the task when a stream reports an error ([c0c51b0](https://github.com/hybroai/a2a-adapter/commit/c0c51b0755209e058770bdb872ffb06b61b02872))
+* **openclaw:** fail the task when a run reports an error with exit code 0 ([d148750](https://github.com/hybroai/a2a-adapter/commit/d148750e07ec52b1805db39c36fa8b619651f963))
+* **openclaw:** keep distinct contexts in distinct sessions ([7b35f17](https://github.com/hybroai/a2a-adapter/commit/7b35f17af07fc388c9bd7ea88837e3d829da92b5))
+* **server:** cap finished tasks in the default task store ([18bc6b4](https://github.com/hybroai/a2a-adapter/commit/18bc6b491768454aed6cdcc1806b5fba25980392))
+* **server:** honor streaming=False on the agent card ([18d7062](https://github.com/hybroai/a2a-adapter/commit/18d7062a91777fce7814ef87e392555c46b6a26c))
+
 ## [0.3.1](https://github.com/hybroai/a2a-adapter/compare/v0.3.0...v0.3.1) (2026-11-08)
 
 
