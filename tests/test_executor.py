@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import os
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -26,10 +26,17 @@ from a2a.types import (
     TaskState,
     TaskStatusUpdateEvent,
 )
+from google.protobuf.json_format import MessageToJson
 
 from a2a_adapter import executor as executor_module
 from a2a_adapter.base_adapter import BaseA2AAdapter
+from a2a_adapter.exceptions import UserFacingError
 from a2a_adapter.executor import AdapterAgentExecutor
+from a2a_adapter.integrations._framework import run_with_timeout
+from a2a_adapter.integrations.claude_code import ClaudeCodeAdapter
+from a2a_adapter.integrations.langgraph import LangGraphAdapter
+from a2a_adapter.integrations.n8n import N8nAdapter
+from a2a_adapter.integrations.ollama import OllamaAdapter
 from a2a_adapter.server import build_agent_card, to_a2a
 
 from . import process_helpers
@@ -514,7 +521,7 @@ class TestCancelOverJsonRpc:
         assert cancelled["result"]["status"]["state"] == "failed"
         assert task["status"]["state"] == "failed"
         texts = [part["text"] for part in task["status"]["message"]["parts"]]
-        assert texts == ["Cancel failed: robot did not stop"]
+        assert texts == [f"Cancel failed (task {task['id']}). Details are in the server log."]
 
 
 # ── tasks/cancel through the real request handler ─────────────
@@ -752,7 +759,7 @@ class TestCancelThroughHandler:
             assert isinstance(result, Task), result
             assert result.status.state == FAILED
             assert stored.status.state == FAILED
-            assert _status_text(stored.status) == "Cancel failed: robot did not stop"
+            assert _status_text(stored.status) == _generic("Cancel failed", stored.id)
             observer.task_failed.assert_called_once()
             observer.task_canceled.assert_not_called()
         finally:
@@ -762,7 +769,7 @@ class TestCancelThroughHandler:
         assert [_describe(p) for p in payloads] == [
             ("task", SUBMITTED),
             ("status", WORKING, None),
-            ("status", FAILED, "Cancel failed: robot did not stop"),
+            ("status", FAILED, _generic("Cancel failed", payloads[0].id)),
         ]
         observer.task_completed.assert_not_called()
 
@@ -917,7 +924,7 @@ class TestCancelThroughHandler:
         assert [_describe(p) for p in payloads] == [
             ("task", SUBMITTED),
             ("status", WORKING, None),
-            ("status", FAILED, "Cancel failed: robot did not stop"),
+            ("status", FAILED, _generic("Cancel failed", payloads[0].id)),
         ]
 
     @pytest.mark.parametrize("cancel_error", [None, RuntimeError("robot did not stop")])
@@ -1232,3 +1239,222 @@ class TestCancelEdgeCases:
         # The abandoned decision releases once it finished, so a marker
         # its adapter.cancel() queued does not leak.
         assert released[-1] == "after decision"
+
+
+# ── Exception text sent to clients ────────────────────────────
+
+SECRET = "secret-token-XYZ at /etc/private"
+
+
+def _generic(prefix: str, task_id: str) -> str:
+    return f"{prefix} (task {task_id}). Details are in the server log."
+
+
+def _wire(payload) -> str:
+    return MessageToJson(payload)
+
+
+class _Raises(BaseA2AAdapter):
+    def __init__(self, error: Exception):
+        self.error = error
+
+    async def invoke(self, user_input, context_id=None, **kwargs):
+        raise self.error
+
+
+class _RaisesMidStream(_Raises):
+    async def stream(self, user_input, context_id=None, **kwargs):
+        yield "partial"
+        raise self.error
+
+
+def _handler(adapter, observer=None, **executor_kwargs):
+    return DefaultRequestHandler(
+        AdapterAgentExecutor(adapter, observer, **executor_kwargs),
+        InMemoryTaskStore(),
+        build_agent_card(adapter, streaming=True),
+    )
+
+
+def _user_message() -> Message:
+    return Message(role=Role.ROLE_USER, message_id=uuid.uuid4().hex, parts=[Part(text="hi")])
+
+
+async def _send(adapter, observer=None, **executor_kwargs):
+    """message/send through the real handler; return (result, stored task)."""
+    handler = _handler(adapter, observer, **executor_kwargs)
+    call = ServerCallContext()
+    result = await handler.on_message_send(SendMessageRequest(message=_user_message()), call)
+    return result, await handler.on_get_task(GetTaskRequest(id=result.id), call)
+
+
+async def _stream(adapter, observer=None, **executor_kwargs):
+    """message/stream through the real handler; return (payloads, stored task)."""
+    handler = _handler(adapter, observer, **executor_kwargs)
+    call = ServerCallContext()
+    payloads = [
+        payload
+        async for payload in handler.on_message_send_stream(
+            SendMessageRequest(message=_user_message()), call
+        )
+    ]
+    return payloads, await handler.on_get_task(GetTaskRequest(id=payloads[0].id), call)
+
+
+class _CustomUserError(UserFacingError):
+    pass
+
+
+class TestExceptionTextOnTheWire:
+    async def test_send_and_get_hide_the_exception(self):
+        result, stored = await _send(_Raises(RuntimeError(SECRET)))
+        assert result.status.state == FAILED
+        assert _status_text(result.status) == _generic("Agent execution failed", result.id)
+        for payload in (result, stored):
+            assert "secret-token" not in _wire(payload)
+
+    @pytest.mark.parametrize("adapter_type", [_Raises, _RaisesMidStream])
+    async def test_stream_and_get_hide_the_exception(self, adapter_type):
+        payloads, stored = await _stream(adapter_type(RuntimeError(SECRET)))
+        assert stored.status.state == FAILED
+        assert _status_text(stored.status) == _generic("Agent execution failed", stored.id)
+        assert all("secret-token" not in _wire(p) for p in [*payloads, stored])
+
+    async def test_a_failing_cancel_hides_the_exception(self, monkeypatch):
+        monkeypatch.setattr(executor_module, "_CANCEL_SETTLE_TIMEOUT", 0.05)
+        adapter = Stubborn(RuntimeError(SECRET))
+        result, payloads, stream, stored = await _run_and_cancel(adapter, wait_stream=False)
+        try:
+            assert stored.status.state == FAILED
+            assert _status_text(stored.status) == _generic("Cancel failed", stored.id)
+            assert all("secret-token" not in _wire(p) for p in [result, *payloads, stored])
+        finally:
+            await _finish(adapter, stream)
+
+    async def test_the_log_and_observer_keep_the_exception(self, caplog):
+        observer = MagicMock()
+        with caplog.at_level("ERROR", logger="a2a_adapter.executor"):
+            await _send(_Raises(RuntimeError(SECRET)), observer)
+        record = next(r for r in caplog.records if SECRET in r.getMessage())
+        assert record.exc_info is not None and record.exc_info[1].args == (SECRET,)
+        assert observer.task_failed.call_args.args[2] == f"RuntimeError: {SECRET}"
+
+    async def test_a_failing_cancel_logs_the_traceback(self, monkeypatch, caplog):
+        monkeypatch.setattr(executor_module, "_CANCEL_SETTLE_TIMEOUT", 0.05)
+        adapter = Stubborn(RuntimeError(SECRET))
+        observer = MagicMock()
+        with caplog.at_level("WARNING", logger="a2a_adapter.executor"):
+            _, _, stream, _ = await _run_and_cancel(adapter, observer=observer, wait_stream=False)
+        await _finish(adapter, stream)
+        record = next(r for r in caplog.records if SECRET in r.getMessage())
+        assert record.exc_info is not None and record.exc_info[1].args == (SECRET,)
+        assert observer.task_failed.call_args.args[2] == f"cancel failed: RuntimeError: {SECRET}"
+
+    @pytest.mark.parametrize("error_type", [UserFacingError, _CustomUserError])
+    async def test_user_facing_errors_pass_through(self, error_type):
+        result, stored = await _send(_Raises(error_type("Quota used up")))
+        assert _status_text(stored.status) == "Agent execution failed: Quota used up"
+        assert _status_text(result.status) == "Agent execution failed: Quota used up"
+
+    async def test_a_user_facing_cancel_error_passes_through(self, monkeypatch):
+        monkeypatch.setattr(executor_module, "_CANCEL_SETTLE_TIMEOUT", 0.05)
+        adapter = Stubborn(UserFacingError("Still stopping"))
+        _, _, stream, stored = await _run_and_cancel(adapter, wait_stream=False)
+        await _finish(adapter, stream)
+        assert _status_text(stored.status) == "Cancel failed: Still stopping"
+
+    async def test_expose_error_details_restores_the_text(self):
+        _, stored = await _send(_Raises(RuntimeError(SECRET)), expose_error_details=True)
+        assert _status_text(stored.status) == f"Agent execution failed: {SECRET}"
+
+    async def test_expose_error_details_restores_the_cancel_text(self, monkeypatch):
+        monkeypatch.setattr(executor_module, "_CANCEL_SETTLE_TIMEOUT", 0.05)
+        adapter = Stubborn(RuntimeError(SECRET))
+        executor = AdapterAgentExecutor(adapter, expose_error_details=True)
+        _, _, stream, stored = await _run_and_cancel(adapter, executor=executor, wait_stream=False)
+        await _finish(adapter, stream)
+        assert _status_text(stored.status) == f"Cancel failed: {SECRET}"
+
+    def test_user_facing_error_is_exported_as_a_runtime_error(self):
+        import a2a_adapter
+
+        assert a2a_adapter.UserFacingError is UserFacingError
+        assert "UserFacingError" in a2a_adapter.__all__
+        assert issubclass(UserFacingError, RuntimeError)
+
+
+# Each builder returns an adapter whose failure carries the secret, with only
+# the transport or subprocess faked.
+def _n8n_500(_tmp_path):
+    def respond(request):
+        return httpx.Response(500, text=f"server said {SECRET}")
+
+    adapter = N8nAdapter(webhook_url="http://n8n.test/webhook/secret-token-path", max_retries=0)
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    return adapter
+
+
+def _ollama_connect_error(_tmp_path):
+    def respond(request):
+        raise httpx.ConnectError(SECRET)
+
+    adapter = OllamaAdapter(base_url="http://secret-token-host:11434")
+    adapter.client._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    return adapter
+
+
+def _langgraph_bad_mapper(_tmp_path):
+    def bad_mapper(raw, context_id):
+        raise ValueError(SECRET)
+
+    return LangGraphAdapter(graph=MagicMock(), input_mapper=bad_mapper, streaming=False)
+
+
+class TestRealAdaptersHideErrors:
+    @pytest.mark.parametrize(
+        "build", [_n8n_500, _ollama_connect_error, _langgraph_bad_mapper], ids=lambda b: b.__name__
+    )
+    async def test_transport_and_mapper_errors(self, build, tmp_path, caplog):
+        with caplog.at_level("ERROR", logger="a2a_adapter.executor"):
+            result, stored = await _send(build(tmp_path))
+        assert stored.status.state == FAILED
+        assert _status_text(stored.status) == _generic("Agent execution failed", stored.id)
+        assert "secret-token" not in _wire(result) + _wire(stored)
+        assert any("secret-token" in r.getMessage() for r in caplog.records)
+
+    async def test_a_mapper_failure_keeps_its_cause_in_the_log(self, tmp_path, caplog):
+        with caplog.at_level("ERROR", logger="a2a_adapter.executor"):
+            await _send(_langgraph_bad_mapper(tmp_path))
+        record = next(r for r in caplog.records if r.exc_info)
+        assert isinstance(record.exc_info[1].__cause__, ValueError)
+
+    async def test_cli_stderr(self, tmp_path):
+        adapter = ClaudeCodeAdapter(
+            working_dir=str(tmp_path), session_store_path=str(tmp_path / "sessions.json")
+        )
+        adapter.supports_streaming = lambda: False
+        proc = AsyncMock()
+        proc.returncode = 1
+        proc.pid = 12345
+        proc.kill = MagicMock()
+        proc.communicate = AsyncMock(return_value=(b"", f"fatal: {SECRET}".encode()))
+        with patch("a2a_adapter.base_adapter.create_subprocess_exec", return_value=proc):
+            result, stored = await _send(adapter)
+        assert stored.status.state == FAILED
+        assert "secret-token" not in _wire(result) + _wire(stored)
+
+
+async def test_an_adapter_timeout_reaches_the_client_readable():
+    class Slow(BaseA2AAdapter):
+        async def invoke(self, user_input, context_id=None, **kwargs):
+            return await run_with_timeout(asyncio.sleep(5), 0.01, "slow thing")
+
+    _, stored = await _send(Slow())
+    assert _status_text(stored.status) == (
+        "Agent execution failed: slow thing timed out after 0.01 seconds"
+    )
+
+
+async def test_an_http_library_timeout_stays_hidden():
+    _, stored = await _send(_Raises(httpx.ReadTimeout(SECRET)))
+    assert _status_text(stored.status) == _generic("Agent execution failed", stored.id)

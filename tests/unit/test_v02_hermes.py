@@ -1,11 +1,21 @@
 """Tests for HermesAdapter (v0.2)."""
 
+import asyncio
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from a2a.server.context import ServerCallContext
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore
+from a2a.types import CancelTaskRequest, Message, Part, Role, SendMessageRequest, TaskState
 
+from a2a_adapter.executor import AdapterAgentExecutor
 from a2a_adapter.integrations.hermes import HermesAdapter
+from a2a_adapter.server import build_agent_card
 
 
 # ══════════════════════════════════════════════════════════════
@@ -553,3 +563,241 @@ class TestRegistration:
         assert adapter._provider_name == "openrouter"
         assert adapter._enabled_toolsets == ["hermes-cli"]
         assert adapter._name == "Loaded Hermes"
+
+
+# ══════════════════════════════════════════════════════════════
+# Cancelled and abandoned turns
+# ══════════════════════════════════════════════════════════════
+
+
+class _BlockingAgent:
+    """Runs in the worker thread until the test sets ``release``."""
+
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+        self.interrupts = 0
+
+    def run_conversation(self, **kwargs):
+        self.started.set()
+        self.release.wait(10)
+        self.finished.set()
+        return {"final_response": "done", "completed": True}
+
+    def interrupt(self):
+        self.interrupts += 1
+
+
+async def _started(agent):
+    assert await asyncio.to_thread(agent.started.wait, 5)
+
+
+async def _until(predicate):
+    for _ in range(500):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not reached")
+
+
+def _handler(adapter):
+    return DefaultRequestHandler(
+        AdapterAgentExecutor(adapter),
+        InMemoryTaskStore(),
+        build_agent_card(adapter, streaming=True),
+    )
+
+
+def _request(context_id="ctx-1"):
+    return SendMessageRequest(
+        message=Message(
+            role=Role.ROLE_USER,
+            message_id=uuid.uuid4().hex,
+            context_id=context_id,
+            parts=[Part(text="hi")],
+        )
+    )
+
+
+@pytest.fixture
+def single_worker(adapter):
+    adapter._executor.shutdown(wait=False)
+    adapter._executor = ThreadPoolExecutor(max_workers=1)
+    yield adapter
+    adapter._executor.shutdown(wait=False, cancel_futures=True)
+
+
+class TestCancelledTurn:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [True, False])
+    async def test_cancel_interrupts_and_holds_the_lock_until_the_thread_ends(
+        self, adapter, streaming
+    ):
+        agent = _BlockingAgent()
+        adapter.supports_streaming = lambda: streaming
+        handler = _handler(adapter)
+        call = ServerCallContext()
+        payloads = []
+
+        async def consume():
+            async for payload in handler.on_message_send_stream(_request(), call):
+                payloads.append(payload)
+
+        with patch.object(adapter, "_make_agent", return_value=agent):
+            lock = adapter._session_lock(adapter._session_key("ctx-1"))
+            stream = asyncio.create_task(consume())
+            await _started(agent)
+            await _until(lambda: len(payloads) >= 2)
+            canceled = await asyncio.wait_for(
+                handler.on_cancel_task(CancelTaskRequest(id=payloads[0].id), call), 5
+            )
+            await asyncio.wait_for(stream, 5)
+
+            assert canceled.status.state == TaskState.TASK_STATE_CANCELED
+            assert agent.interrupts == 1
+            assert not agent.finished.is_set()
+            assert lock.locked()
+
+            agent.release.set()
+            await _until(lambda: not lock.locked())
+            assert agent.interrupts == 1
+
+    @pytest.mark.asyncio
+    async def test_a_second_turn_waits_for_the_abandoned_thread(self, adapter):
+        first, second = _BlockingAgent(), _make_mock_agent(response="second")
+        with patch.object(adapter, "_make_agent", side_effect=[first, second]) as make:
+            turn = asyncio.create_task(adapter.invoke("one", context_id="ctx-1"))
+            await _started(first)
+            turn.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await turn
+
+            next_turn = asyncio.create_task(adapter.invoke("two", context_id="ctx-1"))
+            await asyncio.sleep(0.05)
+            assert not next_turn.done() and make.call_count == 1
+
+            first.release.set()
+            assert await asyncio.wait_for(next_turn, 5) == "second"
+
+    @pytest.mark.asyncio
+    async def test_a_consumer_closing_the_stream_interrupts(self, adapter):
+        class Chatty(_BlockingAgent):
+            def run_conversation(self, **kwargs):
+                kwargs["stream_callback"]("chunk")
+                return super().run_conversation(**kwargs)
+
+        agent = Chatty()
+        with patch.object(adapter, "_make_agent", return_value=agent):
+            lock = adapter._session_lock(adapter._session_key("ctx-1"))
+            stream = adapter.stream("hi", context_id="ctx-1")
+            assert await anext(stream) == "chunk"
+            await stream.aclose()
+            assert agent.interrupts == 1
+            assert lock.locked()
+            agent.release.set()
+            await _until(lambda: not lock.locked())
+
+    @pytest.mark.asyncio
+    async def test_abandoned_before_the_pool_ran_it(self, single_worker):
+        adapter = single_worker
+        blocker, queued = _BlockingAgent(), _make_mock_agent()
+        with patch.object(adapter, "_make_agent", side_effect=[blocker, queued]):
+            first = asyncio.create_task(adapter.invoke("x", context_id="other"))
+            await _started(blocker)
+            lock = adapter._session_lock(adapter._session_key("ctx-1"))
+            second = asyncio.create_task(adapter.invoke("y", context_id="ctx-1"))
+            await _until(lambda: lock.locked())
+            await asyncio.sleep(0.01)
+            second.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await second
+            queued.interrupt.assert_not_called()
+
+            blocker.release.set()
+            await asyncio.wait_for(first, 5)
+            await _until(lambda: not lock.locked())
+            queued.run_conversation.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [True, False])
+    async def test_a_turn_the_pool_dropped_fails_and_releases(self, single_worker, streaming):
+        adapter = single_worker
+        blocker, queued = _BlockingAgent(), _make_mock_agent()
+
+        async def run_stream():
+            return [c async for c in adapter.stream("y", context_id="ctx-1")]
+
+        with patch.object(adapter, "_make_agent", side_effect=[blocker, queued]):
+            first = asyncio.create_task(adapter.invoke("x", context_id="other"))
+            await _started(blocker)
+            lock = adapter._session_lock(adapter._session_key("ctx-1"))
+            coro = run_stream() if streaming else adapter.invoke("y", context_id="ctx-1")
+            second = asyncio.create_task(coro)
+            await _until(lambda: lock.locked())
+            await asyncio.sleep(0.01)
+            await adapter.close()
+
+            with pytest.raises(RuntimeError, match="closed before the turn started"):
+                await asyncio.wait_for(second, 5)
+            assert not lock.locked()
+            queued.interrupt.assert_not_called()
+            blocker.release.set()
+            await asyncio.wait_for(first, 5)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [True, False])
+    async def test_a_failing_interrupt_keeps_the_cancellation(self, adapter, streaming):
+        class BrokenInterrupt(_BlockingAgent):
+            def interrupt(self):
+                super().interrupt()
+                raise OSError("interrupt broke")
+
+        async def run_stream():
+            return [c async for c in adapter.stream("x", context_id="ctx-1")]
+
+        agent = BrokenInterrupt()
+        lock = adapter._session_lock(adapter._session_key("ctx-1"))
+        with patch.object(adapter, "_make_agent", return_value=agent):
+            coro = run_stream() if streaming else adapter.invoke("x", context_id="ctx-1")
+            turn = asyncio.create_task(coro)
+            await _started(agent)
+            turn.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await turn
+        assert agent.interrupts == 1
+        assert lock.locked()
+        agent.release.set()
+        await _until(lambda: not lock.locked())
+
+    @pytest.mark.asyncio
+    async def test_a_failure_before_submit_releases(self, adapter):
+        lock = adapter._session_lock(adapter._session_key("ctx-1"))
+        with patch.object(adapter, "_make_agent", side_effect=ValueError("bad config")):
+            with pytest.raises(ValueError, match="bad config"):
+                await adapter.invoke("x", context_id="ctx-1")
+        assert not lock.locked()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [True, False])
+    async def test_a_normal_turn_never_interrupts(self, adapter, streaming):
+        agent = _make_mock_agent(chunks=["a"])
+        lock = adapter._session_lock(adapter._session_key("ctx-1"))
+        with patch.object(adapter, "_make_agent", return_value=agent):
+            if streaming:
+                assert [c async for c in adapter.stream("x", context_id="ctx-1")] == ["a"]
+            else:
+                await adapter.invoke("x", context_id="ctx-1")
+        agent.interrupt.assert_not_called()
+        await _until(lambda: not lock.locked())
+
+    @pytest.mark.asyncio
+    async def test_a_failed_run_releases_without_interrupting(self, adapter):
+        agent = _make_mock_agent()
+        agent.run_conversation.side_effect = RuntimeError("agent broke")
+        lock = adapter._session_lock(adapter._session_key("ctx-1"))
+        with patch.object(adapter, "_make_agent", return_value=agent):
+            with pytest.raises(RuntimeError, match="agent broke"):
+                await adapter.invoke("x", context_id="ctx-1")
+        agent.interrupt.assert_not_called()
+        await _until(lambda: not lock.locked())

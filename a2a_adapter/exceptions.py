@@ -22,3 +22,21 @@ class CancelledByAdapterError(Exception):
     """
 
     pass
+
+
+class UserFacingError(RuntimeError):
+    """An error whose message is safe to show to the A2A client.
+
+    AdapterAgentExecutor hides the text of every other exception from
+    clients and sends a generic message that names the task. This message
+    is sent as is, so it must hold nothing internal: no paths, URLs, tokens
+    or tool output.
+    """
+
+
+class AgentTimeoutError(UserFacingError, TimeoutError):
+    """An adapter's own deadline passed.
+
+    Readable by clients, who can act on it: the message holds only what
+    timed out and the number of seconds.
+    """

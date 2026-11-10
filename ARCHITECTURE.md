@@ -86,7 +86,7 @@ A2A Client → HTTP POST / (tasks/cancel)
       → TaskUpdater.cancel()
         if adapter.cancel() raised: wait (≤ _CANCEL_SETTLE_TIMEOUT, 10 s)
         for the interrupted run to unwind; canceled if it stopped, else
-        one failed state ("Cancel failed: …"), which the RPC returns as
+        one failed state ("Cancel failed …"), which the RPC returns as
         the task, not an error. The wait holds the SDK's per-task lock,
         so a resubscribe or second cancel of that task waits too
 ```
@@ -122,6 +122,12 @@ their own per-task cancel markers (Pi, DeepSeek Harness) override it.
 that keeps printing still stops at the deadline). The stale-session retry
 gets a fresh budget.
 
+The saved session store keeps the 10,000 most recently used conversations and
+evicts the oldest first. A conversation idle behind 10,000 newer ones starts
+fresh instead of resuming; the CLI's own transcript is untouched. Stores
+written by earlier versions have no usage order: an oversized one keeps the
+conversations first seen most recently.
+
 A resumed run whose session no longer exists is retried once without resume
 and the stored session is dropped. By default that is detected only when the
 run failed with no output at all; an adapter can override
@@ -136,8 +142,8 @@ Bridge between `BaseA2AAdapter` and A2A SDK's `AgentExecutor`:
 - Extracts `user_input` from `RequestContext.get_user_input()`
 - Calls `adapter.invoke()` or `adapter.stream()`
 - Converts results to A2A events via `TaskUpdater`
-- Handles errors → `TaskUpdater.failed()`
-- Handles cancellation → `adapter.cancel()` + `TaskUpdater.cancel()`; if `adapter.cancel()` raises, the executor waits, bounded, for the interrupted run to unwind: if it stopped, the task is canceled (the adapter error is logged); if not, the executor sends a single failed state with a "Cancel failed: …" message and does not re-raise, so `tasks/cancel` returns that failed task rather than a JSON-RPC error. "Stopped" means the adapter's `invoke()` returned or raised, or its `stream()` generator was closed (generators nested inside it are left to the event loop); an adapter that starts remote work must stop it in `cancel()` or on `CancelledError`. The interrupted `execute()` waits for the cancel to finish, so this holds when `adapter.cancel()` awaits. While a cancel is in progress, `execute()` sends no terminal state and no late artifact (an error, or a result the adapter returns after `CancelledError`, is dropped); if `execute()` already sent its terminal state, the cancel sends none. Each run sends at most one terminal state
+- Handles errors → `TaskUpdater.failed()`. Exception text never goes to the client by default, because it can hold URLs, paths, tokens or tool output. The client gets `Agent execution failed (task <id>). Details are in the server log.` (`Cancel failed …` on the cancel path). The task id is the correlation id: a failed task is terminal and ids are server-generated. The server log keeps the message and traceback; the CLI's failed row shows the full task id and the error at every verbosity, but its traceback needs `--debug`. `UserFacingError` messages, and all messages with `expose_error_details=True`, are sent as `<prefix>: <text>`. An adapter's own deadline (`AgentTimeoutError`) is user-facing too: a client can act on it and the text holds only a number of seconds. Other timeouts, such as n8n's or httpx's, hold URLs and stay generic
+- Handles cancellation → `adapter.cancel()` + `TaskUpdater.cancel()`; if `adapter.cancel()` raises, the executor waits, bounded, for the interrupted run to unwind: if it stopped, the task is canceled (the adapter error is logged); if not, the executor sends a single failed state with a "Cancel failed …" message and does not re-raise, so `tasks/cancel` returns that failed task rather than a JSON-RPC error. "Stopped" means the adapter's `invoke()` returned or raised, or its `stream()` generator was closed (generators nested inside it are left to the event loop); an adapter that starts remote work must stop it in `cancel()` or on `CancelledError`. The interrupted `execute()` waits for the cancel to finish, so this holds when `adapter.cancel()` awaits. While a cancel is in progress, `execute()` sends no terminal state and no late artifact (an error, or a result the adapter returns after `CancelledError`, is dropped); if `execute()` already sent its terminal state, the cancel sends none. Each run sends at most one terminal state
 
 ### Server Layer (`server.py`)
 
@@ -199,6 +205,7 @@ The `a2a-adapter` console script is intentionally thin:
   own environment) turns on bearer-token auth
 - `--push-notifications` / `--allow-private-push-urls` turn on push and allow
   private receivers; unset flags keep the SDK defaults
+- `--expose-error-details` sends exception text to clients and logs a warning
 
 Hermes is not a v1 CLI target because `HermesAdapter` is an in-process gateway
 adapter rather than a local CLI subprocess adapter. `dsh` is a target because
@@ -227,7 +234,7 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 | `ClaudeCodeAdapter` | `claude` subprocess + stream-json parsing and resume | Yes |
 | `CodexAdapter` | `codex exec --json` subprocess + thread resume | No |
 | `OpenClawAdapter` | Subprocess exec + JSON parse + cancel (kill) | No |
-| `HermesAdapter` | Gateway pattern: `SessionDB` + `AIAgent.run_conversation()` in a thread pool; requires Hermes on `PYTHONPATH` | Yes (callback → queue) |
+| `HermesAdapter` | Gateway pattern: `SessionDB` + `AIAgent.run_conversation()` in a thread pool; requires Hermes on `PYTHONPATH`. A canceled run keeps its conversation's lock until its thread ends, so the next message waits, with no limit, for a tool call that has not returned | Yes (callback → queue) |
 | `OllamaAdapter` | Wraps `OllamaClient` HTTP client (`/api/chat`) | Yes (NDJSON streaming) |
 | `PiAdapter` | One persistent `pi --mode rpc` process and session | Yes (JSONL events) |
 | `DeepSeekHarnessAdapter` | One `deepseek-harness-sdk` runtime (`dsh` over stdio JSON-RPC) on a single worker thread; one durable session per `context_id`; streams each assistant message | Yes |
@@ -244,7 +251,7 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 | Task lifecycle (working → completed/failed/canceled) | `TaskUpdater` + `TaskStore` |
 | SSE streaming transport | `DefaultRequestHandler` + `EventQueue` |
 | Concurrent request handling | `asyncio.create_task()` per request |
-| Task persistence | `InMemoryTaskStore` (pluggable) |
+| Task persistence | `InMemoryTaskStore` (pluggable). The default keeps the 1000 newest finished tasks, so `tasks/get` for an older one returns task not found; opt out with `task_store=` on `to_a2a` or `serve_agent` (the CLI has none) |
 | AgentCard serving | `A2AStarletteApplication` at `/.well-known/agent-card.json` |
 | Push notifications (opt-in; URL checks are ours, in the config store) | `PushNotificationSender` |
 | Task resubscription | `DefaultRequestHandler.on_resubscribe` |

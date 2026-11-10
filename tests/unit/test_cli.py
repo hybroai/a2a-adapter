@@ -653,3 +653,12 @@ def test_cli_allow_private_without_push_warns_and_is_ignored(tmp_path, capsys, p
     kwargs = _serve_kwargs(["claude", "--cwd", str(tmp_path), *push, "--allow-private-push-urls"])
     assert "allow_private_push_urls" not in kwargs
     assert "--allow-private-push-urls" in capsys.readouterr().err
+
+
+def test_cli_expose_error_details_is_left_out_by_default(tmp_path):
+    assert "expose_error_details" not in _serve_kwargs(["claude", "--cwd", str(tmp_path)])
+
+
+def test_cli_expose_error_details_flag(tmp_path):
+    kwargs = _serve_kwargs(["claude", "--cwd", str(tmp_path), "--expose-error-details"])
+    assert kwargs["expose_error_details"] is True

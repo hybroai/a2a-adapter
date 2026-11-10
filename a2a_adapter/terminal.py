@@ -902,7 +902,9 @@ class ActivityLog:
             task_id=task_id,
             state="failed",
             elapsed=self._elapsed(task_id, finish=True),
-            detail=error,
+            # The client's generic message names the full task id; the row's
+            # task column shows only its start.
+            detail=f"{task_id}: {error}",
             detail_role="red",
         )
 

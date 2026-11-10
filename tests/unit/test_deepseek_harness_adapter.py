@@ -22,7 +22,7 @@ import httpx
 import pytest
 
 from a2a_adapter.base_adapter import default_state_dir
-from a2a_adapter.exceptions import CancelledByAdapterError
+from a2a_adapter.exceptions import AgentTimeoutError, CancelledByAdapterError
 from a2a_adapter.integrations.deepseek_harness import DeepSeekHarnessAdapter
 from a2a_adapter.loader import load_adapter
 from a2a_adapter.server import to_a2a
@@ -583,7 +583,7 @@ class TestRuntimeLoss:
         adapter = DeepSeekHarnessAdapter(
             working_dir=str(tmp_path), dsh_home=str(tmp_path / "h"), timeout=0.2
         )
-        with pytest.raises(TimeoutError, match="timed out"):
+        with pytest.raises(AgentTimeoutError, match="timed out"):
             await adapter.invoke("slow", context_id="ctx-1", context=_context("t1"))
         assert sdk.harnesses[0].closed is True
         assert adapter._harness is None
@@ -1130,3 +1130,35 @@ class TestA2AIntegration:
         )
         assert artifact_text == "hello world"
         assert sdk.run_calls[0][1] == "hello dsh"
+
+
+class TestSessionHandleCap:
+    @pytest.fixture
+    def capped(self, adapter, monkeypatch):
+        monkeypatch.setattr(DeepSeekHarnessAdapter, "_MAX_SESSION_HANDLES", 2)
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_runtime_is_recycled_at_the_cap_and_contexts_resume(self, capped, sdk):
+        await capped.invoke("one", context_id="ctx-1", context=_context("t1"))
+        await capped.invoke("two", context_id="ctx-2", context=_context("t2"))
+        assert len(sdk.harnesses) == 1
+        assert sdk.harnesses[0].close_calls == 0
+
+        await capped.invoke("three", context_id="ctx-3", context=_context("t3"))
+        assert len(sdk.harnesses) == 2
+        assert sdk.harnesses[0].close_calls == 1
+        assert list(capped._session_handles) == ["a2a-ctx-3"]
+
+        await capped.invoke("again", context_id="ctx-1", context=_context("t4"))
+        assert sdk.harnesses[1].resume_calls[-1] == "a2a-ctx-1"
+        assert "a2a-ctx-1" not in sdk.harnesses[1].start_calls
+        await capped.close()
+
+    @pytest.mark.asyncio
+    async def test_open_sessions_stay_bounded(self, capped, sdk):
+        for index in range(7):
+            await capped.invoke("hi", context_id=f"ctx-{index}", context=_context(f"t{index}"))
+            assert len(capped._session_handles) <= 2
+        assert all(h.close_calls == 1 for h in sdk.harnesses[:-1])
+        await capped.close()
