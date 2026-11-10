@@ -8,6 +8,13 @@ Conventional Commits. Earlier entries follow
 [Keep a Changelog](https://keepachangelog.com/). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1](https://github.com/hybroai/a2a-adapter/compare/v0.4.0...v0.4.1) (2026-11-10)
+
+
+### Features
+
+* **server:** publish A2A extensions from AdapterMetadata on the agent card ([#89](https://github.com/hybroai/a2a-adapter/issues/89)) ([a391c09](https://github.com/hybroai/a2a-adapter/commit/a391c09f38ae882cfbdf047d032b9271fd4f28ef))
+
 ## [0.4.0](https://github.com/hybroai/a2a-adapter/compare/v0.3.1...v0.4.0) (2026-11-10)
 
 
