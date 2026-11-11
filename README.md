@@ -33,8 +33,10 @@ project's virtual environment, with extras for the framework you use:
 
 ```bash
 pip install a2a-adapter              # core
-pip install "a2a-adapter[langchain]" # or [crewai], [langgraph], [all]
+pip install "a2a-adapter[langchain]" # or [crewai], [langgraph], [all] (all frameworks)
 ```
+
+`[all]` leaves out `[deepseek-harness]`; install that extra on its own.
 
 Wrap your agent in an adapter and serve it:
 

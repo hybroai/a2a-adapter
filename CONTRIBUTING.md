@@ -556,7 +556,8 @@ open its PR.
    environment deployment.
 
 If publishing fails, fix the cause and re-run `publish.yml` from the Actions
-tab on the `vX.Y.Z` tag.
+tab on the `vX.Y.Z` tag. A hand run publishes to PyPI only from a `vX.Y.Z`
+tag; from a branch, run it with `test_pypi=true` to publish to TestPyPI.
 
 ### Versioning
 
