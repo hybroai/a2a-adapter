@@ -8,6 +8,18 @@ Conventional Commits. Earlier entries follow
 [Keep a Changelog](https://keepachangelog.com/). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.2](https://github.com/hybroai/a2a-adapter/compare/v0.4.1...v0.4.2) (2026-11-11)
+
+
+### Bug Fixes
+
+* **terminal:** wrap long lines in linear time ([a61244a](https://github.com/hybroai/a2a-adapter/commit/a61244a55c2f1cf2a5b647d260793b00de5a853e))
+
+
+### Documentation
+
+* note that [all] leaves out deepseek-harness ([f65d6a5](https://github.com/hybroai/a2a-adapter/commit/f65d6a533481913149881130aa0b92b334e8019c))
+
 ## [0.4.1](https://github.com/hybroai/a2a-adapter/compare/v0.4.0...v0.4.1) (2026-11-10)
 
 
