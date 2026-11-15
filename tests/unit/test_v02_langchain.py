@@ -6,6 +6,7 @@ Covers: invoke, stream, input building, output extraction, metadata,
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 import pytest
 
 from a2a_adapter.integrations.langchain import LangChainAdapter
@@ -77,6 +78,36 @@ class MockRunnableNoStream:
 
     async def ainvoke(self, inputs):
         return "no stream"
+
+
+class DictMessageRunnable:
+    def __init__(self, key: str) -> None:
+        self.key = key
+
+    async def ainvoke(self, inputs: dict[str, object]) -> dict[str, MockAIMessage]:
+        return {self.key: MockAIMessage([{"type": "text", "text": "hello world"}])}
+
+    async def astream(
+        self, inputs: dict[str, object]
+    ) -> AsyncIterator[dict[str, MockAIMessageChunk]]:
+        yield {
+            self.key: MockAIMessageChunk(
+                [{"type": "text", "text": "hel"}, {"type": "text", "text": "lo"}]
+            )
+        }
+        yield {self.key: MockAIMessageChunk(" world")}
+
+
+@pytest.mark.parametrize("key,output_key", [("output", None), ("result", None), ("reply", "reply")])
+async def test_invoke_extracts_message_from_dict(key: str, output_key: str | None) -> None:
+    adapter = LangChainAdapter(runnable=DictMessageRunnable(key), output_key=output_key)
+    assert await adapter.invoke("test") == "hello world"
+
+
+@pytest.mark.parametrize("key,output_key", [("output", None), ("result", None), ("reply", "reply")])
+async def test_stream_extracts_message_chunks_from_dict(key: str, output_key: str | None) -> None:
+    adapter = LangChainAdapter(runnable=DictMessageRunnable(key), output_key=output_key)
+    assert [chunk async for chunk in adapter.stream("test")] == ["hello", " world"]
 
 
 class MockRunnableReturnsDictWithCustomKey(MockRunnable):

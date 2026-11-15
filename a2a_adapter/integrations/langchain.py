@@ -197,10 +197,10 @@ class LangChainAdapter(BaseA2AAdapter):
         # Dictionary output
         if isinstance(output, dict):
             if self.output_key and self.output_key in output:
-                return str(output[self.output_key])
+                return self._extract_value_text(output[self.output_key])
             for key in ("output", "result", "answer", "response", "text"):
                 if key in output:
-                    return str(output[key])
+                    return self._extract_value_text(output[key])
             return json.dumps(output, indent=2, default=str)
 
         return str(output)
@@ -214,16 +214,23 @@ class LangChainAdapter(BaseA2AAdapter):
         # Dictionary chunk
         if isinstance(chunk, dict):
             if self.output_key and self.output_key in chunk:
-                return str(chunk[self.output_key])
+                return self._extract_value_text(chunk[self.output_key], sep="")
             for key in ("output", "result", "content", "text"):
                 if key in chunk:
-                    return str(chunk[key])
+                    return self._extract_value_text(chunk[key], sep="")
             return ""
 
         if isinstance(chunk, str):
             return chunk
 
         return ""
+
+    @staticmethod
+    def _extract_value_text(value: object, sep: str = " ") -> str:
+        """Extracts message content while preserving other output values."""
+        if hasattr(value, "content"):
+            return content_to_text(value.content, sep=sep)
+        return str(value)
 
 
 # ═══════════════════════════════════════════════════════════════
