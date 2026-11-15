@@ -51,6 +51,8 @@ async def iter_with_timeout(
     deadline = None if timeout is None else loop.time() + timeout
     try:
         while True:
+            if deadline is not None and loop.time() >= deadline:
+                raise AgentTimeoutError(f"{what} timed out after {timeout} seconds")
             scope = asyncio.timeout_at(deadline)
             try:
                 async with scope:
