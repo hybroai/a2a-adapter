@@ -8,6 +8,14 @@ Conventional Commits. Earlier entries follow
 [Keep a Changelog](https://keepachangelog.com/). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.3](https://github.com/hybroai/a2a-adapter/compare/v0.4.2...v0.4.3) (2026-11-15)
+
+
+### Bug Fixes
+
+* enforce stream deadlines between buffered chunks ([99c816d](https://github.com/hybroai/a2a-adapter/commit/99c816db45e368637995b9fc263c71037b71c7c1))
+* enforce stream deadlines between buffered chunks ([0222f4f](https://github.com/hybroai/a2a-adapter/commit/0222f4fb901dee6eb4dff6572058d37b8d7f4a37))
+
 ## [0.4.2](https://github.com/hybroai/a2a-adapter/compare/v0.4.1...v0.4.2) (2026-11-11)
 
 
