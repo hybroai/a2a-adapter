@@ -98,3 +98,17 @@ def test_input_mapper_user_facing_error_passes_through_unwrapped():
     with pytest.raises(UserFacingError) as exc:
         apply_input_mapper(reject, "x", None)
     assert exc.value is error
+
+
+@pytest.mark.asyncio
+async def test_stream_deadline_includes_time_between_buffered_items():
+    source = Source()
+    wrapper = iter_with_timeout(source.gen(), 0.01, "x")
+    assert await anext(wrapper) == 0
+    await asyncio.sleep(0.02)
+    try:
+        with pytest.raises(AgentTimeoutError, match="x timed out after 0.01 seconds"):
+            await anext(wrapper)
+        assert source.closed
+    finally:
+        await wrapper.aclose()
