@@ -273,14 +273,20 @@ class LangGraphAdapter(BaseA2AAdapter):
 
         # Try "messages" key (common in chat workflows)
         if "messages" in state:
-            messages = state["messages"]
-            if messages:
-                return self._extract_message_content(messages[-1])
+            messages = state["messages"] or []
+            if not isinstance(messages, list):
+                messages = [messages]
+            for message in reversed(messages):
+                if self._is_ai_message(message):
+                    return self._extract_message_content(message)
 
         # Try common output keys
         for key in ("output", "response", "result", "answer", "text", "content"):
             if key in state:
                 return self._extract_value_text(state[key])
+
+        if state.get("messages"):
+            return ""
 
         # Fallback: serialize state (excluding internal keys)
         clean = {k: v for k, v in state.items() if not k.startswith("_")}

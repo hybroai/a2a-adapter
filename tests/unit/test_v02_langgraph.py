@@ -759,3 +759,64 @@ async def test_stream_tool_only_messages_write_emits_nothing():
 async def test_stream_ai_reply_wins_over_output_key():
     graph = UpdatesGraph([{"agent": {"messages": [TypedMessage("reply")], "output": "x"}}])
     assert await _collect(LangGraphAdapter(graph=graph)) == ["reply"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["tool", "human", "system"])
+async def test_invoke_ignores_trailing_non_ai_messages(role: str) -> None:
+    graph = MockGraphMessages(
+        [
+            {"role": "assistant", "content": "agent reply"},
+            {"role": role, "content": "internal content"},
+        ]
+    )
+    adapter = LangGraphAdapter(graph=graph)
+    assert await adapter.invoke("hello") == "agent reply"
+
+
+@pytest.mark.asyncio
+async def test_invoke_tool_only_messages_uses_output_key() -> None:
+    graph = MockGraph(
+        {"messages": [{"role": "tool", "content": "raw tool result"}], "output": "final"}
+    )
+    adapter = LangGraphAdapter(graph=graph)
+    assert await adapter.invoke("hello") == "final"
+
+
+@pytest.mark.asyncio
+async def test_invoke_single_message_update() -> None:
+    graph = MockGraph({"messages": {"role": "assistant", "content": "reply"}})
+    adapter = LangGraphAdapter(graph=graph)
+    assert await adapter.invoke("hello") == "reply"
+
+
+@pytest.mark.asyncio
+async def test_invoke_tool_only_messages_returns_no_reply() -> None:
+    adapter = LangGraphAdapter(
+        graph=MockGraphMessages([{"role": "tool", "content": "internal content"}])
+    )
+    assert await adapter.invoke("hello") == ""
+
+
+@pytest.mark.asyncio
+async def test_invoke_typed_messages_ignores_trailing_tool() -> None:
+    adapter = LangGraphAdapter(
+        graph=MockGraphMessages([TypedMessage("reply"), TypedMessage("raw", type="tool")])
+    )
+    assert await adapter.invoke("hello") == "reply"
+
+
+@pytest.mark.asyncio
+async def test_invoke_explicit_output_key_keeps_precedence() -> None:
+    graph = MockGraph(
+        {"messages": [{"role": "assistant", "content": "reply"}], "final": "selected"}
+    )
+    adapter = LangGraphAdapter(graph=graph, output_key="final")
+    assert await adapter.invoke("hello") == "selected"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("messages", [None, [], {}])
+async def test_invoke_empty_messages_uses_output(messages: object) -> None:
+    adapter = LangGraphAdapter(graph=MockGraph({"messages": messages, "output": "final"}))
+    assert await adapter.invoke("hello") == "final"
