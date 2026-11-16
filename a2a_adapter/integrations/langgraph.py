@@ -323,15 +323,15 @@ class LangGraphAdapter(BaseA2AAdapter):
             messages = state["messages"]
             if not isinstance(messages, list):
                 messages = [messages]
-            # Only the node's latest AI message, as invoke() reads
-            # messages[-1]: a channel without a reducer makes the node
-            # write the whole history, earlier replies included.
+            # Select the latest AI message, matching invoke(): a channel
+            # without a reducer makes the node write the whole history,
+            # including earlier replies.
             for message in reversed(messages):
                 if self._is_ai_message(message):
                     return self._extract_message_content(message)
             # No AI reply (empty or tool-only messages): fall through to the
-            # node's output keys, as invoke() does for an empty list. Tool
-            # message content itself is still never emitted.
+            # node's output keys, as invoke() does. Tool message content
+            # itself is still never emitted.
 
         # Same keys as _extract_output (invoke)
         for key in ("output", "response", "result", "answer", "text", "content"):
