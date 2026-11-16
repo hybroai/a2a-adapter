@@ -8,6 +8,21 @@ Conventional Commits. Earlier entries follow
 [Keep a Changelog](https://keepachangelog.com/). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.4](https://github.com/hybroai/a2a-adapter/compare/v0.4.3...v0.4.4) (2026-11-16)
+
+
+### Bug Fixes
+
+* extract LangChain messages from dictionary outputs ([5e2bc6c](https://github.com/hybroai/a2a-adapter/commit/5e2bc6cce74eb120250db11246fc9e8a6953bbd0))
+* extract LangChain messages from dictionary outputs ([a60bd21](https://github.com/hybroai/a2a-adapter/commit/a60bd21b389855e3571df2652e4cc7816d417808))
+* **langgraph:** select the final assistant reply ([2df40c9](https://github.com/hybroai/a2a-adapter/commit/2df40c9340998ee1951c50ae861c4b0bb49fef08))
+* **langgraph:** select the final assistant reply ([eea59c1](https://github.com/hybroai/a2a-adapter/commit/eea59c1e418b9558359426a935f8167dc41f319c))
+
+
+### Documentation
+
+* align LangGraph comments with invoke filtering ([bc7d03e](https://github.com/hybroai/a2a-adapter/commit/bc7d03ebe9d7d541e45417286cbfc2988554359b))
+
 ## [0.4.3](https://github.com/hybroai/a2a-adapter/compare/v0.4.2...v0.4.3) (2026-11-15)
 
 
