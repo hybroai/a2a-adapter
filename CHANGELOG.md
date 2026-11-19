@@ -8,6 +8,18 @@ Conventional Commits. Earlier entries follow
 [Keep a Changelog](https://keepachangelog.com/). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.5](https://github.com/hybroai/a2a-adapter/compare/v0.4.4...v0.4.5) (2026-11-19)
+
+
+### Features
+
+* **langgraph:** resume an interrupted graph on the client's reply ([5195aa6](https://github.com/hybroai/a2a-adapter/commit/5195aa60fcc90e38cc524787f25085ae4490c235))
+
+
+### Bug Fixes
+
+* **langgraph:** report interrupted graphs as input-required ([bc4efe7](https://github.com/hybroai/a2a-adapter/commit/bc4efe7d9baeef91d36f45dfce42ba0a466c51d7))
+
 ## [0.4.4](https://github.com/hybroai/a2a-adapter/compare/v0.4.3...v0.4.4) (2026-11-16)
 
 
