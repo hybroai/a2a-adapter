@@ -927,6 +927,22 @@ class ActivityLog:
             preview=text,
         )
 
+    def task_input_required(self, task_id: str, context_id: str, text: str) -> None:
+        # The run is over; the client's reply starts a new one on this task.
+        operation = self._operation(task_id, finish=True)
+        elapsed = self._elapsed(task_id, finish=True)
+        if self.verbosity <= Verbosity.QUIET:
+            return
+        self._row(
+            "out",
+            operation,
+            context_id=context_id,
+            task_id=task_id,
+            state="input-required",
+            elapsed=elapsed,
+            preview=text,
+        )
+
     def task_failed(self, task_id: str, context_id: str, error: str) -> None:
         operation = self._operation(task_id, finish=True)
         self._row(

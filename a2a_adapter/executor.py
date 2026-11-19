@@ -11,6 +11,8 @@ Design rationale:
     - If the adapter raises an exception, we emit a failed state.
     - If the adapter supports streaming, we emit artifact chunks incrementally.
     - If not, we call invoke() and emit a single artifact + completion.
+    - If the adapter returns (or, streaming, finally yields) InputRequired,
+      the task ends in input-required instead of completed.
 """
 
 import asyncio
@@ -26,7 +28,7 @@ from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
 from a2a.types import Part, Task, TaskState, TaskStatus
 
-from .base_adapter import BaseA2AAdapter
+from .base_adapter import BaseA2AAdapter, InputRequired
 from .exceptions import CancelledByAdapterError, UserFacingError
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,8 @@ class TaskObserver(Protocol):
     def task_completed(
         self, task_id: str, context_id: str, text: str, chunks: int | None
     ) -> None: ...
+
+    def task_input_required(self, task_id: str, context_id: str, text: str) -> None: ...
 
     def task_failed(self, task_id: str, context_id: str, error: str) -> None: ...
 
@@ -202,6 +206,14 @@ class AdapterAgentExecutor(AgentExecutor):
             if not user_input:
                 logger.warning("Empty user input for task %s", context.task_id)
 
+            # The SDK updates its task object in place as this run's events
+            # are processed (start_work() makes it working and clears the
+            # status message), so the adapter gets a copy: on a reply it sees
+            # the task as it was, e.g. input-required, also after awaiting.
+            if isinstance(context.current_task, Task):
+                snapshot = Task()
+                snapshot.CopyFrom(context.current_task)
+                context.current_task = snapshot
             # A follow-up message to an existing task must not replace it;
             # the SDK rejects that with an error log.
             if context.current_task is None:
@@ -313,6 +325,9 @@ class AdapterAgentExecutor(AgentExecutor):
         result = await self._adapter.invoke(user_input, context.context_id, context=context)
         if self._drop_late_result(context, run):
             return
+        if isinstance(result, InputRequired):
+            await self._send_input_required(updater, result, context, run)
+            return
 
         # Type detection: str (backward compatible) or list[Part] (multimodal)
         if isinstance(result, str):
@@ -324,7 +339,7 @@ class AdapterAgentExecutor(AgentExecutor):
         else:
             raise TypeError(
                 f"Adapter invoke() returned unexpected type {type(result).__name__}. "
-                f"Expected str or list[Part]."
+                f"Expected str, list[Part] or InputRequired."
             )
 
         # Match the streaming path: Parts with no content serialize to {}.
@@ -378,8 +393,12 @@ class AdapterAgentExecutor(AgentExecutor):
         consumers never see an unclosed artifact. While the task is being
         canceled nothing more is sent, so the artifact is left open
         (``last_chunk=False``): no event may follow the canceled state.
+
+        An ``InputRequired`` item ends the stream: nothing after it is read,
+        the artifact is closed and the task ends in input-required.
         """
         chunks: list[str | Part] = []
+        paused: InputRequired | None = None
         prev_chunk: str | Part | None = None
         artifact_id = uuid.uuid4().hex
 
@@ -396,6 +415,9 @@ class AdapterAgentExecutor(AgentExecutor):
                     if self._cancel_owns(context.task_id, run):
                         # A stream that ignored the cancel: stop reading it
                         # (it is closed below) and send nothing more.
+                        break
+                    if isinstance(chunk, InputRequired):
+                        paused = chunk
                         break
                     if self._is_empty_chunk(chunk):
                         continue
@@ -441,6 +463,9 @@ class AdapterAgentExecutor(AgentExecutor):
 
         if self._drop_late_result(context, run):
             return
+        if paused is not None:
+            await self._send_input_required(updater, paused, context, run)
+            return
         full_text = self._concatenate_chunks(chunks)
         message = updater.new_agent_message([Part(text=full_text)])
         await self._send_terminal(
@@ -449,6 +474,33 @@ class AdapterAgentExecutor(AgentExecutor):
             lambda: self._notify(
                 "task_completed", context.task_id, context.context_id, full_text, len(chunks)
             ),
+        )
+
+    async def _send_input_required(
+        self,
+        updater: TaskUpdater,
+        request: InputRequired,
+        context: RequestContext,
+        run: _Run,
+    ) -> None:
+        """End the run in input-required, with the adapter's message.
+
+        Sent like a terminal state: it is the last event of this run (the SDK
+        stops reading the queue there), so a cancel racing it defers to it.
+        The task itself stays open for the client's reply; a cancel that
+        arrives while this is being sent finds the task not yet cancelable
+        and must be retried (a known, narrow window).
+        """
+        message = request.message
+        items = [message] if isinstance(message, (str, Part)) else list(message)
+        parts = [p for item in items for p in self._to_parts(item) if not self._is_empty_chunk(p)]
+        if not parts:
+            parts = [Part(text="[Input required]")]
+        text = self._extract_text_from_parts(parts)
+        await self._send_terminal(
+            run,
+            updater.requires_input(message=updater.new_agent_message(parts)),
+            lambda: self._notify("task_input_required", context.task_id, context.context_id, text),
         )
 
     def _concatenate_chunks(self, chunks: list[str | Part]) -> str:
@@ -491,10 +543,17 @@ class AdapterAgentExecutor(AgentExecutor):
         in-flight execute() had already sent one, this sends nothing; a
         cancel that arrives after execute() returned is not covered.
 
+        A task waiting for input (no execute() in flight, state
+        input-required or auth-required) is canceled at once and
+        adapter.cancel() runs afterwards; see ``_cancel_idle``.
+
         Args:
             context: Request context for the task being canceled.
             event_queue: Queue for publishing the cancellation event.
         """
+        if context.task_id not in self._runs and self._waits_for_client(context):
+            await self._cancel_idle(context, event_queue)
+            return
         # Registered before the first await, so execute() sees it.
         cancelling = asyncio.get_running_loop().create_future()
         self._cancelling[context.task_id] = cancelling
@@ -516,6 +575,49 @@ class AdapterAgentExecutor(AgentExecutor):
             # With an execute() in flight, it releases once it has returned.
             if context.task_id not in self._runs:
                 self._release(context.task_id)
+
+    @staticmethod
+    def _waits_for_client(context: RequestContext) -> bool:
+        """Whether the task's last run ended waiting for the client.
+
+        Only then is it safe to cancel before adapter.cancel(): a run that
+        just sent completed or failed may not be stored yet, and canceled
+        must not overwrite it.
+        """
+        task = getattr(context, "current_task", None)
+        state = getattr(getattr(task, "status", None), "state", None)
+        return state in (TaskState.TASK_STATE_INPUT_REQUIRED, TaskState.TASK_STATE_AUTH_REQUIRED)
+
+    async def _cancel_idle(self, context: RequestContext, event_queue: EventQueue) -> None:
+        """Cancel a task that waits for the client, with no execute() in flight.
+
+        The SDK cancels the task's idle producer just before calling
+        cancel(), and the producer closes ``event_queue`` as soon as it next
+        runs, so the canceled state is enqueued before anything here awaits
+        (TaskUpdater only suspends to put the event). adapter.cancel() then
+        runs for cleanup; with nothing of ours running, the task is canceled
+        whatever it does, so its errors are only logged.
+        """
+        updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+        try:
+            try:
+                await updater.cancel()
+            except Exception as e:
+                self._notify(
+                    "task_failed", context.task_id, context.context_id, f"{type(e).__name__}: {e}"
+                )
+                raise
+            self._notify("task_canceled", context.task_id, context.context_id)
+        finally:
+            try:
+                await self._adapter.cancel(context=context)
+            except Exception as e:
+                logger.warning(
+                    "Adapter cancel() raised for idle task %s; it is canceled anyway: %s",
+                    context.task_id,
+                    e,
+                )
+            self._release(context.task_id)
 
     def _abandon(self, task_id: str, decision: asyncio.Future[None]) -> None:
         """Stop waiting for a cancel decision that outlasted the bounded wait.

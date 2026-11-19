@@ -242,6 +242,15 @@ class TestActivityRows:
         assert "TimeoutError: agent exceeded 600s" in lines[1]
         assert "⊘ canceled" in lines[2]
 
+    def test_input_required_row(self):
+        log, stream, clock = _log()
+        log.task_submitted("91c2", "7f3a", "Write a draft")
+        clock.t += 1.5
+        log.task_input_required("91c2", "7f3a", "Approve the draft?")
+        lines = _rows(stream)
+        assert "→" in lines[1] and "◇ input-required" in lines[1] and "1.5s" in lines[1]
+        assert '"Approve the draft?"' in lines[1]
+
     def test_preview_collapses_whitespace_and_fits_width(self):
         log, stream, _ = _log(width=100)
         log.task_submitted("t1", "c1", "line one\n\n   line two " + "x" * 200)

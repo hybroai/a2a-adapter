@@ -243,6 +243,23 @@ class AdapterMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class InputRequired:
+    """The agent paused and waits for the user's reply.
+
+    Return it from ``invoke()``, or yield it as the last item of
+    ``stream()``, and the task ends in ``INPUT_REQUIRED`` instead of
+    ``COMPLETED``, with ``message`` as its status message. Output streamed
+    before it stays in the task's artifact. The client answers by sending
+    its next message to the same task; that message reaches ``invoke()``
+    or ``stream()`` like any other, with ``context.current_task`` set (a
+    copy of the task as it was when the reply arrived: still input-required).
+    ``stream()`` is not read past this item.
+    """
+
+    message: str | Part | list[Part] = ""
+
+
+@dataclass(frozen=True, slots=True)
 class CommandResult:
     """Output of _build_command() — carries resume metadata for stale retry.
 
@@ -338,7 +355,7 @@ class BaseA2AAdapter(ABC):
         user_input: str,
         context_id: str | None = None,
         **kwargs,
-    ) -> str | list[Part]:
+    ) -> str | list[Part] | InputRequired:
         """Execute the agent and return a response.
 
         This is the ONLY method you must implement.
@@ -361,6 +378,8 @@ class BaseA2AAdapter(ABC):
         Returns:
             str: Text-only response (backward compatible).
             list[Part]: Multimodal response with text, files, images, etc.
+            InputRequired: The agent needs the user's reply before it can
+                finish; the task ends in ``INPUT_REQUIRED``.
 
         Example:
             # Text-only response (backward compatible)
@@ -390,7 +409,7 @@ class BaseA2AAdapter(ABC):
         user_input: str,
         context_id: str | None = None,
         **kwargs,
-    ) -> AsyncIterator[str | Part]:
+    ) -> AsyncIterator[str | Part | InputRequired]:
         """Stream the agent response, yielding chunks.
 
         Optional. If not implemented, the bridge layer falls back to invoke()
@@ -411,6 +430,8 @@ class BaseA2AAdapter(ABC):
         Yields:
             str: Text chunk (backward compatible).
             Part: Multimodal content chunk (images, files, etc.).
+            InputRequired: As the last item: the agent needs the user's
+                reply; the task ends in ``INPUT_REQUIRED``.
 
         Example:
             # Text-only streaming (backward compatible)

@@ -5,12 +5,14 @@ calls into A2A SDK events. Tests use mock RequestContext and EventQueue
 to verify the full lifecycle without needing a real HTTP server.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from a2a.server.tasks.task_updater import TaskUpdater
+from a2a.types import Part, Task, TaskState, TaskStatus
 
-from a2a_adapter.base_adapter import BaseA2AAdapter
+from a2a_adapter.base_adapter import BaseA2AAdapter, InputRequired
 from a2a_adapter.exceptions import CancelledByAdapterError
 from a2a_adapter.executor import AdapterAgentExecutor
 
@@ -465,3 +467,211 @@ async def test_execute_invoke_empty_string_skips_artifact():
         updater_instance.complete.assert_awaited_once()
         message_parts = updater_instance.new_agent_message.call_args[0][0]
         assert [p.text for p in message_parts] == ["[Empty response]"]
+
+
+# ──── Test: InputRequired (adapter pauses for user input) ────
+
+
+class _InputRequiredAdapter(BaseA2AAdapter):
+    def __init__(self, result):
+        self._result = result
+
+    async def invoke(self, user_input, context_id=None, **kwargs):
+        return self._result
+
+
+class _InputRequiredStreamAdapter(BaseA2AAdapter):
+    def __init__(self, items):
+        self._items = items
+        self.closed = False
+
+    async def invoke(self, user_input, context_id=None, **kwargs):
+        raise AssertionError("not used")
+
+    async def stream(self, user_input, context_id=None, **kwargs):
+        try:
+            for item in self._items:
+                yield item
+        finally:
+            self.closed = True
+
+
+async def _run_with_updater(adapter, observer=None):
+    executor = AdapterAgentExecutor(adapter, observer=observer)
+    with patch("a2a_adapter.executor.TaskUpdater") as MockUpdater:
+        updater = AsyncMock(spec=TaskUpdater)
+        updater.new_agent_message = MagicMock(side_effect=lambda parts: ("msg", parts))
+        MockUpdater.return_value = updater
+        await executor.execute(make_mock_context(), make_mock_event_queue())
+    return updater
+
+
+@pytest.mark.asyncio
+async def test_invoke_input_required_reports_input_required_not_completed():
+    observer = MagicMock()
+    updater = await _run_with_updater(
+        _InputRequiredAdapter(InputRequired("Approve the draft?")), observer
+    )
+
+    updater.requires_input.assert_awaited_once()
+    updater.complete.assert_not_awaited()
+    updater.failed.assert_not_awaited()
+    updater.add_artifact.assert_not_awaited()
+    _, parts = updater.requires_input.call_args.kwargs["message"]
+    assert [p.text for p in parts] == ["Approve the draft?"]
+    observer.task_input_required.assert_called_once_with("task-1", "ctx-1", "Approve the draft?")
+    observer.task_completed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_invoke_input_required_with_parts():
+    parts_in = [Part(text="Pick one:"), Part(text="a or b")]
+    updater = await _run_with_updater(_InputRequiredAdapter(InputRequired(parts_in)))
+
+    _, parts = updater.requires_input.call_args.kwargs["message"]
+    assert [p.text for p in parts] == ["Pick one:", "a or b"]
+
+
+@pytest.mark.asyncio
+async def test_invoke_input_required_empty_message_gets_placeholder():
+    updater = await _run_with_updater(_InputRequiredAdapter(InputRequired("")))
+
+    _, parts = updater.requires_input.call_args.kwargs["message"]
+    assert [p.text for p in parts] == ["[Input required]"]
+
+
+@pytest.mark.asyncio
+async def test_stream_input_required_closes_artifact_then_reports_input_required():
+    observer = MagicMock()
+    adapter = _InputRequiredStreamAdapter(["draft ", "ready", InputRequired("Approve the draft?")])
+    updater = await _run_with_updater(adapter, observer)
+
+    calls = updater.add_artifact.call_args_list
+    assert [c.args[0][0].text for c in calls] == ["draft ", "ready"]
+    assert calls[-1].kwargs["last_chunk"] is True
+    updater.requires_input.assert_awaited_once()
+    updater.complete.assert_not_awaited()
+    _, parts = updater.requires_input.call_args.kwargs["message"]
+    assert [p.text for p in parts] == ["Approve the draft?"]
+    observer.task_input_required.assert_called_once_with("task-1", "ctx-1", "Approve the draft?")
+
+
+@pytest.mark.asyncio
+async def test_stream_input_required_without_output():
+    updater = await _run_with_updater(_InputRequiredStreamAdapter([InputRequired("Continue?")]))
+
+    updater.add_artifact.assert_not_awaited()
+    updater.requires_input.assert_awaited_once()
+    updater.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_stops_reading_after_input_required():
+    adapter = _InputRequiredStreamAdapter(["a", InputRequired("Continue?"), "late"])
+    updater = await _run_with_updater(adapter)
+
+    sent = [c.args[0][0].text for c in updater.add_artifact.call_args_list]
+    assert sent == ["a"]
+    assert adapter.closed
+    updater.requires_input.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_no_run_sends_canceled_before_adapter_cancel():
+    """A task idle in input-required has no execute() in flight.
+
+    The SDK cancels its idle producer just before calling cancel(); the
+    producer then closes the queue at its next step, so the canceled state
+    must be enqueued before anything else awaits.
+    """
+    order = []
+
+    class Adapter(BaseA2AAdapter):
+        async def invoke(self, user_input, context_id=None, **kwargs):
+            return "unused"
+
+        async def cancel(self, context_id=None, **kwargs):
+            order.append("adapter.cancel")
+
+    executor = AdapterAgentExecutor(Adapter())
+    with patch("a2a_adapter.executor.TaskUpdater") as MockUpdater:
+        updater = AsyncMock(spec=TaskUpdater)
+        updater.cancel.side_effect = lambda *a, **k: order.append("canceled")
+        MockUpdater.return_value = updater
+        ctx = make_mock_context()
+        ctx.current_task = Task(
+            id="task-1",
+            context_id="ctx-1",
+            status=TaskStatus(state=TaskState.TASK_STATE_INPUT_REQUIRED),
+        )
+        await executor.cancel(ctx, make_mock_event_queue())
+
+    assert order == ["canceled", "adapter.cancel"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_no_run_and_a_finished_run_keeps_the_old_order():
+    """No run in flight but the task is not waiting for input (e.g. its run
+    just finished): adapter.cancel() goes first, as before."""
+    order = []
+
+    class Adapter(BaseA2AAdapter):
+        async def invoke(self, user_input, context_id=None, **kwargs):
+            return "unused"
+
+        async def cancel(self, context_id=None, **kwargs):
+            order.append("adapter.cancel")
+
+    executor = AdapterAgentExecutor(Adapter())
+    with patch("a2a_adapter.executor.TaskUpdater") as MockUpdater:
+        updater = AsyncMock(spec=TaskUpdater)
+        updater.cancel.side_effect = lambda *a, **k: order.append("canceled")
+        MockUpdater.return_value = updater
+        ctx = make_mock_context()
+        ctx.current_task = Task(
+            id="task-1", context_id="ctx-1", status=TaskStatus(state=TaskState.TASK_STATE_WORKING)
+        )
+        await executor.cancel(ctx, make_mock_event_queue())
+
+    assert order == ["adapter.cancel", "canceled"]
+
+
+@pytest.mark.asyncio
+async def test_invoke_input_required_with_a_bare_part():
+    updater = await _run_with_updater(_InputRequiredAdapter(InputRequired(Part(text="Pick one"))))
+
+    _, parts = updater.requires_input.call_args.kwargs["message"]
+    assert [p.text for p in parts] == ["Pick one"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_input_required_dropped_while_a_cancel_is_in_progress(streaming):
+    """cancel() sends the terminal state; the pause must not follow it."""
+    executor = None
+
+    class Adapter(BaseA2AAdapter):
+        async def invoke(self, user_input, context_id=None, **kwargs):
+            executor._cancelling["task-1"] = asyncio.get_running_loop().create_future()
+            return InputRequired("Continue?")
+
+        async def _stream(self, user_input, context_id=None, **kwargs):
+            yield "partial"
+            executor._cancelling["task-1"] = asyncio.get_running_loop().create_future()
+            yield InputRequired("Continue?")
+
+    if streaming:
+        Adapter.stream = Adapter._stream
+    executor = AdapterAgentExecutor(Adapter())
+    with patch("a2a_adapter.executor.TaskUpdater") as MockUpdater:
+        updater = AsyncMock(spec=TaskUpdater)
+        MockUpdater.return_value = updater
+        run = asyncio.ensure_future(executor.execute(make_mock_context(), make_mock_event_queue()))
+        while "task-1" not in executor._cancelling:
+            await asyncio.sleep(0)
+        executor._cancelling.pop("task-1").set_result(None)
+        await run
+
+    updater.requires_input.assert_not_awaited()
+    updater.complete.assert_not_awaited()
+    updater.failed.assert_not_awaited()

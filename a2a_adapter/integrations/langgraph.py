@@ -44,7 +44,8 @@ except ImportError:
     MessageSendParams = None  # type: ignore
 
 from ..adapter import BaseAgentAdapter
-from ..base_adapter import AdapterMetadata, BaseA2AAdapter
+from ..base_adapter import AdapterMetadata, BaseA2AAdapter, InputRequired
+from ..exceptions import UserFacingError
 from ._framework import apply_input_mapper, content_to_text, iter_with_timeout, run_with_timeout
 
 # Lazy import for TaskStore to avoid hard dependency
@@ -76,6 +77,14 @@ class LangGraphAdapter(BaseA2AAdapter):
     Supports both streaming (via ``astream()``) and non-streaming
     (via ``ainvoke()``) execution. Streaming yields each node's output
     as the node finishes (``stream_mode="updates"``).
+
+    A graph that pauses on ``interrupt()`` ends the task in
+    ``INPUT_REQUIRED``, with the interrupt's value (JSON for non-text
+    values) as the status message. The graph needs a checkpointer; one
+    interrupt at a time is supported, and a graph without a checkpointer
+    or with several pending interrupts fails the task with a clear message.
+    Static breakpoints (``interrupt_before`` / ``interrupt_after``) are not
+    detected: such a run is reported as completed.
 
     Example::
 
@@ -158,38 +167,53 @@ class LangGraphAdapter(BaseA2AAdapter):
         self.config = config or {}
         self.thread_id_key = thread_id_key
 
-    async def invoke(self, user_input: str, context_id: str | None = None, **kwargs) -> str:
-        """Invoke the graph and return a text response."""
+    async def invoke(
+        self, user_input: str, context_id: str | None = None, **kwargs
+    ) -> str | InputRequired:
+        """Invoke the graph and return a text response.
+
+        Returns ``InputRequired`` when the graph paused on ``interrupt()``.
+        """
         inputs = self._build_inputs(user_input, context_id)
         result = await run_with_timeout(
             self.graph.ainvoke(inputs, **self._config_kwargs(context_id)),
             self.timeout,
             "LangGraph graph",
         )
+        if isinstance(result, dict) and result.get("__interrupt__"):
+            return self._input_required(result["__interrupt__"])
         return self._extract_output(result)
 
     async def stream(
         self, user_input: str, context_id: str | None = None, **kwargs
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[str | InputRequired]:
         """Stream each node's new output via astream(stream_mode="updates").
 
         Every update holds only what one node just wrote, so its text is a
         true delta: AI messages and output keys are emitted once each, and
         the user's input and tool results are not echoed. Outputs from
-        successive nodes are separated by a blank line.
+        successive nodes are separated by a blank line. If the graph paused
+        on ``interrupt()``, the last item is ``InputRequired``.
         """
         inputs = self._build_inputs(user_input, context_id)
         emitted = False
+        interrupts: list[Any] = []
         updates = self.graph.astream(
             inputs,
             stream_mode="updates",
             **self._config_kwargs(context_id),
         )
         async for update in iter_with_timeout(updates, self.timeout, "LangGraph graph"):
+            # Parallel nodes report their interrupts as separate updates,
+            # so they are only counted once the stream has ended.
+            if isinstance(update, dict) and update.get("__interrupt__"):
+                interrupts.extend(update["__interrupt__"])
             text = self._extract_update_text(update)
             if text:
                 yield f"\n\n{text}" if emitted else text
                 emitted = True
+        if interrupts:
+            yield self._input_required(interrupts)
 
     def supports_streaming(self) -> bool:
         """Use the ``streaming`` flag, else detect ``astream`` on the graph."""
@@ -259,6 +283,38 @@ class LangGraphAdapter(BaseA2AAdapter):
         else:
             base[self.input_key] = user_message
         return base
+
+    # ──── Internal: Interrupts ────
+
+    def _input_required(self, interrupts: Any) -> InputRequired:
+        """Turn the graph's pending interrupts into ``InputRequired``.
+
+        Only one interrupt at a time is supported. A graph compiled without
+        a checkpointer can pause but never resume, so it fails instead. A
+        graph with no ``checkpointer`` attribute at all (e.g. a
+        ``RemoteGraph``, whose server keeps the thread) is trusted.
+        """
+        interrupts = list(interrupts)
+        if getattr(self.graph, "checkpointer", True) in (None, False):
+            raise UserFacingError(
+                "The LangGraph graph paused for input, but it has no checkpointer, "
+                "so it cannot be resumed. Compile it with a checkpointer to use "
+                "interrupt()."
+            )
+        if len(interrupts) > 1:
+            raise UserFacingError(
+                f"The LangGraph graph paused on {len(interrupts)} interrupts at once; "
+                "LangGraphAdapter supports one interrupt at a time."
+            )
+        interrupt = interrupts[0]
+        # RemoteGraph reports interrupts as plain dicts.
+        if isinstance(interrupt, dict) and "value" in interrupt:
+            value = interrupt["value"]
+        else:
+            value = getattr(interrupt, "value", interrupt)
+        if isinstance(value, str):
+            return InputRequired(value)
+        return InputRequired(json.dumps(value, ensure_ascii=False, default=str))
 
     # ──── Internal: Output Extraction ────
 
