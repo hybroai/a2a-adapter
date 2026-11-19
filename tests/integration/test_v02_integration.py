@@ -8,11 +8,12 @@ app without starting a network server, verifying A2A protocol compliance
 end-to-end.
 """
 
+import asyncio
 import json
 import pytest
 import httpx
 
-from a2a_adapter import BaseA2AAdapter, AdapterMetadata, to_a2a, build_agent_card
+from a2a_adapter import BaseA2AAdapter, AdapterMetadata, InputRequired, to_a2a, build_agent_card
 
 
 # ──── Test Adapters ────
@@ -556,3 +557,95 @@ async def test_push_notification_delivered_to_allowed_url(monkeypatch):
     assert received, "the receiver got the task update"
     assert str(received[0].url) == "http://receiver.test/hook"
     assert reply["result"]["id"] in received[-1].content.decode()
+
+
+# ═══════════════════════════════════════════════════
+# A task waiting for input
+# ═══════════════════════════════════════════════════
+
+
+class _PausingAdapter(BaseA2AAdapter):
+    """Pauses for input; its cancel() awaits, like HTTP or process cleanup."""
+
+    def __init__(self):
+        self.cancelled = False
+
+    async def invoke(self, user_input, context_id=None, **kwargs):
+        return InputRequired("Which file?")
+
+    async def cancel(self, context_id=None, **kwargs):
+        await asyncio.sleep(0.01)
+        self.cancelled = True
+
+
+async def test_cancel_task_waiting_for_input_with_awaiting_adapter_cancel():
+    adapter = _PausingAdapter()
+    v1 = {"A2A-Version": "1.0"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=to_a2a(adapter)), base_url="http://testserver"
+    ) as client:
+        sent = await client.post("/", json=_V1_SEND, headers=v1)
+        task = sent.json()["result"]["task"]
+        assert task["status"]["state"] == "TASK_STATE_INPUT_REQUIRED"
+        assert task["status"]["message"]["parts"][0]["text"] == "Which file?"
+
+        resp = await client.post(
+            "/",
+            json={
+                "jsonrpc": "2.0",
+                "id": "c",
+                "method": "CancelTask",
+                "params": {"id": task["id"]},
+            },
+            headers=v1,
+        )
+
+    assert resp.json()["result"]["status"]["state"] == "TASK_STATE_CANCELED"
+    assert adapter.cancelled
+
+
+class _AskTwiceAdapter(BaseA2AAdapter):
+    """Pauses once; on the reply, records the task state after an await."""
+
+    def __init__(self):
+        self.seen = []
+
+    async def invoke(self, user_input, context_id=None, **kwargs):
+        task = kwargs["context"].current_task
+        if task is None:
+            return InputRequired("Which file?")
+        await asyncio.sleep(0.01)  # let the SDK process start_work()
+        self.seen.append(task.status.state)
+        return "done"
+
+
+async def test_reply_sees_the_task_as_it_was_when_the_reply_arrived():
+    """The SDK updates its task object in place as the run's events are
+    processed; the adapter gets a snapshot, so it still reads input-required
+    after its first await."""
+    from a2a.types import TaskState
+
+    adapter = _AskTwiceAdapter()
+    v1 = {"A2A-Version": "1.0"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=to_a2a(adapter)), base_url="http://testserver"
+    ) as client:
+        task = (await client.post("/", json=_V1_SEND, headers=v1)).json()["result"]["task"]
+        reply = {
+            "jsonrpc": "2.0",
+            "id": "r",
+            "method": "SendMessage",
+            "params": {
+                "message": {
+                    "role": "ROLE_USER",
+                    "messageId": "msg-2",
+                    "taskId": task["id"],
+                    "contextId": task["contextId"],
+                    "parts": [{"text": "a.py"}],
+                }
+            },
+        }
+        done = (await client.post("/", json=reply, headers=v1)).json()["result"]["task"]
+
+    assert done["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert adapter.seen == [TaskState.TASK_STATE_INPUT_REQUIRED]

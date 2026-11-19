@@ -9,6 +9,8 @@ import asyncio
 import json
 import pytest
 
+from a2a_adapter.base_adapter import InputRequired
+from a2a_adapter.exceptions import UserFacingError
 from a2a_adapter.integrations.langgraph import LangGraphAdapter
 from a2a_adapter.server import build_agent_card, to_a2a
 from a2a_adapter.loader import load_adapter
@@ -559,7 +561,7 @@ async def test_stream_skips_human_and_empty_ai_messages():
 
 
 @pytest.mark.asyncio
-async def test_stream_skips_interrupts_and_empty_updates():
+async def test_stream_skips_empty_updates_and_reports_interrupts_last():
     graph = UpdatesGraph(
         [
             {"noop": None},
@@ -567,7 +569,9 @@ async def test_stream_skips_interrupts_and_empty_updates():
             {"writer": {"output": "draft"}},
         ]
     )
-    assert await _collect(LangGraphAdapter(graph=graph)) == ["draft"]
+    graph.checkpointer = object()
+    # The interrupt value is never streamed as text; it ends the stream.
+    assert await _collect(LangGraphAdapter(graph=graph)) == ["draft", InputRequired("waiting")]
 
 
 @pytest.mark.asyncio
@@ -820,3 +824,22 @@ async def test_invoke_explicit_output_key_keeps_precedence() -> None:
 async def test_invoke_empty_messages_uses_output(messages: object) -> None:
     adapter = LangGraphAdapter(graph=MockGraph({"messages": messages, "output": "final"}))
     assert await adapter.invoke("hello") == "final"
+
+
+@pytest.mark.asyncio
+async def test_interrupt_with_checkpointer_disabled_fails():
+    graph = UpdatesGraph([{"__interrupt__": ("waiting",)}])
+    graph.checkpointer = False  # compile(checkpointer=False)
+    with pytest.raises(UserFacingError, match="checkpointer"):
+        await _collect(LangGraphAdapter(graph=graph))
+
+
+@pytest.mark.asyncio
+async def test_interrupt_from_graph_without_checkpointer_attribute():
+    """A RemoteGraph has no checkpointer attribute (the server keeps the
+    thread) and reports interrupts as plain dicts."""
+    graph = UpdatesGraph([{"__interrupt__": [{"value": "Approve?", "id": "i1"}]}])
+    assert not hasattr(graph, "checkpointer")
+    assert await _collect(LangGraphAdapter(graph=graph)) == [
+        InputRequired("Approve?", metadata={"langgraph_interrupt_id": "i1"})
+    ]
