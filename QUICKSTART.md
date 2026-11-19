@@ -83,6 +83,39 @@ adapter = LangGraphAdapter(
 serve_agent(adapter, port=9000)
 ```
 
+**Human in the loop.** A graph compiled with a checkpointer can pause with
+LangGraph's `interrupt()`. The task then ends in `INPUT_REQUIRED`, and its
+status message is the interrupt's value (JSON for non-text values). When the
+client replies to the same task, the graph resumes with
+`Command(resume=<reply text>)`. A reply that is a JSON object is passed as a
+dict while `parse_json_input` is on (the default), and
+`resume_mapper=lambda text, context_id: ...` builds any other value. The
+task then completes or pauses again.
+
+The LangGraph thread is keyed on the A2A `contextId`. A new task in a paused
+context starts the graph from the beginning, which drops the pause, and so
+does a new task after the paused one is canceled. A reply to the older,
+superseded task then fails with a clear message; it never answers the newer
+task's pause. The interrupt id is stored in the status message's metadata
+(`langgraph_interrupt_id`). One interrupt at a time is
+supported. Static breakpoints (`interrupt_before` / `interrupt_after`) are
+not detected. Without streaming, the client sees only the interrupt's value,
+not what nodes wrote before the pause, so put what the user must review into
+that value. To resume after a restart, use a persistent checkpointer and
+pass a persistent `task_store`.
+
+```python
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import interrupt
+
+def approve(state):
+    answer = interrupt("Approve the draft?")  # task -> INPUT_REQUIRED
+    return {"output": f"approved: {answer}"}  # runs after the client replies
+
+graph = builder.compile(checkpointer=InMemorySaver())
+serve_agent(LangGraphAdapter(graph=graph), port=9000)
+```
+
 #### Option D: CrewAI Crew
 
 ```python

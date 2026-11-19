@@ -5,6 +5,7 @@ AdapterAgentExecutor -> LangGraphAdapter -> real compiled graph with an
 in-memory checkpointer. Covers SendMessage and SendStreamingMessage (A2A 1.0).
 """
 
+import asyncio
 import json
 
 import httpx
@@ -132,3 +133,112 @@ async def test_cancel_input_required_task(client_for):
 
     assert canceled["status"]["state"] == "TASK_STATE_CANCELED"
     assert (await _get(client, task["id"]))["status"]["state"] == "TASK_STATE_CANCELED"
+
+
+async def test_new_task_after_cancel_starts_fresh(client_for):
+    client = await client_for()
+    task = await _send(client, "write a draft", "m1")
+    await _cancel(client, task["id"])
+
+    fresh = await _send(client, "write another", "m2", context_id=task["contextId"])
+    done = await _send(client, "yes", "m3", task_id=fresh["id"], context_id=task["contextId"])
+
+    assert fresh["status"]["state"] == "TASK_STATE_INPUT_REQUIRED"
+    assert done["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert _text(done["status"]) == "approved='yes'"
+
+
+# ──── Resuming on the client's reply ────
+
+
+@pytest.mark.parametrize("streaming", [True, False], ids=["stream-path", "invoke-path"])
+async def test_send_message_reply_resumes_to_completion(client_for, streaming):
+    client = await client_for(streaming=streaming)
+    task = await _send(client, "write a draft", "m1")
+
+    done = await _send(client, "yes", "m2", task_id=task["id"], context_id=task["contextId"])
+
+    assert done["id"] == task["id"]
+    assert done["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert _text(done["status"]) == "approved='yes'"
+
+
+async def test_send_streaming_message_reply_resumes_to_completion(client_for):
+    client = await client_for()
+    _, task_id, context_id, _ = await _send_streaming(client, "write a draft", "m1")
+
+    status, done_id, _, events = await _send_streaming(
+        client, "yes", "m2", task_id=task_id, context_id=context_id
+    )
+
+    assert done_id == task_id
+    assert status["state"] == "TASK_STATE_COMPLETED"
+    artifacts = [e["artifactUpdate"]["artifact"] for e in events if "artifactUpdate" in e]
+    assert "".join(p["text"] for a in artifacts for p in a["parts"]) == "approved='yes'"
+
+
+async def test_reply_can_pause_the_task_again(client_for):
+    adapter = LangGraphAdapter(graph=approval_graph(publish_step=True))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=to_a2a(adapter)), base_url="http://testserver"
+    ) as client:
+        task = await _send(client, "write a draft", "m1")
+        ids = {"task_id": task["id"], "context_id": task["contextId"]}
+
+        second = await _send(client, "yes", "m2", **ids)
+        done = await _send(client, "now", "m3", **ids)
+
+    assert second["status"]["state"] == "TASK_STATE_INPUT_REQUIRED"
+    assert _text(second["status"]) == "Publish now?"
+    assert done["status"]["state"] == "TASK_STATE_COMPLETED"
+
+
+@pytest.mark.parametrize("streaming", [True, False], ids=["stream-path", "invoke-path"])
+async def test_reply_to_a_task_superseded_in_its_context(client_for, streaming):
+    """A newer task in the same context paused the thread again; the older
+    task's reply must not consume the newer task's pause."""
+    client = await client_for(streaming=streaming)
+    a = await _send(client, "draft A", "m1")
+    b = await _send(client, "draft B", "m2", context_id=a["contextId"])
+    assert b["status"]["state"] == "TASK_STATE_INPUT_REQUIRED"
+
+    reply_a = await _send(client, "yes-for-A", "m3", task_id=a["id"], context_id=a["contextId"])
+    reply_b = await _send(client, "yes-for-B", "m4", task_id=b["id"], context_id=a["contextId"])
+
+    assert reply_a["status"]["state"] == "TASK_STATE_FAILED"
+    assert "superseded" in _text(reply_a["status"])
+    assert reply_b["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert _text(reply_b["status"]) == "approved='yes-for-B'"
+
+
+class _SlowStateGraph:
+    """Delegates to a real graph, but aget_state waits on "I/O" first, as a
+    SQLite or Postgres checkpointer does."""
+
+    def __init__(self, graph):
+        self._graph = graph
+        self.checkpointer = graph.checkpointer
+
+    async def aget_state(self, config):
+        await asyncio.sleep(0.01)
+        return await self._graph.aget_state(config)
+
+    def __getattr__(self, name):
+        return getattr(self._graph, name)
+
+
+@pytest.mark.parametrize("streaming", [True, False], ids=["stream-path", "invoke-path"])
+async def test_superseded_reply_fails_with_a_checkpointer_that_awaits(streaming):
+    adapter = LangGraphAdapter(graph=_SlowStateGraph(approval_graph()), streaming=streaming)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=to_a2a(adapter)), base_url="http://testserver"
+    ) as client:
+        a = await _send(client, "draft A", "m1")
+        b = await _send(client, "draft B", "m2", context_id=a["contextId"])
+        ids = {"context_id": a["contextId"]}
+        reply_a = await _send(client, "yes-for-A", "m3", task_id=a["id"], **ids)
+        reply_b = await _send(client, "yes-for-B", "m4", task_id=b["id"], **ids)
+
+    assert reply_a["status"]["state"] == "TASK_STATE_FAILED"
+    assert reply_b["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert _text(reply_b["status"]) == "approved='yes-for-B'"

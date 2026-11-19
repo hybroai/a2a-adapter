@@ -26,7 +26,7 @@ from abc import ABC, abstractmethod
 from asyncio import wait_for
 from asyncio.subprocess import DEVNULL, PIPE, Process, create_subprocess_exec
 from dataclasses import dataclass, field
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from a2a.types import Part
 
@@ -254,9 +254,15 @@ class InputRequired:
     or ``stream()`` like any other, with ``context.current_task`` set (a
     copy of the task as it was when the reply arrived: still input-required).
     ``stream()`` is not read past this item.
+
+    ``metadata`` (JSON-serializable) goes on the status message, so it is
+    stored with the task and sent to the client. On the reply, read it back
+    from ``context.current_task.status.message.metadata``, e.g. to tell
+    which pause the reply answers.
     """
 
     message: str | Part | list[Part] = ""
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

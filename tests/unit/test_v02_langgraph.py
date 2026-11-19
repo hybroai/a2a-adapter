@@ -840,4 +840,6 @@ async def test_interrupt_from_graph_without_checkpointer_attribute():
     thread) and reports interrupts as plain dicts."""
     graph = UpdatesGraph([{"__interrupt__": [{"value": "Approve?", "id": "i1"}]}])
     assert not hasattr(graph, "checkpointer")
-    assert await _collect(LangGraphAdapter(graph=graph)) == [InputRequired("Approve?")]
+    assert await _collect(LangGraphAdapter(graph=graph)) == [
+        InputRequired("Approve?", metadata={"langgraph_interrupt_id": "i1"})
+    ]

@@ -230,7 +230,7 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 |---|---|---|
 | `N8nAdapter` | HTTP POST to webhook + retry | No |
 | `LangChainAdapter` | `ainvoke()` / `astream()` with output extraction | Yes (auto-detected) |
-| `LangGraphAdapter` | `ainvoke()` / `astream()` with state delta streaming; an `interrupt()` pause becomes `INPUT_REQUIRED` | Yes (auto-detected) |
+| `LangGraphAdapter` | `ainvoke()` / `astream()` with state delta streaming; an `interrupt()` pause becomes `INPUT_REQUIRED`, and the reply to that task resumes the graph with `Command(resume=...)` | Yes (auto-detected) |
 | `CrewAIAdapter` | `kickoff_async()` with sync fallback | No |
 | `ClaudeCodeAdapter` | `claude` subprocess + stream-json parsing and resume | Yes |
 | `CodexAdapter` | `codex exec --json` subprocess + thread resume | No |

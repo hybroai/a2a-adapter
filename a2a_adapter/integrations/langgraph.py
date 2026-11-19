@@ -17,6 +17,7 @@ Supports flexible input handling:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import uuid
@@ -60,6 +61,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Status message metadata key holding the interrupt a paused task waits on.
+_INTERRUPT_ID_KEY = "langgraph_interrupt_id"
+
 # Message types/roles that are not the agent's reply.
 _NON_AI_MESSAGE_TYPES = frozenset(
     {"human", "user", "system", "developer", "tool", "function", "remove"}
@@ -80,11 +84,21 @@ class LangGraphAdapter(BaseA2AAdapter):
 
     A graph that pauses on ``interrupt()`` ends the task in
     ``INPUT_REQUIRED``, with the interrupt's value (JSON for non-text
-    values) as the status message. The graph needs a checkpointer; one
+    values) as the status message. The client's reply to that task resumes
+    the graph with ``Command(resume=<reply>)`` (see ``resume_mapper``), and
+    the task runs on to completion or pauses again. The interrupt's id is
+    kept in the status message metadata (``langgraph_interrupt_id``), so a
+    reply resumes only the pause its own task reported. A new task in the
+    same context starts the graph afresh, which drops the pause; a reply to
+    the older, superseded task then fails with a clear message. The graph needs a checkpointer; one
     interrupt at a time is supported, and a graph without a checkpointer
     or with several pending interrupts fails the task with a clear message.
     Static breakpoints (``interrupt_before`` / ``interrupt_after``) are not
-    detected: such a run is reported as completed.
+    detected: such a run is reported as completed. With ``ainvoke`` (no
+    streaming), only the interrupt's value is sent, not what nodes wrote
+    before the pause, so put what the user must see into the interrupt
+    value. A reply that arrives while a newer task in the same context is
+    still running is not detected as superseded until that task pauses.
 
     Example::
 
@@ -116,6 +130,7 @@ class LangGraphAdapter(BaseA2AAdapter):
         streaming: bool | None = None,
         config: Dict[str, Any] | None = None,
         thread_id_key: str | None = "thread_id",
+        resume_mapper: Callable[[str, str | None], Any] | None = None,
     ) -> None:
         """Initialize the LangGraph adapter.
 
@@ -148,6 +163,12 @@ class LangGraphAdapter(BaseA2AAdapter):
                 server is shared by clients that must not see each other's
                 conversations, set this to ``None`` (or authenticate
                 callers and keep context ids secret).
+            resume_mapper: Custom function (sync or async) ``(reply_text,
+                context_id) -> value`` that builds the ``Command(resume=...)`` value from the
+                client's reply to a paused task. Without it, a reply that is a
+                JSON object is parsed when ``parse_json_input`` is on;
+                anything else is passed as the raw text. If it raises, the
+                request fails (a ``UserFacingError`` reaches the client).
         """
         self.graph = graph
         self.input_key = input_key
@@ -166,15 +187,17 @@ class LangGraphAdapter(BaseA2AAdapter):
         self._streaming = streaming
         self.config = config or {}
         self.thread_id_key = thread_id_key
+        self.resume_mapper = resume_mapper
 
     async def invoke(
         self, user_input: str, context_id: str | None = None, **kwargs
     ) -> str | InputRequired:
         """Invoke the graph and return a text response.
 
-        Returns ``InputRequired`` when the graph paused on ``interrupt()``.
+        Returns ``InputRequired`` when the graph paused on ``interrupt()``;
+        the client's reply to that task resumes it.
         """
-        inputs = self._build_inputs(user_input, context_id)
+        inputs = await self._graph_input(user_input, context_id, kwargs)
         result = await run_with_timeout(
             self.graph.ainvoke(inputs, **self._config_kwargs(context_id)),
             self.timeout,
@@ -193,9 +216,10 @@ class LangGraphAdapter(BaseA2AAdapter):
         true delta: AI messages and output keys are emitted once each, and
         the user's input and tool results are not echoed. Outputs from
         successive nodes are separated by a blank line. If the graph paused
-        on ``interrupt()``, the last item is ``InputRequired``.
+        on ``interrupt()``, the last item is ``InputRequired``; the client's
+        reply to that task resumes it.
         """
-        inputs = self._build_inputs(user_input, context_id)
+        inputs = await self._graph_input(user_input, context_id, kwargs)
         emitted = False
         interrupts: list[Any] = []
         updates = self.graph.astream(
@@ -286,6 +310,81 @@ class LangGraphAdapter(BaseA2AAdapter):
 
     # ──── Internal: Interrupts ────
 
+    async def _graph_input(
+        self, user_input: str, context_id: str | None, kwargs: Dict[str, Any]
+    ) -> Any:
+        """Fresh graph inputs, or ``Command(resume=...)`` for a reply.
+
+        A message is a reply when it goes to a task in ``INPUT_REQUIRED``.
+        The thread's checkpoint must then still hold the interrupt that task
+        paused on (its id is in the task's status message metadata): the
+        thread is per context, so a newer task in the same context may have
+        replaced it, and that task's pause is not this reply's to answer.
+        Both are read from persistent stores when configured, so this
+        survives a restart. A new task in a paused context is fresh input:
+        LangGraph drops the old pause.
+        """
+        task = getattr(kwargs.get("context"), "current_task", None)
+        if task is None or task.status.state != TaskState.TASK_STATE_INPUT_REQUIRED:
+            return self._build_inputs(user_input, context_id)
+
+        # Read before awaiting anything.
+        recorded = self._recorded_interrupt_id(task)
+        config = self._config_kwargs(context_id).get("config", {})
+        state = await run_with_timeout(
+            self.graph.aget_state(config), self.timeout, "LangGraph graph"
+        )
+        interrupts = getattr(state, "interrupts", None) or [
+            i for t in getattr(state, "tasks", ()) for i in getattr(t, "interrupts", ())
+        ]
+        if not interrupts:
+            raise UserFacingError(
+                "This task is waiting for input, but its LangGraph thread has "
+                "nothing to resume (no pending interrupt in the checkpoint). "
+                "Start a new task."
+            )
+        if recorded is not None and recorded not in {self._interrupt_id(i) for i in interrupts}:
+            raise UserFacingError(
+                "This task's pause was superseded by a newer task in this context; "
+                "reply to that task, or start a new one."
+            )
+        from langgraph.types import Command
+
+        value = await self._resume_value(user_input, context_id)
+        # Name the interrupt, so the resume cannot answer another one.
+        return Command(resume={recorded: value} if recorded is not None else value)
+
+    @staticmethod
+    def _recorded_interrupt_id(task: Any) -> str | None:
+        """The interrupt id stored with the task when it paused, if any."""
+        status = task.status
+        if not status.HasField("message"):
+            return None
+        metadata = status.message.metadata
+        value = metadata[_INTERRUPT_ID_KEY] if _INTERRUPT_ID_KEY in metadata else None
+        return value if isinstance(value, str) and value else None
+
+    async def _resume_value(self, user_input: str, context_id: str | None) -> Any:
+        """The value ``interrupt()`` returns once the graph resumes."""
+        if self.resume_mapper is not None:
+            try:
+                value = self.resume_mapper(user_input, context_id)
+                if inspect.isawaitable(value):
+                    value = await value
+                return value
+            except UserFacingError:
+                raise
+            except Exception as e:
+                raise RuntimeError(f"resume_mapper failed: {type(e).__name__}: {e}") from e
+        if self.parse_json_input and user_input.strip().startswith("{"):
+            try:
+                parsed = json.loads(user_input)
+            except json.JSONDecodeError:
+                return user_input
+            if isinstance(parsed, dict):
+                return parsed
+        return user_input
+
     def _input_required(self, interrupts: Any) -> InputRequired:
         """Turn the graph's pending interrupts into ``InputRequired``.
 
@@ -312,9 +411,20 @@ class LangGraphAdapter(BaseA2AAdapter):
             value = interrupt["value"]
         else:
             value = getattr(interrupt, "value", interrupt)
-        if isinstance(value, str):
-            return InputRequired(value)
-        return InputRequired(json.dumps(value, ensure_ascii=False, default=str))
+        message = (
+            value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+        )
+        interrupt_id = self._interrupt_id(interrupt)
+        # Stored with the task, so its reply resumes this very interrupt.
+        metadata = {_INTERRUPT_ID_KEY: interrupt_id} if interrupt_id else None
+        return InputRequired(message, metadata=metadata)
+
+    @staticmethod
+    def _interrupt_id(interrupt: Any) -> str | None:
+        value = (
+            interrupt.get("id") if isinstance(interrupt, dict) else getattr(interrupt, "id", None)
+        )
+        return value if isinstance(value, str) and value else None
 
     # ──── Internal: Output Extraction ────
 

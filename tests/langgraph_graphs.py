@@ -13,7 +13,6 @@ from langgraph.types import interrupt
 
 
 class ApprovalState(TypedDict, total=False):
-    messages: list
     draft: str
     output: Annotated[list, operator.add]
 
@@ -23,12 +22,15 @@ def approval_graph(
     checkpointer: Any = "memory",
     prompt: Any = "Approve the draft?",
     parallel: bool = False,
+    publish_step: bool = False,
 ):
     """draft -> approve (interrupts with ``prompt``) -> end.
 
     The draft node writes ``{"draft": "Draft v1"}``; once resumed, approve
     writes ``{"output": ["approved=<resume value>"]}``. With ``parallel``, a
-    second node interrupts at the same time as approve.
+    second node interrupts at the same time as approve. With
+    ``publish_step``, a publish node after approve interrupts again
+    ("Publish now?") and writes ``"published=<resume value>"``.
     """
 
     def draft(state: ApprovalState) -> dict:
@@ -37,6 +39,10 @@ def approval_graph(
     def approve(state: ApprovalState) -> dict:
         answer = interrupt(prompt)
         return {"output": [f"approved={answer!r}"]}
+
+    def publish(state: ApprovalState) -> dict:
+        answer = interrupt("Publish now?")
+        return {"output": [f"published={answer!r}"]}
 
     def review(state: ApprovalState) -> dict:
         answer = interrupt("Second reviewer?")
@@ -47,7 +53,12 @@ def approval_graph(
     builder.add_node("approve", approve)
     builder.add_edge(START, "draft")
     builder.add_edge("draft", "approve")
-    builder.add_edge("approve", END)
+    if publish_step:
+        builder.add_node("publish", publish)
+        builder.add_edge("approve", "publish")
+        builder.add_edge("publish", END)
+    else:
+        builder.add_edge("approve", END)
     if parallel:
         builder.add_node("review", review)
         builder.add_edge("draft", "review")

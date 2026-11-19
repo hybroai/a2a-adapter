@@ -500,7 +500,9 @@ async def _run_with_updater(adapter, observer=None):
     executor = AdapterAgentExecutor(adapter, observer=observer)
     with patch("a2a_adapter.executor.TaskUpdater") as MockUpdater:
         updater = AsyncMock(spec=TaskUpdater)
-        updater.new_agent_message = MagicMock(side_effect=lambda parts: ("msg", parts))
+        updater.new_agent_message = MagicMock(
+            side_effect=lambda parts, metadata=None: ("msg", parts)
+        )
         MockUpdater.return_value = updater
         await executor.execute(make_mock_context(), make_mock_event_queue())
     return updater
@@ -675,3 +677,12 @@ async def test_input_required_dropped_while_a_cancel_is_in_progress(streaming):
     updater.requires_input.assert_not_awaited()
     updater.complete.assert_not_awaited()
     updater.failed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_input_required_metadata_goes_on_the_status_message():
+    updater = await _run_with_updater(
+        _InputRequiredAdapter(InputRequired("Q?", metadata={"interrupt_id": "i1"}))
+    )
+
+    assert updater.new_agent_message.call_args.kwargs["metadata"] == {"interrupt_id": "i1"}

@@ -499,7 +499,9 @@ class AdapterAgentExecutor(AgentExecutor):
         text = self._extract_text_from_parts(parts)
         await self._send_terminal(
             run,
-            updater.requires_input(message=updater.new_agent_message(parts)),
+            updater.requires_input(
+                message=updater.new_agent_message(parts, metadata=request.metadata)
+            ),
             lambda: self._notify("task_input_required", context.task_id, context.context_id, text),
         )
 
