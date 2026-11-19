@@ -15,7 +15,7 @@ Usage (v0.1 — deprecated, still works):
 __version__ = "0.4.4"
 
 # ──── v0.2 Core Exports (eager, no optional deps) ────
-from .base_adapter import AdapterMetadata, BaseA2AAdapter
+from .base_adapter import AdapterMetadata, BaseA2AAdapter, InputRequired
 from .exceptions import CancelledByAdapterError, UserFacingError
 from .server import build_agent_card, serve_agent, to_a2a
 
@@ -86,6 +86,7 @@ __all__ = [
     # v0.2 Core
     "BaseA2AAdapter",
     "AdapterMetadata",
+    "InputRequired",
     "CancelledByAdapterError",
     "UserFacingError",
     # v0.2 Server
