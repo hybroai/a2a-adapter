@@ -112,8 +112,11 @@ CLI adapters built on the subprocess runtime (`_run_subprocess` /
 `_run_subprocess_streaming`) start the CLI in its own session on POSIX, so
 cancel, timeout, `close()` and shutdown kill the CLI's whole process group
 (shells, MCP servers, tool processes), not only the direct child. A helper
-that moves itself into a new session escapes the group; Windows still kills
-only the direct child.
+that moves itself into a new session escapes the group, unless the adapter
+sets `_kill_detached_descendants` (Antigravity does, since `agy` starts each
+tool command in a session of its own): on a kill it then stops the CLI's
+group, finds its descendants with `ps`, and kills those outside the group
+first. Windows still kills only the direct child.
 A cancel that finds no running CLI queues a per-task marker; the executor
 calls `_release_task(task_id)` once the task's `execute()` and `cancel()`
 have both finished, so unconsumed markers do not pile up. Adapters that keep
@@ -197,7 +200,7 @@ first address silently drops packets can time out instead of falling back.
 
 The `a2a-adapter` console script is intentionally thin:
 
-- Supports `pi`, `codex`, `claude`, `openclaw`, and `dsh` (DeepSeek Harness)
+- Supports `pi`, `codex`, `claude`, `antigravity`, `openclaw`, and `dsh` (DeepSeek Harness)
 - Resolves the working directory and A2A server settings
 - Passes native agent arguments after `--` into the selected adapter
 - Rejects protocol/session flags owned by the adapter
@@ -234,6 +237,7 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 | `CrewAIAdapter` | `kickoff_async()` with sync fallback | No |
 | `ClaudeCodeAdapter` | `claude` subprocess + stream-json parsing and resume | Yes |
 | `CodexAdapter` | `codex exec --json` subprocess + thread resume | No |
+| `AntigravityAdapter` | `agy --output-format stream-json --print=<message>` subprocess + `--conversation` resume | Yes |
 | `OpenClawAdapter` | Subprocess exec + JSON parse + cancel (kill) | No |
 | `HermesAdapter` | Gateway pattern: `SessionDB` + `AIAgent.run_conversation()` in a thread pool; requires Hermes on `PYTHONPATH`. A canceled run keeps its conversation's lock until its thread ends, so the next message waits, with no limit, for a tool call that has not returned | Yes (callback → queue) |
 | `OllamaAdapter` | Wraps `OllamaClient` HTTP client (`/api/chat`) | Yes (NDJSON streaming) |
@@ -279,6 +283,7 @@ a2a_adapter/
     ├── ollama.py        # OllamaClient + OllamaAdapter
     ├── claude_code.py   # ClaudeCodeAdapter
     ├── codex.py         # CodexAdapter
+    ├── antigravity.py   # AntigravityAdapter (Antigravity CLI, agy)
     ├── openclaw.py      # OpenClawAdapter + OpenClawAgentAdapter
     ├── hermes.py        # HermesAdapter (Hermes Agent gateway pattern)
     ├── deepseek_harness.py  # DeepSeekHarnessAdapter (DeepSeek Harness SDK runtime)

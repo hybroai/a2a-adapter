@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import tempfile
 import weakref
 from abc import ABC, abstractmethod
@@ -66,6 +67,15 @@ _MIN_TAIL_WAIT = 0.1  # seconds a streaming run gets to exit after its output en
 # passed to ``os.killpg``; anything else (mocks with fake PIDs, processes
 # spawned elsewhere) gets the single-process path.
 _OWN_GROUPS: "weakref.WeakSet[Process]" = weakref.WeakSet()
+# Owned groups whose leader's descendants are killed too when the group is,
+# even those that left it (started in a session of their own). Opt-in per
+# adapter: see BaseA2AAdapter._kill_detached_descendants.
+_SWEEP_DESCENDANTS: "weakref.WeakSet[Process]" = weakref.WeakSet()
+# Seconds to wait for `ps` when listing descendants. It runs on the event
+# loop (and in the Ctrl+C handler) while the CLI's group is stopped; it
+# normally takes a few milliseconds.
+_PS_TIMEOUT = 1.0
+_ps_failure_logged = False
 _atexit_registered = False
 
 
@@ -92,6 +102,7 @@ def _register_own_group(proc: Process) -> None:
 def _forget_own_group(proc: Process) -> None:
     """Stop treating ``proc``'s group as ours (its run is over and reaped)."""
     _OWN_GROUPS.discard(proc)
+    _SWEEP_DESCENDANTS.discard(proc)
 
 
 def _owns_group(proc: Process) -> bool:
@@ -116,28 +127,185 @@ def _forget_own_group_if_empty(proc: Process) -> None:
         pass
 
 
-async def _spawn_cli(factory, *args, **kwargs) -> Process:
+async def _spawn_cli(factory, *args, sweep_descendants: bool = False, **kwargs) -> Process:
     """Spawn a CLI with ``factory`` (a ``create_subprocess_exec``) in its own group.
 
     Callers pass their module's own ``create_subprocess_exec`` so tests that
-    patch that name keep working.
+    patch that name keep working. With ``sweep_descendants``, killing the
+    group also kills the CLI's descendants that left it.
     """
     if os.name == "posix":
         kwargs["start_new_session"] = True
     proc = await factory(*args, **kwargs)
     _register_own_group(proc)
+    if sweep_descendants and _owns_group(proc):
+        _SWEEP_DESCENDANTS.add(proc)
     return proc
 
 
-def _kill_process_tree(proc: Process, sig: int = _SIGKILL) -> None:
+_ProcessTable = dict[int, list[tuple[int, int]]]  # ppid -> [(pid, pgid)]
+
+
+def _log_ps_failure(detail: object) -> None:
+    global _ps_failure_logged
+    if _ps_failure_logged:
+        logger.debug("Could not list processes: %s", detail)
+        return
+    _ps_failure_logged = True
+    logger.warning(
+        "Could not list processes with `ps` (%s); tool processes an agent started in "
+        "sessions of their own will not be killed with it",
+        detail,
+    )
+
+
+def _process_table() -> _ProcessTable:
+    """Every process's ``(pid, pgid)`` by parent PID, via ``ps``.
+
+    Empty when ``ps`` is missing or fails (logged once as a warning): the
+    caller still kills the group.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid=,pgid="],
+            capture_output=True,
+            text=True,
+            timeout=_PS_TIMEOUT,
+            check=False,
+            # Out of the terminal's foreground group: a second Ctrl+C must not kill it.
+            start_new_session=True,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        _log_ps_failure(error)
+        return {}
+    children: _ProcessTable = {}
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 3 or not all(f.isdigit() for f in fields):
+            continue
+        pid, ppid, pgid = (int(f) for f in fields)
+        children.setdefault(ppid, []).append((pid, pgid))
+    if result.returncode != 0 or not children:
+        _log_ps_failure(f"exit status {result.returncode}, {len(children)} processes listed")
+    return children
+
+
+def _descendants(root: int, table: _ProcessTable | None = None) -> list[tuple[int, int]]:
+    """``(pid, pgid)`` of every live descendant of ``root``.
+
+    ``table`` is a snapshot from :func:`_process_table`; one is taken if not given.
+    """
+    children = _process_table() if table is None else table
+    found: list[tuple[int, int]] = []
+    seen = {root}
+    pending = [root]
+    while pending:
+        for child in children.get(pending.pop(), []):
+            if child[0] in seen:
+                continue
+            seen.add(child[0])
+            found.append(child)
+            pending.append(child[0])
+    return found
+
+
+def _sweeps(proc: Process, sig: int) -> bool:
+    return sig == _SIGKILL and proc in _SWEEP_DESCENDANTS and proc.returncode is None
+
+
+def _stop_group(proc: Process) -> None:
+    """SIGSTOP ``proc``'s group so the CLI can't start anything new meanwhile."""
+    if _owns_group(proc):
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGSTOP)
+
+
+def _kill_detached_descendants(proc: Process, sig: int, table: _ProcessTable | None = None) -> None:
+    """Signal ``proc``'s descendants that are outside its process group.
+
+    A descendant leading its own group (a CLI tool started with setsid) has
+    its whole group signalled; any other is signalled alone. Members of the
+    CLI's own group are left to the group kill that follows. Run it while
+    the CLI's group is stopped: the CLI can then neither start new processes
+    nor reap its children, so their PIDs can't be reused before the kill.
+    A detached tool is not stopped, so a PID deeper down could in principle
+    be reaped and reused in the few milliseconds between ``ps`` and the
+    kill; that risk is accepted.
+    """
+    for pid, pgid in _descendants(proc.pid, table):
+        if pgid == proc.pid:
+            continue
+        try:
+            if pgid == pid:
+                os.killpg(pid, sig)
+            else:
+                os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _kill_process_tree(
+    proc: Process, sig: int = _SIGKILL, *, table: _ProcessTable | None = None
+) -> None:
     """Signal ``proc`` and, on POSIX, every process in its group.
 
     The group is signalled even when the leader already exited, because its
     children can outlive it. Call this only on abnormal paths (cancel,
     timeout, error, close, shutdown), never after a clean exit, and forget the
     process once it is reaped: a group ID can be reused once all its members
-    are gone. Uses only calls that are safe inside a signal handler.
+    are gone. Safe to call from a Python signal handler. For a process
+    spawned with ``sweep_descendants``, the first SIGKILL while the leader
+    lives also stops the group and kills its descendants in other groups,
+    which runs ``ps`` unless ``table`` (from :func:`_process_table`, taken
+    after the group was stopped) is given; once the leader has exited they
+    are orphans and can no longer be found.
     """
+    sweep = _sweeps(proc, sig)
+    try:
+        if sweep:
+            _stop_group(proc)
+            if table is None:
+                table = _process_table()
+            # Unless a Ctrl+C during `ps` already swept it (and killed the CLI,
+            # so this snapshot's PIDs could since have been reused).
+            if proc in _SWEEP_DESCENDANTS:
+                _kill_detached_descendants(proc, sig, table)
+    finally:
+        _signal_group(proc, sig)
+        # Only now, so a Ctrl+C that interrupts this sweep sweeps again
+        # rather than killing the group and orphaning its detached tools.
+        if sweep:
+            _SWEEP_DESCENDANTS.discard(proc)  # once per process: later kills skip `ps`
+
+
+def _kill_process_trees(procs: list[Process], sig: int = _SIGKILL) -> None:
+    """:func:`_kill_process_tree` for several processes, with one ``ps`` run.
+
+    Every sweeping group is stopped before the snapshot is taken, and
+    killed even if something interrupts this, so none is left stopped.
+    """
+    sweeping = [proc for proc in procs if _sweeps(proc, sig)]
+    killed: list[Process] = []
+    try:
+        table: _ProcessTable | None = None
+        if sweeping:
+            for proc in sweeping:
+                _stop_group(proc)
+            table = _process_table()
+        for proc in procs:
+            try:
+                _kill_process_tree(proc, sig, table=table)
+            except Exception:  # never let one failure stop the others
+                logger.debug("Could not kill subprocess %s", getattr(proc, "pid", "?"))
+            killed.append(proc)
+    finally:
+        for proc in sweeping:
+            if proc not in killed:
+                with contextlib.suppress(Exception):
+                    _signal_group(proc, sig)
+
+
+def _signal_group(proc: Process, sig: int) -> None:
     if _owns_group(proc):
         try:
             os.killpg(proc.pid, sig)
@@ -182,9 +350,19 @@ def _kill_own_groups_at_exit() -> None:
     Including groups whose leader already exited, as cancel() and close() do:
     their other members may still run.
     """
-    for proc in list(_OWN_GROUPS):
-        with contextlib.suppress(OSError):
-            os.killpg(proc.pid, _SIGKILL)
+    procs = list(_OWN_GROUPS)
+    sweeping = [proc for proc in procs if _sweeps(proc, _SIGKILL)]
+    try:
+        for proc in sweeping:
+            _stop_group(proc)
+        table = _process_table() if sweeping else None
+        for proc in sweeping:
+            with contextlib.suppress(Exception):
+                _kill_detached_descendants(proc, _SIGKILL, table)
+    finally:  # even if a second Ctrl+C interrupts `ps`: leave no group stopped
+        for proc in procs:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, _SIGKILL)
 
 
 def default_state_dir(agent: str, working_dir: str) -> str:
@@ -322,6 +500,11 @@ class BaseA2AAdapter(ABC):
 
     # Saved CLI sessions kept per adapter; the oldest are evicted first.
     _MAX_SESSIONS = 10_000
+
+    # Also kill the CLI's descendants that left its process group (tools it
+    # starts in a session of their own) on cancel, timeout, close and
+    # shutdown. Lists processes with `ps` on each such kill. POSIX only.
+    _kill_detached_descendants = False
 
     def __init__(
         self,
@@ -515,20 +698,19 @@ class BaseA2AAdapter(ABC):
         """
         if not getattr(self, "_cli_runtime_enabled", False):
             return
-        for proc in list(self._active_processes.values()):
-            try:
-                _kill_process_tree(proc)
-            except Exception:  # never let one failure stop the others
-                logger.debug("Could not kill subprocess %s", getattr(proc, "pid", "?"))
+        _kill_process_trees(list(self._active_processes.values()))
 
     async def close(self) -> None:
         """Kill all active subprocess trees. No-op if super().__init__() wasn't called."""
         if not getattr(self, "_cli_runtime_enabled", False):
             return
 
-        for task_id, proc in list(self._active_processes.items()):
-            logger.debug("Killing subprocess tree %s during close", task_id)
-            _kill_process_tree(proc)
+        active = list(self._active_processes.items())
+        logger.debug(
+            "Killing subprocess trees during close: %s", [task_id for task_id, _ in active]
+        )
+        _kill_process_trees([proc for _, proc in active])
+        for _, proc in active:
             try:
                 await _wait_reaped(proc)
             except Exception:
@@ -561,6 +743,7 @@ class BaseA2AAdapter(ABC):
         try:
             proc = await _spawn_cli(
                 create_subprocess_exec,
+                sweep_descendants=self._kill_detached_descendants,
                 *cmd_result.args,
                 stdin=PIPE if stdin_bytes is not None else DEVNULL,
                 stdout=PIPE,
@@ -688,6 +871,7 @@ class BaseA2AAdapter(ABC):
         try:
             proc = await _spawn_cli(
                 create_subprocess_exec,
+                sweep_descendants=self._kill_detached_descendants,
                 *cmd_result.args,
                 stdin=PIPE if cmd_result.stdin is not None else DEVNULL,
                 stdout=PIPE,

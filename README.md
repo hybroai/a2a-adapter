@@ -12,7 +12,7 @@ frameworks behind the [A2A (Agent-to-Agent) Protocol](https://github.com/a2aproj
 It handles AgentCard generation, JSON-RPC, task lifecycle, and streaming through
 the official A2A SDK, so your adapter only needs to invoke the underlying agent.
 
-Works with Claude Code, Codex, Pi, OpenClaw, n8n, LangGraph, LangChain,
+Works with Claude Code, Codex, Antigravity CLI, Pi, OpenClaw, n8n, LangGraph, LangChain,
 CrewAI, Ollama, Hermes Agent, and custom Python functions.
 
 ## Two Ways to Use It
@@ -81,6 +81,7 @@ client can make the server send requests.
 |---|---|---:|---|
 | Claude Code | `ClaudeCodeAdapter` | Yes | [claude_code_agent.py](examples/claude_code_agent.py) |
 | Codex | `CodexAdapter` | No | [codex_agent.py](examples/codex_agent.py) |
+| Antigravity CLI (`agy`) | `AntigravityAdapter` | Yes | [antigravity_agent.py](examples/antigravity_agent.py) |
 | Pi | `PiAdapter` | Yes | [pi_agent.py](examples/pi_agent.py) |
 | OpenClaw | `OpenClawAdapter` | No | [openclaw_agent.py](examples/openclaw_agent.py) |
 | n8n | `N8nAdapter` | No | [n8n_agent.py](examples/n8n_agent.py) |
@@ -100,8 +101,8 @@ kickoff may still overlap the next request there).
 
 ## 2. Use It as a CLI
 
-Start a classic local agent (Claude Code, Codex, Pi, OpenClaw, or DeepSeek
-Harness) as an A2A server with one command.
+Start a classic local agent (Claude Code, Codex, Antigravity CLI, Pi, OpenClaw,
+or DeepSeek Harness) as an A2A server with one command.
 
 **Install the CLI** as an isolated tool, so the `a2a-adapter` command lands on
 your `PATH`:
@@ -125,6 +126,7 @@ already have; it doesn't install it. For example, install Claude Code and run
 a2a-adapter claude --port 9010
 a2a-adapter pi --port 9012
 a2a-adapter codex --port 9011
+a2a-adapter antigravity --port 9014
 a2a-adapter openclaw --port 9008
 a2a-adapter dsh --port 9013
 ```
@@ -136,13 +138,28 @@ to the underlying agent CLI:
 a2a-adapter claude --port 9010 -- --model <model>
 a2a-adapter pi --port 9012 -- --model <model> --thinking high
 a2a-adapter codex --port 9011 -- --model <model> --sandbox workspace-write
+a2a-adapter antigravity --port 9014 -- --model <model> --mode accept-edits
 a2a-adapter openclaw --port 9008 --agent-id main --thinking high
 ```
 
 The adapters send each prompt to Codex and OpenClaw on stdin, so long prompts
 are not limited by the OS command-line length; OpenClaw itself rejects prompts over
 4 MiB. This needs an OpenClaw release that supports
-`openclaw agent --message-file`.
+`openclaw agent --message-file`. The Antigravity CLI takes its headless prompt
+only as an argument (`agy --print=<prompt>`), so prompts over about 128 KiB
+(131,063 bytes) are rejected.
+
+The Antigravity CLI uses the credentials cached by an interactive `agy` login
+(run `agy` once to sign in), or its Gemini API key / ADC setup. Headless runs
+never stop to ask: agy's default headless mode (`auto`) runs shell commands and
+edits files in `--cwd` without asking, an action its permission policy does not
+allow is skipped while the run still succeeds, and the agent's questions to the
+user are skipped. Restrict tools in `~/.gemini/antigravity-cli/settings.json`,
+or pin a mode after `--` (for example `-- --mode plan`). In trusted sandboxes
+only, `--dangerously-skip-permissions` (or `A2A_ANTIGRAVITY_SKIP_PERMISSIONS=1`)
+approves everything. If a stored Antigravity conversation no longer exists, agy
+starts a new one without the earlier history; the adapter logs a warning and
+uses the new one from then on.
 
 Each A2A context gets its own OpenClaw session: `<session_id>-<context_id>` when
 the context id is valid as it is and the result fits in 64 characters, otherwise
@@ -163,7 +180,7 @@ history stays on disk, unused, because it may mix several conversations.
 | `--description` | `<Agent> agent working in <folder>` | Agent Card description |
 | `--skill` | one skill from the card name and description | Agent Card skill as JSON (`id`, `name`, `description`, at least one entry in `tags`, optional `examples`); repeatable |
 | `--timeout` | `600` | Total time per request, in seconds |
-| `--executable` | `claude`, `codex`, `pi`, `openclaw`; for `dsh`, the runtime bundled with the SDK | Path to the agent executable |
+| `--executable` | `claude`, `codex`, `agy`, `pi`, `openclaw`; for `dsh`, the runtime bundled with the SDK | Path to the agent executable |
 
 On POSIX, cancel, timeout and shutdown stop the agent and everything it
 started (shells, MCP servers, tool processes). Ctrl+C or closing the terminal stops running agents
@@ -205,13 +222,14 @@ a2a-adapter dsh --port 9013 --model <model>
 
 Run `a2a-adapter -help` for the supported agents, or
 `a2a-adapter <agent> -help` for agent-specific usage.
-The adapter owns protocol and session flags such as Pi's `--mode rpc` and
-Codex's `--json`; those flags cannot be overridden after `--`.
+The adapter owns protocol and session flags such as Pi's `--mode rpc`,
+Codex's `--json`, and Antigravity's `-p`/`--print`, `--output-format` and
+`--conversation`; those flags cannot be overridden after `--`.
 
-Claude Code, Codex and Pi keep their session state per user, outside the
+Claude Code, Codex, Antigravity and Pi keep their session state per user, outside the
 project: under `$XDG_STATE_HOME/a2a-adapter/<agent>/<hash of --cwd>/`, or
 `~/.local/state/a2a-adapter/...` when `XDG_STATE_HOME` is unset. Each working
-directory gets its own store. With Claude Code and Codex, each A2A
+directory gets its own store. With Claude Code, Codex and Antigravity, each A2A
 conversation (`contextId`) resumes the same agent session after the server
 restarts; requests without a `contextId` all share one saved session. Pi keeps
 its single session (`--session-id`) for the working directory.
@@ -237,8 +255,9 @@ the same way you would without the adapter, in two ways:
 - **The agent's own config files.** The adapter runs the agent as you, in the
   `--cwd` folder, so it reads your usual setup: `~/.claude/settings.json`,
   `CLAUDE.md`, and MCP servers for Claude Code; `~/.codex/config.toml` and
-  `AGENTS.md` for Codex; Pi's settings and installed extensions. Claude Code,
-  Codex, and OpenClaw start a fresh process for each request, so changes apply
+  `AGENTS.md` for Codex; `~/.gemini/antigravity-cli/settings.json` for the
+  Antigravity CLI; Pi's settings and installed extensions. Claude Code,
+  Codex, Antigravity, and OpenClaw start a fresh process for each request, so changes apply
   to the next request. Pi keeps one process running, so restart the server
   after changing Pi's config.
 - **Native CLI flags after `--`.** Use these for settings that should apply

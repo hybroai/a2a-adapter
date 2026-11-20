@@ -11,6 +11,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from .integrations.antigravity import AntigravityAdapter
 from .integrations.claude_code import ClaudeCodeAdapter
 from .integrations.codex import CodexAdapter
 from .integrations.deepseek_harness import _INSTALL_HINT as _DSH_INSTALL_HINT
@@ -53,6 +54,17 @@ _CLAUDE_CODE_MANAGED_OPTIONS = {
     "--session-id",
     "--disallowedTools",
 }
+_ANTIGRAVITY_MANAGED_OPTIONS = {
+    "--print",
+    "--prompt",
+    "-p",
+    "--output-format",
+    "--input-format",
+    "--conversation",
+    "--continue",
+    "-c",
+    "--disable-slash-commands",
+}
 _OPENCLAW_MANAGED_OPTIONS = {
     "--local",
     "--message",
@@ -67,17 +79,20 @@ _MANAGED_OPTIONS = {
     "pi": _PI_MANAGED_OPTIONS,
     "codex": _CODEX_MANAGED_OPTIONS,
     "claude": _CLAUDE_CODE_MANAGED_OPTIONS,
+    "antigravity": _ANTIGRAVITY_MANAGED_OPTIONS,
     "openclaw": _OPENCLAW_MANAGED_OPTIONS,
     # dsh runs through its SDK, which takes no native argv; see _validate_agent_args.
     "dsh": set(),
 }
-# Agents whose parsers (commander, clap) accept glued short options, so
-# "-pfoo" or "-print" reaches them as "-p". Pi matches each flag exactly.
-_GLUED_SHORT_OPTION_AGENTS = {"codex", "claude", "openclaw"}
+# Agents whose parsers (commander, clap, Go pflag) accept glued short options,
+# so "-pfoo" or "-print" reaches them as "-p". Pi matches each flag exactly.
+# Only clusters that start with a managed flag are caught; "-xp" is not.
+_GLUED_SHORT_OPTION_AGENTS = {"codex", "claude", "antigravity", "openclaw"}
 _AGENT_DISPLAY_NAMES = {
     "pi": "Pi",
     "codex": "Codex",
     "claude": "Claude Code",
+    "antigravity": "Antigravity",
     "openclaw": "OpenClaw",
     "dsh": "DeepSeek Harness",
 }
@@ -236,6 +251,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     claude_parser = subparsers.add_parser("claude", help="Serve Claude over A2A", add_help=False)
     _add_server_options(claude_parser)
+
+    antigravity_parser = subparsers.add_parser(
+        "antigravity", help="Serve the Antigravity CLI (agy) over A2A", add_help=False
+    )
+    _add_server_options(antigravity_parser)
 
     openclaw_parser = subparsers.add_parser(
         "openclaw", help="Serve OpenClaw over A2A", add_help=False
@@ -418,6 +438,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         adapter = ClaudeCodeAdapter(
             working_dir=working_dir,
             claude_path=args.executable or "claude",
+            cli_args=agent_args,
+            timeout=args.timeout,
+            name=name,
+            description=description,
+            skills=skills,
+        )
+    elif args.agent == "antigravity":
+        command = shlex.join([args.executable or "agy", *agent_args])
+        adapter = AntigravityAdapter(
+            working_dir=working_dir,
+            agy_path=args.executable or "agy",
             cli_args=agent_args,
             timeout=args.timeout,
             name=name,
