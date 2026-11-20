@@ -304,6 +304,33 @@ class TestStream:
                 chunks.append(chunk)
         assert chunks == ["ok"]
 
+    @pytest.mark.asyncio
+    async def test_stream_yields_final_response_when_nothing_streamed(self, adapter):
+        """Hermes may never call stream_callback (e.g. a non-streaming
+        provider); the final response must still reach the client."""
+        mock_agent = _make_mock_agent(response="Only the final text")
+        with patch.object(adapter, "_make_agent", return_value=mock_agent):
+            chunks = [c async for c in adapter.stream("Hi", context_id="c1")]
+        assert chunks == ["Only the final text"]
+
+    @pytest.mark.asyncio
+    async def test_stream_does_not_repeat_final_response_after_chunks(self, adapter):
+        mock_agent = _make_mock_agent(response="Hello world", chunks=["Hello", " world"])
+        with patch.object(adapter, "_make_agent", return_value=mock_agent):
+            chunks = [c async for c in adapter.stream("Hi", context_id="c1")]
+        assert chunks == ["Hello", " world"]
+
+    @pytest.mark.asyncio
+    async def test_stream_raises_when_run_failed_without_output(self, adapter):
+        mock_agent = MagicMock()
+        mock_agent.run_conversation = MagicMock(
+            return_value={"final_response": "", "failed": True, "error": "quota"}
+        )
+        with patch.object(adapter, "_make_agent", return_value=mock_agent):
+            with pytest.raises(RuntimeError, match="quota"):
+                async for _ in adapter.stream("Hi", context_id="c1"):
+                    pass
+
 
 # ══════════════════════════════════════════════════════════════
 # cancel

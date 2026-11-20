@@ -397,18 +397,23 @@ class HermesAdapter(BaseA2AAdapter):
 
             future.add_done_callback(wake_if_dropped)
 
+            streamed = False
             while True:
                 chunk = await queue.get()
                 if chunk is _SENTINEL:
                     break
                 if not chunk:
                     continue
+                streamed = True
                 yield chunk
 
             await asyncio.wait({future})
             result = turn.result(future)
             if result:
-                self._check_hermes_result(result, session_id)
+                text = self._check_hermes_result(result, session_id)
+                # Hermes may answer without calling stream_callback.
+                if not streamed and text:
+                    yield text
         except BaseException:
             turn.abandon()
             raise
