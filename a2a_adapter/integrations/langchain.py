@@ -45,6 +45,11 @@ from ._framework import apply_input_mapper, content_to_text, iter_with_timeout, 
 
 logger = logging.getLogger(__name__)
 
+# Dict keys tried, in order, for the text of a runnable's output.
+_OUTPUT_KEYS = ("output", "result", "answer", "response", "text")
+# Streamed chunks use the same keys, plus "content" for message-like dicts.
+_CHUNK_KEYS = ("output", "result", "answer", "response", "content", "text")
+
 
 # ═══════════════════════════════════════════════════════════════
 # v0.2 Adapter (new, recommended)
@@ -198,7 +203,7 @@ class LangChainAdapter(BaseA2AAdapter):
         if isinstance(output, dict):
             if self.output_key and self.output_key in output:
                 return self._extract_value_text(output[self.output_key])
-            for key in ("output", "result", "answer", "response", "text"):
+            for key in _OUTPUT_KEYS:
                 if key in output:
                     return self._extract_value_text(output[key])
             return json.dumps(output, indent=2, default=str)
@@ -215,7 +220,7 @@ class LangChainAdapter(BaseA2AAdapter):
         if isinstance(chunk, dict):
             if self.output_key and self.output_key in chunk:
                 return self._extract_value_text(chunk[self.output_key], sep="")
-            for key in ("output", "result", "content", "text"):
+            for key in _CHUNK_KEYS:
                 if key in chunk:
                     return self._extract_value_text(chunk[key], sep="")
             return ""
