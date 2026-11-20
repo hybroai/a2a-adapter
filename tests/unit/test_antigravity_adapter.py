@@ -805,6 +805,11 @@ class TestSessionsAndMetadata:
         expected = os.path.join(default_state_dir("antigravity", str(tmp_path)), "sessions.json")
         assert a._session_store_path == expected
 
+    def test_kills_tool_processes_that_left_its_group(self, adapter):
+        # agy starts each terminal-tool command in a session of its own, so a
+        # group kill alone leaves it running after cancel or timeout.
+        assert adapter._kill_detached_descendants is True
+
     def test_metadata_defaults(self, adapter):
         meta = adapter.get_metadata()
         assert meta.name == "Antigravity"

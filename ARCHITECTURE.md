@@ -112,8 +112,11 @@ CLI adapters built on the subprocess runtime (`_run_subprocess` /
 `_run_subprocess_streaming`) start the CLI in its own session on POSIX, so
 cancel, timeout, `close()` and shutdown kill the CLI's whole process group
 (shells, MCP servers, tool processes), not only the direct child. A helper
-that moves itself into a new session escapes the group; Windows still kills
-only the direct child.
+that moves itself into a new session escapes the group, unless the adapter
+sets `_kill_detached_descendants` (Antigravity does, since `agy` starts each
+tool command in a session of its own): on a kill it then stops the CLI's
+group, finds its descendants with `ps`, and kills those outside the group
+first. Windows still kills only the direct child.
 A cancel that finds no running CLI queues a per-task marker; the executor
 calls `_release_task(task_id)` once the task's `execute()` and `cancel()`
 have both finished, so unconsumed markers do not pile up. Adapters that keep

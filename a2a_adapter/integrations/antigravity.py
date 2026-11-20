@@ -85,6 +85,10 @@ class AntigravityAdapter(BaseA2AAdapter):
         serve_agent(adapter, port=9014)
     """
 
+    # agy starts each terminal-tool command in a session of its own: without
+    # this, cancel, timeout and shutdown kill agy but leave those running.
+    _kill_detached_descendants = True
+
     def __init__(
         self,
         working_dir: str,

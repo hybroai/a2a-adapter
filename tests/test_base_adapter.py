@@ -6,7 +6,9 @@ import gc
 import json
 import logging
 import os
+import subprocess
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from a2a.types import Part
@@ -1243,6 +1245,359 @@ class TestStaleSessionHook:
 
 async def _collect(stream):
     return [chunk async for chunk in stream]
+
+
+@posix_only
+class TestDetachedDescendantKill:
+    """Opt-in: also kill descendants that left the CLI's process group."""
+
+    @staticmethod
+    async def _started(tmp_path):
+        from tests.process_helpers import wait_for_pids
+
+        return (await wait_for_pids(tmp_path))[1]
+
+    async def test_control_group_kill_alone_misses_a_detached_grandchild(self, tmp_path):
+        from tests.process_helpers import (
+            DetachedCliAdapter,
+            cancel_and_wait,
+            is_alive,
+            kill_pids,
+            wait_dead,
+        )
+
+        adapter = DetachedCliAdapter(tmp_path, sweep=False)
+        context = SimpleNamespace(task_id="t")
+        task = asyncio.create_task(adapter.invoke("hi", context=context))
+        try:
+            grandchild = await self._started(tmp_path)
+            await adapter.cancel(context=context)
+            await cancel_and_wait(task)
+            assert not await wait_dead(grandchild, timeout=1)
+            assert is_alive(grandchild), "test setup: the group kill should not reach it"
+        finally:
+            kill_pids(tmp_path)
+
+    async def test_cancel_kills_detached_grandchild(self, tmp_path):
+        from a2a_adapter.exceptions import CancelledByAdapterError
+        from tests.process_helpers import DetachedCliAdapter, cancel_and_wait, kill_pids, wait_dead
+
+        adapter = DetachedCliAdapter(tmp_path, sweep=True)
+        context = SimpleNamespace(task_id="t")
+        task = asyncio.create_task(adapter.invoke("hi", context=context))
+        try:
+            grandchild = await self._started(tmp_path)
+            await adapter.cancel(context=context)
+            with pytest.raises(CancelledByAdapterError):
+                await asyncio.wait_for(task, 5)
+            assert await wait_dead(grandchild), "detached grandchild survived cancel()"
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+    async def test_task_cancellation_kills_detached_grandchild(self, tmp_path):
+        from tests.process_helpers import DetachedCliAdapter, cancel_and_wait, kill_pids, wait_dead
+
+        adapter = DetachedCliAdapter(tmp_path, sweep=True)
+        task = asyncio.create_task(adapter.invoke("hi", context=SimpleNamespace(task_id="t")))
+        try:
+            grandchild = await self._started(tmp_path)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+            assert await wait_dead(grandchild), "detached grandchild survived task cancellation"
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+    async def test_timeout_kills_detached_grandchild(self, tmp_path):
+        from tests.process_helpers import DetachedCliAdapter, cancel_and_wait, kill_pids, wait_dead
+
+        adapter = DetachedCliAdapter(tmp_path, sweep=True, timeout=1.5)
+        task = asyncio.create_task(adapter.invoke("hi", context=SimpleNamespace(task_id="t")))
+        try:
+            grandchild = await self._started(tmp_path)
+            with pytest.raises(AgentTimeoutError):
+                await asyncio.wait_for(task, 5)
+            assert await wait_dead(grandchild), "detached grandchild survived the timeout"
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+    async def test_close_kills_detached_grandchild(self, tmp_path):
+        from tests.process_helpers import DetachedCliAdapter, cancel_and_wait, kill_pids, wait_dead
+
+        adapter = DetachedCliAdapter(tmp_path, sweep=True)
+        task = asyncio.create_task(adapter.invoke("hi", context=SimpleNamespace(task_id="t")))
+        try:
+            grandchild = await self._started(tmp_path)
+            await asyncio.wait_for(adapter.close(), 5)
+            assert await wait_dead(grandchild), "detached grandchild survived close()"
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+    async def test_kill_children_now_kills_detached_grandchild(self, tmp_path):
+        from tests.process_helpers import DetachedCliAdapter, cancel_and_wait, kill_pids, wait_dead
+
+        adapter = DetachedCliAdapter(tmp_path, sweep=True)
+        task = asyncio.create_task(adapter.invoke("hi", context=SimpleNamespace(task_id="t")))
+        try:
+            grandchild = await self._started(tmp_path)
+            adapter.kill_children_now()  # the Ctrl+C hook: synchronous
+            assert await wait_dead(grandchild), "detached grandchild survived Ctrl+C"
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+    async def test_closing_a_stream_kills_detached_grandchild(self, tmp_path):
+        from tests.process_helpers import DetachedCliAdapter, kill_pids, wait_dead
+
+        adapter = DetachedCliAdapter(tmp_path, sweep=True, streaming=True)
+        stream = adapter.stream("hi", context=SimpleNamespace(task_id="t"))
+        try:
+            assert await asyncio.wait_for(anext(stream), 5) == "started"
+            grandchild = await self._started(tmp_path)
+            await asyncio.wait_for(stream.aclose(), 5)
+            assert await wait_dead(grandchild), "detached grandchild survived closing the stream"
+        finally:
+            kill_pids(tmp_path)
+
+    async def test_unrelated_sessions_are_left_alone(self, tmp_path):
+        # A process in its own session that the CLI did not start must survive.
+        import subprocess
+
+        from tests.process_helpers import DetachedCliAdapter, cancel_and_wait, kill_pids, is_alive
+
+        bystander = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        adapter = DetachedCliAdapter(tmp_path, sweep=True)
+        context = SimpleNamespace(task_id="t")
+        task = asyncio.create_task(adapter.invoke("hi", context=context))
+        try:
+            await self._started(tmp_path)
+            await adapter.cancel(context=context)
+            await cancel_and_wait(task)
+            assert is_alive(bystander.pid)
+        finally:
+            bystander.kill()
+            bystander.wait()
+            kill_pids(tmp_path)
+
+    async def test_kills_a_detached_member_of_a_leaderless_group(self, tmp_path):
+        # Neither in the CLI's group nor leading one: only a kill by PID reaches it.
+        from tests.process_helpers import DetachedCliAdapter, cancel_and_wait, kill_all_pids
+        from tests.process_helpers import wait_dead
+
+        adapter = DetachedCliAdapter(tmp_path, sweep=True, mode="member")
+        context = SimpleNamespace(task_id="t")
+        task = asyncio.create_task(adapter.invoke("hi", context=context))
+        try:
+            member = await self._started(tmp_path)
+            assert os.getpgid(member) != member, "test setup: it must not lead its group"
+            await adapter.cancel(context=context)
+            await cancel_and_wait(task)
+            assert await wait_dead(member), "a detached group member survived cancel()"
+        finally:
+            kill_all_pids(tmp_path)
+
+    async def test_a_cli_that_keeps_starting_tools_leaves_none_behind(self, tmp_path):
+        # The group is stopped before `ps` runs, so nothing starts in between.
+        from tests.process_helpers import (
+            DetachedCliAdapter,
+            all_loop_pids,
+            cancel_and_wait,
+            is_alive,
+            kill_all_pids,
+            wait_dead,
+        )
+
+        adapter = DetachedCliAdapter(tmp_path, sweep=True, mode="loop")
+        context = SimpleNamespace(task_id="t")
+        task = asyncio.create_task(adapter.invoke("hi", context=context))
+        try:
+            await self._started(tmp_path)
+            await asyncio.sleep(0.2)
+            await adapter.cancel(context=context)
+            await cancel_and_wait(task)
+            await asyncio.sleep(0.2)  # a tool that escaped has time to write its PID
+            pids = all_loop_pids(tmp_path)
+            assert len(pids) > 5, "test setup: the CLI should have started many tools"
+            for pid in pids:
+                await wait_dead(pid, timeout=1)
+            assert [pid for pid in pids if is_alive(pid)] == []
+        finally:
+            kill_all_pids(tmp_path)
+
+    async def test_atexit_kills_detached_grandchild(self, tmp_path):
+        from a2a_adapter import base_adapter
+        from tests.process_helpers import DetachedCliAdapter, cancel_and_wait, kill_pids, wait_dead
+
+        adapter = DetachedCliAdapter(tmp_path, sweep=True)
+        task = asyncio.create_task(adapter.invoke("hi", context=SimpleNamespace(task_id="t")))
+        try:
+            grandchild = await self._started(tmp_path)
+            base_adapter._kill_own_groups_at_exit()
+            assert await wait_dead(grandchild), "detached grandchild survived the exit hook"
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+    async def test_one_process_listing_for_several_runs_and_repeat_kills(self, tmp_path):
+        from a2a_adapter import base_adapter
+        from tests.process_helpers import DetachedCliAdapter, cancel_and_wait, kill_pids
+        from tests.process_helpers import wait_dead, wait_for_pids
+
+        dirs = [tmp_path / "a", tmp_path / "b"]
+        for d in dirs:
+            d.mkdir()
+        # Each run writes its PIDs into its own folder; one adapter tracks both.
+        adapter, other = (DetachedCliAdapter(d, sweep=True) for d in dirs)
+        tasks = [
+            asyncio.create_task(a.invoke("hi", context=SimpleNamespace(task_id=t)))
+            for a, t in ((adapter, "t1"), (other, "t2"))
+        ]
+        calls = 0
+        real_table = base_adapter._process_table
+
+        def counting_table():
+            nonlocal calls
+            calls += 1
+            return real_table()
+
+        try:
+            first = (await wait_for_pids(dirs[0]))[1]
+            second = (await wait_for_pids(dirs[1]))[1]
+            adapter._active_processes.update(other._active_processes)
+            with patch.object(base_adapter, "_process_table", counting_table):
+                adapter.kill_children_now()
+                adapter.kill_children_now()  # a repeat kill runs no second `ps`
+            assert calls == 1
+            assert await wait_dead(first), "first run's detached grandchild survived"
+            assert await wait_dead(second), "second run's detached grandchild survived"
+        finally:
+            for d in dirs:
+                kill_pids(d)
+            for task in tasks:
+                await cancel_and_wait(task)
+
+    async def test_a_sweep_done_by_a_nested_ctrl_c_is_not_redone(self, tmp_path):
+        # Ctrl+C lands while cancel()'s `ps` runs: the handler sweeps and kills the
+        # CLI; the outer call must not then signal PIDs from its older snapshot.
+        from a2a_adapter import base_adapter
+        from tests.process_helpers import DetachedCliAdapter, cancel_and_wait, kill_pids
+        from tests.process_helpers import wait_dead, wait_for_pids
+
+        adapter = DetachedCliAdapter(tmp_path, sweep=True)
+        task = asyncio.create_task(adapter.invoke("hi", context=SimpleNamespace(task_id="t")))
+        real_table = base_adapter._process_table
+        nested = []
+
+        def table_then_ctrl_c():
+            table = real_table()
+            if not nested:
+                nested.append(True)
+                adapter.kill_children_now()
+            return table
+
+        try:
+            grandchild = (await wait_for_pids(tmp_path))[1]
+            proc = adapter._active_processes["t"]
+            with (
+                patch.object(base_adapter, "_process_table", table_then_ctrl_c),
+                patch.object(
+                    base_adapter,
+                    "_kill_detached_descendants",
+                    wraps=base_adapter._kill_detached_descendants,
+                ) as sweep,
+            ):
+                base_adapter._kill_process_tree(proc)
+            assert sweep.call_count == 1, "the outer call swept again after the nested one"
+            assert await wait_dead(grandchild)
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+    @pytest.mark.parametrize("path", ["kill_children_now", "atexit"])
+    async def test_interrupted_listing_still_kills_the_stopped_group(self, tmp_path, path):
+        # A second Ctrl+C during `ps` must not leave the CLI's group stopped.
+        from a2a_adapter import base_adapter
+        from tests.process_helpers import DetachedCliAdapter, cancel_and_wait, kill_pids
+        from tests.process_helpers import wait_dead, wait_for_pids
+
+        adapter = DetachedCliAdapter(tmp_path, sweep=True)
+        task = asyncio.create_task(adapter.invoke("hi", context=SimpleNamespace(task_id="t")))
+
+        def interrupted():
+            raise KeyboardInterrupt
+
+        try:
+            cli = (await wait_for_pids(tmp_path))[0]
+            with patch.object(base_adapter, "_process_table", interrupted):
+                with pytest.raises(KeyboardInterrupt):
+                    if path == "atexit":
+                        base_adapter._kill_own_groups_at_exit()
+                    else:
+                        adapter.kill_children_now()
+            assert await wait_dead(cli), "the CLI was left stopped, not killed"
+        finally:
+            kill_pids(tmp_path)
+            await cancel_and_wait(task)
+
+
+class TestProcessListingFailure:
+    @pytest.fixture(autouse=True)
+    def _fresh_warning(self, monkeypatch):
+        from a2a_adapter import base_adapter
+
+        monkeypatch.setattr(base_adapter, "_ps_failure_logged", False)
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            FileNotFoundError("ps"),
+            subprocess.TimeoutExpired("ps", 2),
+            subprocess.CompletedProcess(["ps"], 1, stdout="", stderr="ps: unrecognized option"),
+            subprocess.CompletedProcess(["ps"], 0, stdout="", stderr=""),
+        ],
+        ids=["missing", "timeout", "rejected-options", "empty"],
+    )
+    def test_warns_once_and_finds_nothing(self, outcome, caplog):
+        from a2a_adapter import base_adapter
+
+        def fake_run(*args, **kwargs):
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        with patch.object(base_adapter.subprocess, "run", fake_run):
+            with caplog.at_level(logging.DEBUG, logger=base_adapter.logger.name):
+                assert base_adapter._descendants(1) == []
+                assert base_adapter._descendants(1) == []
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "will not be killed" in warnings[0].getMessage()
+
+    def test_ps_runs_outside_the_terminal_foreground_group(self):
+        from a2a_adapter import base_adapter
+
+        result = subprocess.CompletedProcess(["ps"], 0, stdout="1 0 1\n", stderr="")
+        with patch.object(base_adapter.subprocess, "run", return_value=result) as run:
+            base_adapter._process_table()
+        assert run.call_args.kwargs["start_new_session"] is True
+
+    def test_parses_padded_columns_and_skips_junk(self):
+        from a2a_adapter import base_adapter
+
+        listing = "  10     1    10\n  11    10    11\nbogus line\n  12    11    11\n 13 12\n"
+        result = subprocess.CompletedProcess(["ps"], 0, stdout=listing, stderr="")
+        with patch.object(base_adapter.subprocess, "run", return_value=result):
+            assert sorted(base_adapter._descendants(10)) == [(11, 11), (12, 11)]
+
+    def test_a_cycle_in_the_listing_ends(self):
+        from a2a_adapter import base_adapter
+
+        table = {1: [(2, 2)], 2: [(1, 1)]}
+        assert base_adapter._descendants(1, table) == [(2, 2)]
 
 
 @posix_only
