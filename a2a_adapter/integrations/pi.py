@@ -614,8 +614,10 @@ class PiAdapter(BaseA2AAdapter):
             rpc = await self._ensure_started()
             self._active_task_id = task_id
             lost = False
+            produced = False
             try:
                 async for chunk in rpc.prompt(user_input):
+                    produced = True
                     yield chunk
             except PiTurnAbortedError as error:
                 if task_id in self._cancelled_tasks:
@@ -639,6 +641,10 @@ class PiAdapter(BaseA2AAdapter):
                     finally:
                         if self._rpc is rpc:
                             self._rpc = None
+            if not produced:
+                # A turn can settle with no text and no error event; an empty
+                # answer must not be reported as success.
+                raise PiRpcError("Pi returned no output")
 
     async def cancel(self, context_id: str | None = None, **kwargs: Any) -> None:
         context = kwargs.get("context")

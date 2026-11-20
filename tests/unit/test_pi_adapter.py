@@ -320,3 +320,32 @@ async def test_stream_cancelled_while_closing_a_dead_rpc_still_closes_it(tmp_pat
         await task
     await asyncio.wait_for(closed.wait(), 5)
     assert lost.close_finished
+
+
+class TestEmptyTurn:
+    @pytest.mark.asyncio
+    async def test_invoke_raises_when_pi_produced_no_text(self, adapter, fake_rpc):
+        from a2a_adapter.integrations.pi import PiRpcError
+
+        fake_rpc.chunks = []
+        with pytest.raises(PiRpcError, match="Pi returned no output"):
+            await adapter.invoke("hi", context_id="ctx")
+
+    @pytest.mark.asyncio
+    async def test_stream_raises_when_pi_produced_no_text(self, adapter, fake_rpc):
+        from a2a_adapter.integrations.pi import PiRpcError
+
+        fake_rpc.chunks = []
+        with pytest.raises(PiRpcError, match="Pi returned no output"):
+            async for _ in adapter.stream("hi", context_id="ctx"):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_empty_turn_frees_the_adapter_for_the_next_turn(self, adapter, fake_rpc):
+        from a2a_adapter.integrations.pi import PiRpcError
+
+        fake_rpc.chunks = []
+        with pytest.raises(PiRpcError):
+            await adapter.invoke("hi", context_id="ctx")
+        fake_rpc.chunks = ["again"]
+        assert await adapter.invoke("hi", context_id="ctx") == "again"
