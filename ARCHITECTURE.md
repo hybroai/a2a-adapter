@@ -197,7 +197,7 @@ first address silently drops packets can time out instead of falling back.
 
 The `a2a-adapter` console script is intentionally thin:
 
-- Supports `pi`, `codex`, `claude`, `openclaw`, and `dsh` (DeepSeek Harness)
+- Supports `pi`, `codex`, `claude`, `antigravity`, `openclaw`, and `dsh` (DeepSeek Harness)
 - Resolves the working directory and A2A server settings
 - Passes native agent arguments after `--` into the selected adapter
 - Rejects protocol/session flags owned by the adapter
@@ -234,6 +234,7 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 | `CrewAIAdapter` | `kickoff_async()` with sync fallback | No |
 | `ClaudeCodeAdapter` | `claude` subprocess + stream-json parsing and resume | Yes |
 | `CodexAdapter` | `codex exec --json` subprocess + thread resume | No |
+| `AntigravityAdapter` | `agy -p --output-format stream-json` subprocess + `--conversation` resume | Yes |
 | `OpenClawAdapter` | Subprocess exec + JSON parse + cancel (kill) | No |
 | `HermesAdapter` | Gateway pattern: `SessionDB` + `AIAgent.run_conversation()` in a thread pool; requires Hermes on `PYTHONPATH`. A canceled run keeps its conversation's lock until its thread ends, so the next message waits, with no limit, for a tool call that has not returned | Yes (callback → queue) |
 | `OllamaAdapter` | Wraps `OllamaClient` HTTP client (`/api/chat`) | Yes (NDJSON streaming) |
@@ -279,6 +280,7 @@ a2a_adapter/
     ├── ollama.py        # OllamaClient + OllamaAdapter
     ├── claude_code.py   # ClaudeCodeAdapter
     ├── codex.py         # CodexAdapter
+    ├── antigravity.py   # AntigravityAdapter (Antigravity CLI, agy)
     ├── openclaw.py      # OpenClawAdapter + OpenClawAgentAdapter
     ├── hermes.py        # HermesAdapter (Hermes Agent gateway pattern)
     ├── deepseek_harness.py  # DeepSeekHarnessAdapter (DeepSeek Harness SDK runtime)

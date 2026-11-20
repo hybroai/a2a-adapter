@@ -9,6 +9,7 @@ This package contains concrete adapter implementations for various agent framewo
 - Callable: Generic Python async function adapter
 - Claude Code: Streaming coding agent CLI wrapper
 - Codex: Coding agent CLI wrapper
+- Antigravity: Streaming Google Antigravity CLI (agy) wrapper
 - OpenClaw: Personal AI super agent CLI wrapper
 - Ollama: Local model HTTP integration
 - Hermes: Multi-purpose AI agent with tool use and persistent memory
@@ -31,6 +32,7 @@ __all__ = [
     "OpenClawAdapter",
     "ClaudeCodeAdapter",
     "CodexAdapter",
+    "AntigravityAdapter",
     "OllamaAdapter",
     "OllamaClient",
     "HermesAdapter",
@@ -82,6 +84,10 @@ def __getattr__(name: str):
         from .codex import CodexAdapter
 
         return CodexAdapter
+    elif name == "AntigravityAdapter":
+        from .antigravity import AntigravityAdapter
+
+        return AntigravityAdapter
     elif name == "OllamaAdapter":
         from .ollama import OllamaAdapter
 

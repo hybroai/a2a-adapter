@@ -7,6 +7,7 @@ from unittest.mock import ANY, patch
 import pytest
 
 from a2a_adapter.cli import main
+from a2a_adapter.integrations.antigravity import AntigravityAdapter
 from a2a_adapter.integrations.claude_code import ClaudeCodeAdapter
 from a2a_adapter.integrations.codex import CodexAdapter
 from a2a_adapter.integrations.deepseek_harness import DeepSeekHarnessAdapter
@@ -128,6 +129,29 @@ def test_claude_cli_forwards_native_args(tmp_path):
     assert command[:4] == ["claude", "--model", "example-model", "-p"]
 
 
+def test_antigravity_cli_forwards_native_args(tmp_path):
+    with patch("a2a_adapter.cli.serve_agent") as serve:
+        main(
+            [
+                "antigravity",
+                "--cwd",
+                str(tmp_path),
+                "--executable",
+                "/opt/agy",
+                "--",
+                "--model",
+                "example-model",
+            ]
+        )
+
+    adapter = serve.call_args.args[0]
+    assert isinstance(adapter, AntigravityAdapter)
+    assert adapter.working_dir == str(tmp_path.resolve())
+    command = adapter._build_command("hello", "ctx").args
+    assert command[:3] == ["/opt/agy", "--model", "example-model"]
+    assert command[-2:] == ["-p", "hello"]
+
+
 def test_openclaw_cli_maps_owned_options_and_forwards_native_args(tmp_path):
     with patch("a2a_adapter.cli.serve_agent") as serve:
         main(
@@ -175,6 +199,7 @@ def test_openclaw_cli_maps_owned_options_and_forwards_native_args(tmp_path):
         ["pi", "-help"],
         ["codex", "-help"],
         ["claude", "-help"],
+        ["antigravity", "-help"],
         ["openclaw", "-help"],
         ["dsh", "-help"],
     ],
@@ -199,6 +224,17 @@ def test_help_aliases_include_usage(argv, capsys):
         # Commander clusters short flags: -print is -p plus -r "int".
         ("claude", "-print"),
         ("claude", "-color"),
+        ("antigravity", "-p"),
+        ("antigravity", "-pignored"),
+        ("antigravity", "--print"),
+        ("antigravity", "--prompt=hi"),
+        ("antigravity", "--output-format"),
+        ("antigravity", "--input-format=stream-json"),
+        ("antigravity", "--conversation"),
+        ("antigravity", "--conversation=abc"),
+        ("antigravity", "--continue"),
+        ("antigravity", "-c"),
+        ("antigravity", "--disable-slash-commands"),
         ("openclaw", "--message"),
         ("openclaw", "--message-file"),
         ("openclaw", "--message-file=prompt.md"),
@@ -342,6 +378,7 @@ def test_cli_uses_official_claude_command_name_only():
         ("pi", "Pi"),
         ("codex", "Codex"),
         ("claude", "Claude Code"),
+        ("antigravity", "Antigravity"),
         ("openclaw", "OpenClaw"),
         ("dsh", "DeepSeek Harness"),
     ],
@@ -369,7 +406,7 @@ def test_cli_name_and_description_override_defaults(tmp_path):
     assert meta.description == "Reviews PRs"
 
 
-@pytest.mark.parametrize("agent", ["pi", "codex", "claude", "openclaw", "dsh"])
+@pytest.mark.parametrize("agent", ["pi", "codex", "claude", "antigravity", "openclaw", "dsh"])
 def test_cli_defaults_to_one_skill_describing_the_agent(tmp_path, agent):
     with patch("a2a_adapter.cli.serve_agent") as serve:
         main([agent, "--cwd", str(tmp_path), "--name", "Reviewer", "--description", "Reviews"])
@@ -524,6 +561,7 @@ def test_cli_log_level_still_reaches_uvicorn(tmp_path):
             "/opt/claude --model opus",
         ),
         (["codex"], "codex"),
+        (["antigravity", "--", "--model", "m"], "agy --model m"),
         (["openclaw", "--", "--verbose"], "openclaw --verbose"),
     ],
 )

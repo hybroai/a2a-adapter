@@ -9,6 +9,7 @@ directly from the target project directory:
 ```bash
 a2a-adapter pi --port 9012
 a2a-adapter codex --port 9011
+a2a-adapter antigravity --port 9014
 a2a-adapter claude --port 9010
 a2a-adapter openclaw --port 9008
 ```
@@ -37,6 +38,8 @@ export ANTHROPIC_API_KEY="your-key"
 # For Codex examples
 # npm install -g @openai/codex
 
+# For Antigravity CLI examples: install agy and run it once to sign in
+
 # For Pi examples
 # Install Pi, or export A2A_PI_COMMAND="npx tsx /path/to/pi/packages/coding-agent/src/cli.ts"
 
@@ -58,6 +61,7 @@ export ANTHROPIC_API_KEY="your-key"
 | `hermes_agent.py` | Hermes | Yes | 9010 | Hermes AI agent -> A2A server (streaming, multi-turn) |
 | `claude_code_agent.py` | Claude Code | Yes | 9010 | Claude Code CLI -> A2A server (streaming, multi-turn) |
 | `codex_agent.py` | Codex | - | 9011 | Codex CLI -> A2A server (multi-turn) |
+| `antigravity_agent.py` | Antigravity CLI | Yes | 9014 | Antigravity CLI (agy) -> A2A server (streaming, multi-turn) |
 | `pi_agent.py` | Pi | Yes | 9012 | One persistent Pi RPC session -> A2A server |
 | `custom_adapter.py` | Custom | - | 8003 | Custom BaseA2AAdapter (sentiment analyzer) |
 | `single_agent_client.py` | httpx | - | - | **Client**: test any A2A agent |
@@ -86,6 +90,7 @@ python examples/ollama_agent.py        # Ollama (local LLM, streaming)
 python examples/hermes_agent.py        # Hermes (tool use, multi-turn, streaming)
 python examples/claude_code_agent.py   # Claude Code (streaming, multi-turn)
 python examples/codex_agent.py         # Codex (multi-turn)
+python examples/antigravity_agent.py   # Antigravity CLI (streaming, multi-turn)
 python examples/pi_agent.py            # Pi (persistent session, streaming)
 python examples/custom_adapter.py       # Custom adapter (sentiment analyzer)
 ```

@@ -7,7 +7,7 @@ Get your first A2A agent running in under 5 minutes.
 | You have... | Use | Go to |
 |---|---|---|
 | Your own agent code, or a LangChain / LangGraph / CrewAI / n8n agent | the **Python SDK** | [Path 1](#path-1-make-your-own-agent-a2a-compatible-sdk) |
-| A local agent you already run in a terminal: Claude Code, Codex, Pi, or OpenClaw | the **CLI** | [Path 2](#path-2-start-a-local-agent-with-one-command-cli) |
+| A local agent you already run in a terminal: Claude Code, Codex, Antigravity CLI, Pi, or OpenClaw | the **CLI** | [Path 2](#path-2-start-a-local-agent-with-one-command-cli) |
 
 Both need Python 3.11+ and produce the same kind of A2A server.
 
@@ -198,7 +198,7 @@ The A2A SDK automatically:
 
 ## Path 2: Start a Local Agent with One Command (CLI)
 
-Use this path to put a classic local agent (Claude Code, Codex, Pi, or OpenClaw)
+Use this path to put a classic local agent (Claude Code, Codex, Antigravity CLI, Pi, or OpenClaw)
 on A2A without writing code.
 
 ### Step 1: Install the CLI
@@ -228,6 +228,7 @@ Run the command from the project directory the agent should work in:
 a2a-adapter claude --port 9010
 a2a-adapter pi --port 9012
 a2a-adapter codex --port 9011
+a2a-adapter antigravity --port 9014
 a2a-adapter openclaw --port 9008
 ```
 
@@ -238,13 +239,14 @@ go before `--`; native agent options go after it:
 a2a-adapter claude --port 9010 -- --model <model>
 a2a-adapter pi --port 9012 -- --model <model> --thinking high
 a2a-adapter codex --port 9011 -- --model <model> --sandbox workspace-write
+a2a-adapter antigravity --port 9014 -- --model <model>
 a2a-adapter openclaw --port 9008 --agent-id main --thinking high
 ```
 
 You don't need the agent's interactive UI to configure it. The adapter runs the
 agent non-interactively, as you, in the `--cwd` folder, so it uses the agent's
 normal config files (for example `~/.claude/settings.json` and `CLAUDE.md`, or
-`~/.codex/config.toml` and `AGENTS.md`). Edit those for lasting settings, and
+`~/.codex/config.toml` and `AGENTS.md`, or `~/.gemini/antigravity-cli/settings.json`). Edit those for lasting settings, and
 use flags after `--` for settings that apply only to this server. Changes apply
 to the next request, except for Pi, which needs a server restart.
 
@@ -342,6 +344,7 @@ asyncio.run(main())
 | CrewAI | `CrewAIAdapter` | - |
 | Claude Code | `ClaudeCodeAdapter` | Yes |
 | Codex | `CodexAdapter` | - |
+| Antigravity CLI | `AntigravityAdapter` | Yes |
 | OpenClaw | `OpenClawAdapter` | - |
 | Ollama | `OllamaAdapter` | Yes |
 | Pi | `PiAdapter` | Yes |

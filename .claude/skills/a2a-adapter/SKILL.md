@@ -1,6 +1,6 @@
 ---
 name: a2a-adapter
-description: Use when building A2A Protocol agents, converting AI agents from any framework (LangChain, LangGraph, CrewAI, n8n, Ollama, or custom) or local coding agents (Claude Code, Codex, Pi, OpenClaw, Hermes, DeepSeek Harness) into A2A-compatible servers, or working with the a2a-adapter Python SDK
+description: Use when building A2A Protocol agents, converting AI agents from any framework (LangChain, LangGraph, CrewAI, n8n, Ollama, or custom) or local coding agents (Claude Code, Codex, Antigravity CLI, Pi, OpenClaw, Hermes, DeepSeek Harness) into A2A-compatible servers, or working with the a2a-adapter Python SDK
 ---
 
 # a2a-adapter SDK
@@ -25,6 +25,7 @@ Expose an installed local agent without writing Python:
 ```bash
 a2a-adapter claude --port 9010
 a2a-adapter codex --port 9011
+a2a-adapter antigravity --port 9014
 a2a-adapter pi --port 9012
 a2a-adapter dsh --port 9013    # needs [deepseek-harness] and DEEPSEEK_API_KEY
 a2a-adapter openclaw --port 9008
@@ -54,6 +55,7 @@ serve_agent(adapter, host="127.0.0.1", port=9000) # Start A2A server
 | CrewAI crew | `CrewAIAdapter(crew=crew)` |
 | Claude Code CLI | `ClaudeCodeAdapter(working_dir=...)` |
 | Codex CLI | `CodexAdapter(working_dir=...)` |
+| Antigravity CLI (agy) | `AntigravityAdapter(working_dir=...)` |
 | Pi coding agent | `PiAdapter(working_dir=...)` |
 | DeepSeek Harness (dsh) | `DeepSeekHarnessAdapter(working_dir=...)` |
 | DeepSeek Harness, one stateless task per request | `DeepSeekHarnessHeadlessAdapter(working_dir=...)` |

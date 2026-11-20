@@ -30,6 +30,7 @@ from a2a_adapter import (
     OpenClawAdapter,
     ClaudeCodeAdapter,
     CodexAdapter,
+    AntigravityAdapter,
     HermesAdapter,
     PiAdapter,
     DeepSeekHarnessAdapter,
@@ -156,17 +157,18 @@ The prompt goes to OpenClaw on stdin (`openclaw agent --message-file`), so it ne
 
 ### Local coding-agent adapters
 
-Claude Code, Codex, Pi and DeepSeek Harness can be exposed from Python or directly through the `a2a-adapter` CLI (see CLI below). Hermes is an in-process Python SDK integration. These agents run tools on the host for whoever can reach the server, so bind to `127.0.0.1` unless clients are trusted.
+Claude Code, Codex, Antigravity CLI, Pi and DeepSeek Harness can be exposed from Python or directly through the `a2a-adapter` CLI (see CLI below). Hermes is an in-process Python SDK integration. These agents run tools on the host for whoever can reach the server, so bind to `127.0.0.1` unless clients are trusted.
 
 ```python
 from a2a_adapter import (
-    ClaudeCodeAdapter, CodexAdapter, PiAdapter, HermesAdapter,
+    ClaudeCodeAdapter, CodexAdapter, AntigravityAdapter, PiAdapter, HermesAdapter,
     DeepSeekHarnessAdapter, DeepSeekHarnessHeadlessAdapter,
 )
 
 claude = ClaudeCodeAdapter(working_dir="/path/to/project")  # claude_path, cli_args, skip_permissions
 codex = CodexAdapter(working_dir="/path/to/project")        # codex_path, cli_args, bypass_approvals,
                                                             # skip_git_check (needed outside a git repo), env_vars
+agy = AntigravityAdapter(working_dir="/path/to/project")    # agy_path, cli_args, skip_permissions, env_vars
 pi = PiAdapter(working_dir="/path/to/project")              # pi_command, model, model_provider,
                                                             # session_id, session_dir, enforce_single_context
 hermes = HermesAdapter(model=None, provider=None)           # enabled_toolsets, max_workers
@@ -174,7 +176,7 @@ dsh = DeepSeekHarnessAdapter(working_dir="/path/to/project")
 dsh_headless = DeepSeekHarnessHeadlessAdapter(working_dir="/path/to/project")
 ```
 
-Claude Code and Codex save one agent session per A2A `contextId` under `$XDG_STATE_HOME/a2a-adapter/<agent>/<hash of working_dir>/` (default `~/.local/state/...`), so conversations resume after a server restart.
+Claude Code, Codex and Antigravity save one agent session per A2A `contextId` under `$XDG_STATE_HOME/a2a-adapter/<agent>/<hash of working_dir>/` (default `~/.local/state/...`), so conversations resume after a server restart.
 
 Pi keeps a single session (`session_id`, default `a2a-pi-agent`, stored under `.../pi/<hash>/sessions`). By default the adapter binds to the first A2A `contextId` and fails tasks from any other context; pass `enforce_single_context=False` to let every context share that one Pi session.
 
@@ -260,7 +262,7 @@ serve_agent(adapter, port=9005)
 ## CLI
 
 ```bash
-a2a-adapter <claude|codex|pi|openclaw|dsh> [server options] [-- native agent options]
+a2a-adapter <claude|codex|antigravity|pi|openclaw|dsh> [server options] [-- native agent options]
 ```
 
 Run it from the project directory the agent should work in. Options before `--` configure the A2A server; options after `--` go to the agent CLI (`dsh` accepts none). The adapter owns protocol and session flags such as Pi's `--mode rpc` and Codex's `--json`.
@@ -275,7 +277,7 @@ Run it from the project directory the agent should work in. Options before `--` 
 | `--description` | `<Agent> agent working in <folder>` | Agent Card description |
 | `--skill` | one skill from the card name and description | Agent Card skill as JSON (`id`, `name`, `description`, at least one `tags` entry, optional `examples`); repeatable |
 | `--timeout` | `600` | Per-request timeout in seconds |
-| `--executable` | `claude`, `codex`, `pi`, `openclaw`; for `dsh`, the bundled runtime | Path to the agent executable |
+| `--executable` | `claude`, `codex`, `agy`, `pi`, `openclaw`; for `dsh`, the bundled runtime | Path to the agent executable |
 | `--log-level` | `warning` | Level of Uvicorn's own log lines in the activity log |
 | `-q` / `--quiet` | off | Show only the startup card and errors |
 | `-v` / `--verbose` | off | Show full prompt and reply text under each activity row |
@@ -501,7 +503,7 @@ adapter = load_adapter({
 serve_agent(adapter)
 ```
 
-Valid adapter values: `"n8n"`, `"langchain"`, `"langgraph"`, `"crewai"`, `"openclaw"`, `"ollama"`, `"callable"`, `"claude-code"`, `"codex"`, `"hermes"`, `"pi"`, `"deepseek-harness"`, `"deepseek-harness-headless"`, or any registered name. The other keys are passed to the adapter's constructor.
+Valid adapter values: `"n8n"`, `"langchain"`, `"langgraph"`, `"crewai"`, `"openclaw"`, `"ollama"`, `"callable"`, `"claude-code"`, `"codex"`, `"antigravity"`, `"hermes"`, `"pi"`, `"deepseek-harness"`, `"deepseek-harness-headless"`, or any registered name. The other keys are passed to the adapter's constructor.
 
 ## Third-Party Adapter Registration
 
@@ -567,6 +569,7 @@ async with MyAdapter() as adapter:
 | `OpenClawAdapter` | No | Yes (kill) | No | OpenClaw CLI |
 | `ClaudeCodeAdapter` | Yes | Yes (kill) | No | Claude Code CLI |
 | `CodexAdapter` | No | Yes (kill) | No | Codex CLI |
+| `AntigravityAdapter` | Yes | Yes (kill) | No | Antigravity CLI (`agy`) |
 | `PiAdapter` | Yes | Yes | No | Pi CLI |
 | `HermesAdapter` | Yes | Yes (interrupt) | No | Hermes on `PYTHONPATH` |
 | `DeepSeekHarnessAdapter` | Yes (per message) | Yes (closes runtime) | No | `deepseek-harness` extra |
@@ -637,6 +640,7 @@ HTTP POST / (JSON-RPC) -> DefaultRequestHandler
 | CrewAI crew | `CrewAIAdapter(crew=crew)` |
 | Claude Code CLI | `ClaudeCodeAdapter(working_dir=...)` |
 | Codex CLI | `CodexAdapter(working_dir=...)` |
+| Antigravity CLI (agy) | `AntigravityAdapter(working_dir=...)` |
 | Pi coding agent | `PiAdapter(working_dir=...)` |
 | DeepSeek Harness (dsh) | `DeepSeekHarnessAdapter(working_dir=...)` |
 | DeepSeek Harness, one stateless task per request | `DeepSeekHarnessHeadlessAdapter(working_dir=...)` |
