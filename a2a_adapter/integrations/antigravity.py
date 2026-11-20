@@ -10,7 +10,6 @@ context and passed back with ``--conversation`` on the next message.
 import json
 import logging
 import os
-import re
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -27,15 +26,11 @@ from ..base_adapter import (
 
 logger = logging.getLogger(__name__)
 
-# What agy reports for an unknown conversation id, going by the TUI's /resume
-# ("conversation <id> not found"); the headless wording is undocumented. A
-# match only counts when <id> is one of the stored conversation ids, so a
-# soft-deny notice quoting some other text on stderr can't drop a session.
-_STALE_SESSION_RE = re.compile(r"conversation (\S+) not found", re.IGNORECASE)
 
 # Linux limits one argv element to MAX_ARG_STRLEN (128 KiB, including the NUL).
-# agy takes the headless prompt only as an argument, so stay under it.
-_MAX_PROMPT_BYTES = 128 * 1024 - 1
+# agy takes the headless prompt only as an argument, "--print=<prompt>".
+_PRINT_FLAG = "--print="
+_MAX_PROMPT_BYTES = 128 * 1024 - 1 - len(_PRINT_FLAG)
 
 _ENV_SKIP_PERMISSIONS = "A2A_ANTIGRAVITY_SKIP_PERMISSIONS"
 
@@ -46,6 +41,8 @@ class _StreamRun:
 
     text_seen: bool = False
     result_seen: bool = False
+    resumed_id: str | None = None
+    any_event: bool = False
 
 
 # The stream() run whose step is executing. _handle_stream_line() only sees
@@ -57,19 +54,25 @@ _stream_run: ContextVar[_StreamRun | None] = ContextVar("antigravity_stream_run"
 class AntigravityAdapter(BaseA2AAdapter):
     """Adapter for the Google Antigravity CLI (``agy``).
 
-    Each message runs ``agy -p <message> --output-format stream-json``
+    Each message runs ``agy --output-format stream-json --print=<message>``
     in ``working_dir``. Headless runs use the credentials cached by an
     interactive ``agy`` login (or the API-key / ADC setup described in the
     Antigravity docs).
 
-    Headless runs cannot answer approval prompts: an action the permission
-    policy does not allow is skipped and the run still succeeds. Allow the
-    tools you need in ``~/.gemini/antigravity-cli/settings.json``, or enable
-    ``skip_permissions``.
+    Headless runs never stop to ask. agy's default headless mode (``auto``)
+    already runs shell commands and edits files in the workspace without
+    asking; an action the permission policy does not allow is skipped and
+    the run still succeeds, and the agent's questions to the user are
+    skipped too. Restrict or allow tools in
+    ``~/.gemini/antigravity-cli/settings.json``, or pin a mode with
+    ``cli_args=["--mode", "plan"]``.
+
+    An unknown or deleted conversation is not an error for agy: it starts a
+    new one, which the adapter logs as a warning and stores in its place.
 
     Args:
         skip_permissions: Pass ``--dangerously-skip-permissions`` so every
-            tool request is approved. When ``None`` (default), falls back to
+            tool request is approved, including ones the policy would deny. When ``None`` (default), falls back to
             the ``A2A_ANTIGRAVITY_SKIP_PERMISSIONS`` env var (``1`` or
             ``true`` to enable). **Security risk**: only enable in
             sandboxed, trusted environments.
@@ -79,7 +82,7 @@ class AntigravityAdapter(BaseA2AAdapter):
         from a2a_adapter import AntigravityAdapter, serve_agent
 
         adapter = AntigravityAdapter(working_dir="/path/to/project")
-        serve_agent(adapter, port=9012)
+        serve_agent(adapter, port=9014)
     """
 
     def __init__(
@@ -201,21 +204,25 @@ class AntigravityAdapter(BaseA2AAdapter):
         conversation_id = self._sessions.get(context_key)
         if conversation_id:
             cmd.extend(["--conversation", conversation_id])
-        # Last, so nothing in cli_args can consume it. A message like "--help"
-        # stays the value of -p with a pflag-style parser (agy is a Go binary),
-        # which takes the next argument as a string flag's value.
-        cmd.extend(["-p", message])
+        # Attached to the flag, last, so nothing in cli_args can consume it.
+        # agy rejects `-p --help` as an unknown flag but reads `--print=--help`
+        # as the prompt (checked with agy 1.5.13).
+        cmd.append(f"{_PRINT_FLAG}{message}")
         run = _stream_run.get()
-        if run is not None:  # a new attempt (the stale retry builds a second one)
-            run.text_seen = run.result_seen = False
+        if run is not None:  # a new attempt (the base's stale retry builds a second one)
+            run.text_seen = run.result_seen = run.any_event = False
+            run.resumed_id = conversation_id
         return CommandResult(args=cmd, used_resume=bool(conversation_id))
 
     def _parse_invoke_output(self, stdout_text: str, context_key: str) -> ParseResult:
         deltas: list[str] = []
         conversation_id: str | None = None
         result: dict[str, Any] | None = None
+        resumed_id = self._sessions.get(context_key)
 
         for event in _events(stdout_text):
+            if event.get("event") == "init":
+                _warn_if_not_resumed(resumed_id, _conversation_id(event))
             conversation_id = _conversation_id(event) or conversation_id
             text = _agent_delta(event)
             if text:
@@ -248,13 +255,15 @@ class AntigravityAdapter(BaseA2AAdapter):
             return None
 
         run = _stream_run.get()
+        if run is not None:
+            run.any_event = True
         if event.get("event") == "result" and isinstance(event.get("result"), dict):
             result = event["result"]
             if run is not None:
                 run.result_seen = True
-            # Raised at once: the envelope carries agy's own error, and it is
-            # what the stale-session check reads. (Unlike invoke(), a stale
-            # wording that appears only on stderr is not seen here.)
+            # Raised at once with agy's own message. (After the loop the base
+            # would only have stderr, and would treat a resumed run that failed
+            # with an empty stderr as a stale session and run it again.)
             error = _result_error(result)
             if error:
                 return StreamEvent(error=error)
@@ -267,6 +276,8 @@ class AntigravityAdapter(BaseA2AAdapter):
                 text=response if fallback else None, session_id=_conversation_id(event)
             )
 
+        if event.get("event") == "init" and run is not None:
+            _warn_if_not_resumed(run.resumed_id, _conversation_id(event))
         text = _agent_delta(event)
         if text:
             if run is not None:
@@ -274,21 +285,24 @@ class AntigravityAdapter(BaseA2AAdapter):
             return StreamEvent(text=text)
         return None
 
+    def _forget_stale_session(self, context_key: str) -> None:
+        # The base retries a resumed streamed run that failed without agent
+        # text or stderr. If agy printed anything, the turn started and may
+        # already have run tools (in auto mode, without asking): running it
+        # again would repeat them, so fail instead and keep the conversation.
+        # (invoke() only retries when stdout is empty.)
+        run = _stream_run.get()
+        if run is not None and run.any_event:
+            raise RuntimeError(
+                "Antigravity run exited with an error and no stderr after it had "
+                "started; not retried, since it may already have run tools"
+            )
+        super()._forget_stale_session(context_key)
+
     def _extract_error(self, stdout_text: str) -> str | None:
         for message in _result_errors(stdout_text):
             return message
         return None
-
-    def _is_stale_session_error(self, stdout_text: str, stderr_text: str) -> bool:
-        # Only the result envelope's error and stderr: the rest of stdout is
-        # the transcript, where agent text or tool output may quote the words.
-        errors = [*_result_errors(stdout_text), stderr_text]
-        stored = set(self._sessions.values())
-        return any(
-            match.group(1).strip("'\".,:;") in stored
-            for error in errors
-            for match in _STALE_SESSION_RE.finditer(error)
-        )
 
     def _binary_not_found_message(self) -> str:
         return (
@@ -298,6 +312,23 @@ class AntigravityAdapter(BaseA2AAdapter):
 
 
 # ──── stream-json helpers ────
+
+
+def _warn_if_not_resumed(resumed_id: str | None, conversation_id: str | None) -> None:
+    """Log when agy started a new conversation instead of resuming ``resumed_id``.
+
+    agy (checked with 1.5.13) does not fail on an unknown --conversation: it
+    prints ``warning: conversation "<id>" not found`` on stderr, starts a new
+    conversation and exits 0. The reply is then answered without the earlier
+    history, and the new id replaces the old one once the turn succeeds.
+    """
+    if resumed_id and conversation_id and conversation_id != resumed_id:
+        logger.warning(
+            "AntigravityAdapter: conversation %s was not found; agy started a new "
+            "conversation %s without the earlier history",
+            resumed_id,
+            conversation_id,
+        )
 
 
 def _events(stdout_text: str) -> Iterator[dict[str, Any]]:

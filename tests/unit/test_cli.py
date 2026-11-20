@@ -149,7 +149,7 @@ def test_antigravity_cli_forwards_native_args(tmp_path):
     assert adapter.working_dir == str(tmp_path.resolve())
     command = adapter._build_command("hello", "ctx").args
     assert command[:3] == ["/opt/agy", "--model", "example-model"]
-    assert command[-2:] == ["-p", "hello"]
+    assert command[-1] == "--print=hello"
 
 
 def test_openclaw_cli_maps_owned_options_and_forwards_native_args(tmp_path):

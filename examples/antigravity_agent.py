@@ -2,7 +2,7 @@
 Example: Google Antigravity CLI (agy) as A2A Agent
 
 Expose the Antigravity CLI as an A2A-compatible agent. Each A2A message runs
-`agy -p ... --output-format stream-json`, and each A2A conversation resumes
+`agy --output-format stream-json --print=...`, and each A2A conversation resumes
 its own Antigravity conversation with `--conversation`.
 
 Prerequisites:
@@ -12,10 +12,12 @@ Prerequisites:
   Antigravity docs
 
 Security:
-    By default, skip_permissions is disabled. Headless runs cannot answer
-    approval prompts: an action the permission policy does not allow is
-    skipped. Allow the tools you need in
-    ~/.gemini/antigravity-cli/settings.json, or, in trusted, sandboxed
+    agy's default headless mode (auto) runs shell commands and edits files in
+    the working directory without asking; actions its permission policy does
+    not allow are skipped. Restrict tools in
+    ~/.gemini/antigravity-cli/settings.json, or pin a mode with
+    cli_args=["--mode", "plan"]. skip_permissions (off by default) approves
+    everything, including what the policy denies; trusted, sandboxed
     environments only:
 
         # Option 1: constructor argument

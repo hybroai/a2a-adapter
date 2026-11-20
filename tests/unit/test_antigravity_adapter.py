@@ -1,8 +1,12 @@
 """Tests for AntigravityAdapter (Google Antigravity CLI, ``agy``).
 
 Covers: _build_command, _parse_invoke_output, _handle_stream_line, the
-error and stale-session hooks, invoke and stream with a mocked subprocess,
-stale-session retry, session persistence, metadata, loader and flat import.
+error hooks, invoke and stream with a mocked subprocess, resuming a
+conversation, session persistence, metadata, loader and flat import.
+
+The event shapes follow what agy 1.5.13 printed in live runs, trimmed: the
+helpers omit the "\n" delta each agent step ends with, except in the
+live-shape test below.
 
 The stream-json shapes follow the documented headless output: one ``init``
 event, ``step_update`` events (agent text in ``text_delta`` of
@@ -39,7 +43,7 @@ def _init(conversation_id: str = CONV) -> dict:
         "init": {
             "cwd": "/home/user/project",
             "tools": ["ask_permission", "run_command"],
-            "permission_mode": "request-review",
+            "permission_mode": "auto",
         },
     }
 
@@ -168,8 +172,9 @@ class TestBuildCommand:
         assert cmd.args[0] == "agy"
         assert cmd.args[cmd.args.index("--output-format") + 1] == "stream-json"
         assert "--disable-slash-commands" in cmd.args
-        # The prompt is the value of -p, last, so cli_args can't swallow it
-        assert cmd.args[-2:] == ["-p", "hello world"]
+        # One argument, last, so cli_args can't swallow it
+        assert cmd.args[-1] == "--print=hello world"
+        assert "-p" not in cmd.args
         assert cmd.stdin is None
         assert cmd.used_resume is False
         assert "--conversation" not in cmd.args
@@ -180,11 +185,13 @@ class TestBuildCommand:
         cmd = adapter._build_command("next", "ctx")
         assert cmd.args[cmd.args.index("--conversation") + 1] == CONV
         assert cmd.used_resume is True
-        assert cmd.args[-2:] == ["-p", "next"]
+        assert cmd.args[-1] == "--print=next"
 
-    def test_prompt_that_looks_like_a_flag_stays_the_p_value(self, adapter):
-        cmd = adapter._build_command("--help", "_default")
-        assert cmd.args[-2:] == ["-p", "--help"]
+    @pytest.mark.parametrize("prompt", ["--help", "-x", "- list items", "a=b", ""])
+    def test_prompt_is_attached_to_the_flag(self, adapter, prompt):
+        # agy 1.5.13 rejects `-p --help` ("flags provided but not defined")
+        # but takes `--print=--help` as the prompt.
+        assert adapter._build_command(prompt, "_default").args[-1] == f"--print={prompt}"
 
     def test_cli_args_come_before_managed_flags(self, tmp_path):
         a = AntigravityAdapter(
@@ -223,6 +230,13 @@ class TestBuildCommand:
         with caplog.at_level("WARNING"):
             AntigravityAdapter(working_dir=str(tmp_path), skip_permissions=True)
         assert "--dangerously-skip-permissions" in caplog.text
+
+    def test_prompt_limit_counts_the_flag_prefix(self, adapter):
+        # The argument is "--print=" + message; Linux caps one at 128 KiB incl. NUL.
+        limit = 128 * 1024 - 1 - len("--print=")
+        assert adapter._build_command("x" * limit, "_default").args[-1].startswith("--print=")
+        with pytest.raises(ValueError, match="too large"):
+            adapter._build_command("x" * (limit + 1), "_default")
 
     def test_prompt_over_the_argument_limit_is_rejected(self, adapter):
         # agy takes the prompt only as an argument; Linux caps one at 128 KiB.
@@ -341,7 +355,7 @@ class TestHandleStreamLine:
         assert adapter._handle_stream_line("[1, 2]") is None
 
 
-# ──── Error and stale-session hooks ────
+# ──── Error hooks ────
 
 
 class TestErrorHooks:
@@ -352,39 +366,13 @@ class TestErrorHooks:
     def test_extract_error_none_without_result(self, adapter):
         assert adapter._extract_error(_stdout(_init())) is None
 
-    @pytest.mark.parametrize(
-        "error", [f"conversation {CONV} not found", f"Conversation {CONV} Not Found"]
-    )
-    def test_stale_hook_matches_result_error(self, adapter, error):
+    def test_missing_conversation_warning_is_not_a_stale_error(self, adapter):
+        # agy 1.5.13 doesn't fail on an unknown --conversation: it warns and
+        # starts a new conversation. Matching the warning would re-run a turn
+        # that already ran (the base retries an empty reply when this is True).
         adapter._sessions["k"] = CONV
-        out = _stdout(_result(status="ERROR", error=error, conversation_id=""))
-        assert adapter._is_stale_session_error(out, "") is True
-
-    def test_stale_hook_matches_stderr(self, adapter):
-        adapter._sessions["k"] = CONV
-        assert adapter._is_stale_session_error("", f"Error: conversation {CONV} not found")
-
-    def test_stale_hook_needs_a_stored_conversation_id(self, adapter):
-        # A soft-deny notice on stderr may quote a command mentioning another id.
-        adapter._sessions["k"] = CONV
-        stderr = 'denied run_command: grep "conversation other-id not found" app.log'
-        assert adapter._is_stale_session_error("", stderr) is False
-
-    def test_stale_hook_ignores_trajectory_errors(self, adapter):
-        adapter._sessions["k"] = CONV
-        out = _stdout(_result(status="ERROR", error="trajectory not found"))
-        assert adapter._is_stale_session_error(out, "trajectory not found") is False
-
-    def test_stale_hook_ignores_transcript_text(self, adapter):
-        adapter._sessions["k"] = CONV
-        out = _stdout(
-            _delta(f"conversation {CONV} not found"), _tool_step(f"conversation {CONV} not found")
-        )
-        assert adapter._is_stale_session_error(out, "") is False
-
-    def test_stale_hook_ignores_unrelated_errors(self, adapter):
-        out = _stdout(_result(status="ERROR", error="authentication required"))
-        assert adapter._is_stale_session_error(out, "authentication required") is False
+        stderr = f'warning: conversation "{CONV}" not found'
+        assert adapter._is_stale_session_error(_stdout(_init("new"), _result("")), stderr) is False
 
     def test_binary_not_found_message_names_the_path(self, adapter):
         assert "'agy'" in adapter._binary_not_found_message()
@@ -402,7 +390,7 @@ class TestInvoke:
         assert text == "42"
         assert adapter._sessions["ctx-1"] == CONV
         args = spawn.call_args.args
-        assert args[-2:] == ("-p", "q")
+        assert args[-1] == "--print=q"
         assert spawn.call_args.kwargs["cwd"] == adapter.working_dir
 
     @pytest.mark.asyncio
@@ -538,6 +526,37 @@ class TestStream:
         assert results == ["one", "two"]
 
     @pytest.mark.asyncio
+    async def test_live_shape_multi_step_reply_matches_in_both_modes(self, tmp_path):
+        # Recorded shape: each agent step ends with a "\n" delta, a tool step in
+        # between, and the envelope's response is all agent text joined.
+        def done_newline(i):
+            e = _delta("\n", step_index=i)
+            e["step_update"]["state"] = "DONE"
+            return e
+
+        events = [
+            _init(),
+            _delta("Starting now.", step_index=1),
+            done_newline(1),
+            _tool_step("ls output"),
+            _delta("Finished now.", step_index=3),
+            done_newline(3),
+            _result("Starting now.\nFinished now.\n"),
+        ]
+        a1 = AntigravityAdapter(working_dir=str(tmp_path), session_store_path=str(tmp_path / "1"))
+        a2 = AntigravityAdapter(working_dir=str(tmp_path), session_store_path=str(tmp_path / "2"))
+        with patch(
+            "a2a_adapter.base_adapter.create_subprocess_exec",
+            return_value=_invoke_proc(_stdout(*events)),
+        ):
+            invoked = await a1.invoke("q", context_id="c", context=_make_context())
+        with patch(
+            "a2a_adapter.base_adapter.create_subprocess_exec", return_value=_stream_proc(events)
+        ):
+            streamed = await _collect(a2)
+        assert invoked == streamed == "Starting now.\nFinished now.\n"
+
+    @pytest.mark.asyncio
     async def test_invoke_and_stream_give_the_same_reply(self, tmp_path):
         events = [_init(), _delta("The answer "), _delta("is 42."), _result("The answer is 42.")]
         a1 = AntigravityAdapter(working_dir=str(tmp_path), session_store_path=str(tmp_path / "1"))
@@ -554,88 +573,99 @@ class TestStream:
         assert invoked == streamed == "The answer is 42."
 
 
-# ──── Stale conversation retry ────
+# ──── Resume, retry and stream lifecycle ────
+
+GONE = "0b5e1e7e-dead-4000-8000-000000000000"
+MISSING_WARNING = f'warning: conversation "{GONE}" not found'
 
 
-class TestStaleConversationRetry:
+class TestResumeAndLifecycle:
     @pytest.mark.asyncio
-    async def test_invoke_retries_without_conversation(self, adapter):
-        adapter._sessions["ctx"] = "gone"
-        stale = _invoke_proc(
-            _stdout(
-                _result(status="ERROR", error="conversation gone not found", conversation_id="")
-            ),
-            returncode=1,
-        )
-        fresh = _invoke_proc(_stdout(_init(), _delta("fresh"), _result("fresh")))
-        with patch(
-            "a2a_adapter.base_adapter.create_subprocess_exec", side_effect=[stale, fresh]
-        ) as spawn:
-            text = await adapter.invoke("q", context_id="ctx", context=_make_context())
-        assert text == "fresh"
-        assert "--conversation" not in spawn.call_args_list[1].args
+    async def test_missing_conversation_starts_a_new_one_and_warns(self, adapter, caplog):
+        # What agy 1.5.13 does for an unknown --conversation: a warning on
+        # stderr, a new conversation, exit 0.
+        adapter._sessions["ctx"] = GONE
+        proc = _invoke_proc(_stdout(_init(), _delta("hi"), _result("hi")), stderr=MISSING_WARNING)
+        with caplog.at_level("WARNING"):
+            with patch(
+                "a2a_adapter.base_adapter.create_subprocess_exec", return_value=proc
+            ) as spawn:
+                text = await adapter.invoke("q", context_id="ctx", context=_make_context())
+        assert text == "hi"
+        assert spawn.call_count == 1
         assert adapter._sessions["ctx"] == CONV
+        assert GONE in caplog.text and "new conversation" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_stream_retries_without_conversation(self, adapter):
-        adapter._sessions["ctx-1"] = "gone"
-        stale = _stream_proc(
-            [_result(status="ERROR", error="conversation gone not found", conversation_id="")],
-            returncode=1,
-        )
+    async def test_stream_missing_conversation_starts_a_new_one_and_warns(self, adapter, caplog):
+        adapter._sessions["ctx-1"] = GONE
+        proc = _stream_proc([_init(), _delta("hi"), _result("hi")], stderr=MISSING_WARNING.encode())
+        with caplog.at_level("WARNING"):
+            with patch("a2a_adapter.base_adapter.create_subprocess_exec", return_value=proc):
+                assert await _collect(adapter) == "hi"
+        assert adapter._sessions["ctx-1"] == CONV
+        assert GONE in caplog.text and "new conversation" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_resumed_conversation_does_not_warn(self, adapter, caplog):
+        adapter._sessions["ctx"] = CONV
+        proc = _invoke_proc(_stdout(_init(), _delta("hi"), _result("hi")))
+        with caplog.at_level("WARNING"):
+            with patch("a2a_adapter.base_adapter.create_subprocess_exec", return_value=proc):
+                await adapter.invoke("q", context_id="ctx", context=_make_context())
+        assert "new conversation" not in caplog.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["invoke", "stream"])
+    async def test_empty_reply_in_a_new_conversation_is_not_retried(self, adapter, mode):
+        # The turn ran (and may have changed files): running it again would repeat it.
+        key = "ctx-1"
+        adapter._sessions[key] = GONE
+        if mode == "invoke":
+            proc = _invoke_proc(_stdout(_init(), _result("")), stderr=MISSING_WARNING)
+        else:
+            proc = _stream_proc([_init(), _result("")], stderr=MISSING_WARNING.encode())
+        with patch("a2a_adapter.base_adapter.create_subprocess_exec", return_value=proc) as spawn:
+            with pytest.raises(RuntimeError, match="no output"):
+                if mode == "invoke":
+                    await adapter.invoke("q", context_id=key, context=_make_context())
+                else:
+                    await _collect(adapter, context_id=key)
+        assert spawn.call_count == 1
+        assert adapter._sessions[key] == CONV
+
+    @pytest.mark.asyncio
+    async def test_resumed_run_that_dies_silently_retries_once_fresh(self, adapter):
+        # The base adapter's rule: a resumed run with a non-zero exit and no
+        # output at all retries once without --conversation.
+        adapter._sessions["ctx-1"] = GONE
+        dead = _stream_proc([], returncode=1)
         fresh = _stream_proc([_init(), _delta("fresh"), _result("fresh")])
         with patch(
-            "a2a_adapter.base_adapter.create_subprocess_exec", side_effect=[stale, fresh]
+            "a2a_adapter.base_adapter.create_subprocess_exec", side_effect=[dead, fresh]
         ) as spawn:
             assert await _collect(adapter) == "fresh"
         assert "--conversation" not in spawn.call_args_list[1].args
+        assert adapter._sessions["ctx-1"] == CONV
 
     @pytest.mark.asyncio
-    async def test_invoke_retries_when_only_stderr_names_the_conversation(self, adapter):
-        adapter._sessions["ctx"] = "gone"
-        stale = _invoke_proc(
-            _stdout(_result(status="ERROR", error="failed to load", conversation_id="")),
-            stderr="Error: conversation gone not found",
-            returncode=1,
-        )
-        fresh = _invoke_proc(_stdout(_init(), _delta("fresh"), _result("fresh")))
-        with patch("a2a_adapter.base_adapter.create_subprocess_exec", side_effect=[stale, fresh]):
-            assert await adapter.invoke("q", context_id="ctx", context=_make_context()) == "fresh"
-
-    @pytest.mark.asyncio
-    async def test_invoke_retries_on_stale_result_with_exit_zero(self, adapter):
-        adapter._sessions["ctx"] = "gone"
-        stale = _invoke_proc(
-            _stdout(
-                _result(status="ERROR", error="conversation gone not found", conversation_id="")
-            )
-        )
-        fresh = _invoke_proc(_stdout(_init(), _delta("fresh"), _result("fresh")))
-        with patch("a2a_adapter.base_adapter.create_subprocess_exec", side_effect=[stale, fresh]):
-            assert await adapter.invoke("q", context_id="ctx", context=_make_context()) == "fresh"
-
-    @pytest.mark.asyncio
-    async def test_stream_does_not_retry_after_text_was_sent(self, adapter):
-        adapter._sessions["ctx-1"] = "gone"
-        proc = _stream_proc(
-            [_delta("partial"), _result(status="ERROR", error="conversation gone not found")],
-            returncode=1,
-        )
+    async def test_resumed_stream_that_died_after_running_tools_is_not_retried(self, adapter):
+        # No agent text yet, but a tool ran: running the turn again would repeat it.
+        adapter._sessions["ctx-1"] = CONV
+        proc = _stream_proc([_init(), _tool_step("rm -rf build")], returncode=1)
         with patch("a2a_adapter.base_adapter.create_subprocess_exec", return_value=proc) as spawn:
-            with pytest.raises(RuntimeError, match="not found"):
+            with pytest.raises(RuntimeError, match="not retried"):
                 await _collect(adapter)
         assert spawn.call_count == 1
+        assert adapter._sessions["ctx-1"] == CONV
 
     @pytest.mark.asyncio
     async def test_retried_stream_gets_fresh_run_state(self, adapter):
-        # The stale attempt saw a result; the retry must still need its own.
-        adapter._sessions["ctx-1"] = "gone"
-        stale = _stream_proc(
-            [_result(status="ERROR", error="conversation gone not found", conversation_id="")],
-            returncode=1,
-        )
+        # The first attempt's state must not carry over into the retry.
+        adapter._sessions["ctx-1"] = GONE
+        dead = _stream_proc([], returncode=1)
         fresh = _stream_proc([_init(), _delta("cut short")])
-        with patch("a2a_adapter.base_adapter.create_subprocess_exec", side_effect=[stale, fresh]):
+        with patch("a2a_adapter.base_adapter.create_subprocess_exec", side_effect=[dead, fresh]):
             with pytest.raises(RuntimeError, match="without a result"):
                 await _collect(adapter)
 

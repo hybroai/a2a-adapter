@@ -234,7 +234,7 @@ Each adapter extends `BaseA2AAdapter` with framework-specific logic:
 | `CrewAIAdapter` | `kickoff_async()` with sync fallback | No |
 | `ClaudeCodeAdapter` | `claude` subprocess + stream-json parsing and resume | Yes |
 | `CodexAdapter` | `codex exec --json` subprocess + thread resume | No |
-| `AntigravityAdapter` | `agy -p --output-format stream-json` subprocess + `--conversation` resume | Yes |
+| `AntigravityAdapter` | `agy --output-format stream-json --print=<message>` subprocess + `--conversation` resume | Yes |
 | `OpenClawAdapter` | Subprocess exec + JSON parse + cancel (kill) | No |
 | `HermesAdapter` | Gateway pattern: `SessionDB` + `AIAgent.run_conversation()` in a thread pool; requires Hermes on `PYTHONPATH`. A canceled run keeps its conversation's lock until its thread ends, so the next message waits, with no limit, for a tool call that has not returned | Yes (callback → queue) |
 | `OllamaAdapter` | Wraps `OllamaClient` HTTP client (`/api/chat`) | Yes (NDJSON streaming) |

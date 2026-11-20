@@ -146,16 +146,20 @@ The adapters send each prompt to Codex and OpenClaw on stdin, so long prompts
 are not limited by the OS command-line length; OpenClaw itself rejects prompts over
 4 MiB. This needs an OpenClaw release that supports
 `openclaw agent --message-file`. The Antigravity CLI takes its headless prompt
-only as an argument (`agy -p <prompt>`), so prompts over 128 KiB are rejected.
+only as an argument (`agy --print=<prompt>`), so prompts over about 128 KiB
+(131,063 bytes) are rejected.
 
 The Antigravity CLI uses the credentials cached by an interactive `agy` login
-(or its Gemini API key / ADC setup). Headless runs cannot answer approval
-prompts: an action its permission policy does not allow is skipped and the run
-still succeeds, and a run that ends waiting on input (for example, the agent
-asking a question) fails. Allow the tools you
-need in `~/.gemini/antigravity-cli/settings.json`, or, in trusted sandboxes
-only, pass `--dangerously-skip-permissions` after `--` (or set
-`A2A_ANTIGRAVITY_SKIP_PERMISSIONS=1`).
+(run `agy` once to sign in), or its Gemini API key / ADC setup. Headless runs
+never stop to ask: agy's default headless mode (`auto`) runs shell commands and
+edits files in `--cwd` without asking, an action its permission policy does not
+allow is skipped while the run still succeeds, and the agent's questions to the
+user are skipped. Restrict tools in `~/.gemini/antigravity-cli/settings.json`,
+or pin a mode after `--` (for example `-- --mode plan`). In trusted sandboxes
+only, `--dangerously-skip-permissions` (or `A2A_ANTIGRAVITY_SKIP_PERMISSIONS=1`)
+approves everything. If a stored Antigravity conversation no longer exists, agy
+starts a new one without the earlier history; the adapter logs a warning and
+uses the new one from then on.
 
 Each A2A context gets its own OpenClaw session: `<session_id>-<context_id>` when
 the context id is valid as it is and the result fits in 64 characters, otherwise
@@ -219,7 +223,7 @@ a2a-adapter dsh --port 9013 --model <model>
 Run `a2a-adapter -help` for the supported agents, or
 `a2a-adapter <agent> -help` for agent-specific usage.
 The adapter owns protocol and session flags such as Pi's `--mode rpc`,
-Codex's `--json`, and Antigravity's `-p`, `--output-format` and
+Codex's `--json`, and Antigravity's `-p`/`--print`, `--output-format` and
 `--conversation`; those flags cannot be overridden after `--`.
 
 Claude Code, Codex, Antigravity and Pi keep their session state per user, outside the
