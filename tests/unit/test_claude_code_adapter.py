@@ -331,11 +331,26 @@ class TestParseInvokeOutput:
     def test_assistant_events(self, adapter):
         stdout = "\n".join(
             [
-                json.dumps(_assistant_event("Hello ")),
-                json.dumps(_assistant_event("world")),
+                json.dumps(_assistant_event("Let me check the file.")),
+                json.dumps(_assistant_event("Now fixing it.")),
             ]
         )
         result = adapter._parse_invoke_output(stdout, "ctx-1")
+        # Separate assistant messages are separate paragraphs.
+        assert result.text == "Let me check the file.\n\nNow fixing it."
+
+    def test_text_blocks_of_one_message_are_joined_as_is(self, adapter):
+        event = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Hello "},
+                    {"type": "tool_use", "name": "Read", "input": {}},
+                    {"type": "text", "text": "world"},
+                ]
+            },
+        }
+        result = adapter._parse_invoke_output(json.dumps(event), "ctx-1")
         assert result.text == "Hello world"
 
     def test_result_event_is_metadata_only(self, adapter):
@@ -393,7 +408,7 @@ class TestParseInvokeOutput:
             ]
         )
         result = adapter._parse_invoke_output(stdout, "ctx-1")
-        assert result.text == "chunk Achunk B"
+        assert result.text == "chunk A\n\nchunk B"
         assert result.session_id == "sess-99"
 
     def test_result_only_no_assistant_raises(self, adapter):
@@ -411,11 +426,20 @@ class TestInvokeStreamConsistency:
     for the same Claude Code output (assistant text only, not result.result)."""
 
     @pytest.mark.asyncio
-    async def test_same_output_gives_same_response(self, adapter):
+    @pytest.mark.parametrize(
+        "messages,assistant_text",
+        [
+            (["The answer is 42."], "The answer is 42."),
+            (
+                ["Let me check the file.", "Now fixing it."],
+                "Let me check the file.\n\nNow fixing it.",
+            ),
+        ],
+    )
+    async def test_same_output_gives_same_response(self, adapter, messages, assistant_text):
         """Given identical Claude output, invoke and stream produce the same text."""
-        assistant_text = "The answer is 42."
         events = [
-            _assistant_event(assistant_text),
+            *(_assistant_event(m) for m in messages),
             _result_event("result metadata ignored", "sess-cons"),
         ]
 
@@ -605,10 +629,9 @@ class TestStream:
             ):
                 chunks.append(chunk)
 
-        # Only assistant text is yielded; result.result is metadata-only
-        assert "chunk1" in chunks
-        assert "chunk2" in chunks
-        assert "metadata" not in chunks
+        # Only assistant text is yielded; result.result is metadata-only.
+        # The second message starts a new paragraph.
+        assert chunks == ["chunk1", "\n\nchunk2"]
         assert adapter._sessions["ctx-s"] == "sess-stream"
 
     @pytest.mark.asyncio

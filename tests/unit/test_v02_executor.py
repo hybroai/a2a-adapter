@@ -249,6 +249,30 @@ async def test_execute_streaming_complete_message():
         assert parts[0].text == "hello world"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chunks", [[], ["", Part(text="")]])
+async def test_execute_streaming_empty_stream_reports_empty_response(chunks):
+    """A stream with no output completes like an empty invoke result."""
+
+    class EmptyStreamAdapter(StreamingAdapter):
+        async def stream(self, user_input, context_id=None, **kwargs):
+            for chunk in chunks:
+                yield chunk
+
+    executor = AdapterAgentExecutor(EmptyStreamAdapter())
+
+    with patch("a2a_adapter.executor.TaskUpdater") as MockUpdater:
+        updater_instance = AsyncMock(spec=TaskUpdater)
+        MockUpdater.return_value = updater_instance
+
+        await executor.execute(make_mock_context(), make_mock_event_queue())
+
+        updater_instance.add_artifact.assert_not_awaited()
+        updater_instance.complete.assert_awaited_once()
+        parts = updater_instance.new_agent_message.call_args[0][0]
+        assert [p.text for p in parts] == ["[Empty response]"]
+
+
 # ──── Test: Error Handling ────
 
 

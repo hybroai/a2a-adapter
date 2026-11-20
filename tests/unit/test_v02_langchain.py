@@ -104,7 +104,17 @@ async def test_invoke_extracts_message_from_dict(key: str, output_key: str | Non
     assert await adapter.invoke("test") == "hello world"
 
 
-@pytest.mark.parametrize("key,output_key", [("output", None), ("result", None), ("reply", "reply")])
+@pytest.mark.parametrize(
+    "key,output_key",
+    [
+        ("output", None),
+        ("result", None),
+        ("answer", None),
+        ("response", None),
+        ("text", None),
+        ("reply", "reply"),
+    ],
+)
 async def test_stream_extracts_message_chunks_from_dict(key: str, output_key: str | None) -> None:
     adapter = LangChainAdapter(runnable=DictMessageRunnable(key), output_key=output_key)
     assert [chunk async for chunk in adapter.stream("test")] == ["hello", " world"]
@@ -559,3 +569,21 @@ async def test_output_dict_with_non_json_values():
 
     result = await LangChainAdapter(runnable=DictRunnable()).invoke("test")
     assert json.loads(result)["when"] == str(when)
+
+
+@pytest.mark.asyncio
+async def test_stream_retrieval_chain_answer_chunks():
+    """A retrieval chain streams {"input"}, {"context"} and then {"answer"} chunks."""
+
+    class RetrievalRunnable:
+        async def ainvoke(self, inputs):
+            return {"input": "q", "context": ["doc"], "answer": "done"}
+
+        async def astream(self, inputs):
+            yield {"input": "q"}
+            yield {"context": ["doc"]}
+            yield {"answer": "The "}
+            yield {"answer": "answer"}
+
+    adapter = LangChainAdapter(runnable=RetrievalRunnable())
+    assert [chunk async for chunk in adapter.stream("q")] == ["The ", "answer"]
