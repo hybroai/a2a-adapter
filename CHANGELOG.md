@@ -8,6 +8,31 @@ Conventional Commits. Earlier entries follow
 [Keep a Changelog](https://keepachangelog.com/). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.6](https://github.com/hybroai/a2a-adapter/compare/v0.4.5...v0.4.6) (2026-11-20)
+
+
+### Features
+
+* **antigravity:** add an adapter for the Antigravity CLI (agy) ([8657774](https://github.com/hybroai/a2a-adapter/commit/865777479d8e3b1da5917ae4f9d3ef0426b9bbe5))
+* **antigravity:** add an adapter for the Antigravity CLI (agy) ([bc27816](https://github.com/hybroai/a2a-adapter/commit/bc278162ba8b5dee044604b16420c0e86e5ef557))
+
+
+### Bug Fixes
+
+* adapter bugs found in a repo scan (Hermes, Pi, LangChain, Claude Code, server, executor) ([60dc3b0](https://github.com/hybroai/a2a-adapter/commit/60dc3b030b060845c4af790be75aea036734e4a1))
+* adapter bugs in Hermes, Pi, LangChain, Claude Code, server and executor ([ccb956f](https://github.com/hybroai/a2a-adapter/commit/ccb956f0589b0af52e5b08d10cbe960f55d08f49))
+* **antigravity:** kill tool processes agy starts outside its process group ([be6042f](https://github.com/hybroai/a2a-adapter/commit/be6042f916f8572e2370f8de8999fc1e9d921353))
+* **antigravity:** match agy 1.5.13 behaviour found in live runs ([ba5e08d](https://github.com/hybroai/a2a-adapter/commit/ba5e08d07013ea3f12941fd4a4e0fa81e47931c3))
+* **claude-code:** separate assistant messages with a blank line ([a16a003](https://github.com/hybroai/a2a-adapter/commit/a16a003566b36c3a97dac9b7a0e7945fdc42719f))
+* **executor:** report an empty stream as [Empty response] ([a9adfef](https://github.com/hybroai/a2a-adapter/commit/a9adfef72e20c3d8bb148e3f5b5ae6f521a806d7))
+* **hermes:** interrupt running agents on close ([60913ae](https://github.com/hybroai/a2a-adapter/commit/60913ae27e7e9813ae8446622fd901027d088132))
+* **hermes:** time out stuck turns and interrupt them ([c26e96e](https://github.com/hybroai/a2a-adapter/commit/c26e96e558eb6bd08976ae2c5e2abc3ed57498cc))
+* **hermes:** yield the final response when nothing was streamed ([7432930](https://github.com/hybroai/a2a-adapter/commit/7432930855ed080f54b6e8f72db0d8283c6a6757))
+* **langchain:** read answer and response keys from streamed chunks ([8776135](https://github.com/hybroai/a2a-adapter/commit/8776135ef598a36faa155c1b3ab312f97f041813))
+* **pi:** fail a turn that produced no output ([edff578](https://github.com/hybroai/a2a-adapter/commit/edff5781daaaa25ecc92216b100d0a4643b6116d))
+* **pi:** report a turn timeout that expires while the stream is suspended ([a6eb02d](https://github.com/hybroai/a2a-adapter/commit/a6eb02d03d57712017cee5eaeeddbffea235dfc9))
+* **server:** bracket IPv6 hosts and use https with TLS in the card URL ([92f5cb0](https://github.com/hybroai/a2a-adapter/commit/92f5cb0bf108e4a61a4c390b2c12626114d69ab6))
+
 ## [0.4.5](https://github.com/hybroai/a2a-adapter/compare/v0.4.4...v0.4.5) (2026-11-19)
 
 
