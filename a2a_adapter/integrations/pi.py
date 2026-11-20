@@ -264,31 +264,42 @@ class PiRpcProcess:
                 await self._terminate_process()
                 raise
 
+            # The timeout bounds the whole turn, so each read gets the time
+            # that is left. One asyncio.timeout() around the loop would fire
+            # while this generator is suspended at ``yield`` and cancel the
+            # consumer at an unrelated await. Time the consumer spends between
+            # chunks counts toward the deadline.
+            loop = asyncio.get_running_loop()
+            deadline = None if self.timeout is None else loop.time() + self.timeout
             try:
-                async with asyncio.timeout(self.timeout):
-                    while True:
+                while True:
+                    remaining = None if deadline is None else deadline - loop.time()
+                    if remaining is not None and remaining <= 0:
+                        raise TimeoutError
+                    # Wraps this one await, never the ``yield`` below.
+                    async with asyncio.timeout(remaining):
                         event = await self._events.get()
-                        if isinstance(event, BaseException):
-                            raise self._process_lost(event, accepted=accepted) from event
+                    if isinstance(event, BaseException):
+                        raise self._process_lost(event, accepted=accepted) from event
 
-                        event_type = event.get("type")
-                        if event_type == "message_update":
-                            delta = event.get("assistantMessageEvent", {})
-                            delta_type = delta.get("type")
-                            if delta_type == "text_delta":
-                                text = delta.get("delta", "")
-                                if text:
-                                    yield str(text)
-                            elif delta_type == "error":
-                                reason = str(delta.get("reason", "error"))
-                                if reason == "aborted":
-                                    turn_error = PiTurnAbortedError("Pi turn was aborted")
-                                else:
-                                    turn_error = PiRpcError(f"Pi assistant stream failed: {reason}")
-                        elif event_type == "agent_settled":
-                            if turn_error:
-                                raise turn_error
-                            return
+                    event_type = event.get("type")
+                    if event_type == "message_update":
+                        delta = event.get("assistantMessageEvent", {})
+                        delta_type = delta.get("type")
+                        if delta_type == "text_delta":
+                            text = delta.get("delta", "")
+                            if text:
+                                yield str(text)
+                        elif delta_type == "error":
+                            reason = str(delta.get("reason", "error"))
+                            if reason == "aborted":
+                                turn_error = PiTurnAbortedError("Pi turn was aborted")
+                            else:
+                                turn_error = PiRpcError(f"Pi assistant stream failed: {reason}")
+                    elif event_type == "agent_settled":
+                        if turn_error:
+                            raise turn_error
+                        return
             except TimeoutError:
                 await self._terminate_process()
                 raise PiTurnTimeoutError(
