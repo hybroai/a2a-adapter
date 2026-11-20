@@ -295,6 +295,9 @@ class StreamEvent:
     text: str | None = None
     session_id: str | None = None
     error: str | None = None
+    # ``text`` starts a new message: after earlier text it is sent as a new
+    # paragraph (preceded by a blank line), not run on.
+    new_message: bool = False
 
 
 class BaseA2AAdapter(ABC):
@@ -778,8 +781,11 @@ class BaseA2AAdapter(ABC):
                 if event.session_id:
                     self._remember_session(context_key, event.session_id)
                 if event.text:
+                    text = event.text
+                    if event.new_message and yielded_any:
+                        text = f"\n\n{text}"
                     yielded_any = True
-                    yield event.text
+                    yield text
 
         except asyncio.TimeoutError:
             aborted = True
