@@ -37,6 +37,7 @@ Run these from the repo root; they match `.github/workflows/ci.yml`.
 - Unit tests (`tests/unit/`, plus `tests/test_*.py`) must not need a real agent CLI, model, API key or network. Mock HTTP with `httpx.MockTransport`, patch `asyncio.create_subprocess_exec`, or use a fake CLI started with `sys.executable` or `sh` (see `tests/process_helpers.py`). Shared stub adapters are in `tests/conftest.py`.
 - Integration tests (`tests/integration/`) run the real ASGI app in-process through `httpx.ASGITransport` with stub or in-process adapters (for example a real LangGraph graph with an in-memory checkpointer). They cover the full A2A request flow; they do not start a network server or a real agent CLI.
 - `tests/e2e_live_test.py` drives the real `claude` and `codex` CLIs. It is not collected by pytest and is not part of CI.
+- `.claude/skills/verify-live/` runs the core A2A flows against one real installed agent. It is manual-only: run it only when a person asks for live testing.
 - Never use real provider API keys, paid models, live agent CLIs or external services unless the user asks for live testing.
 - A bug fix comes with a test that fails without the fix.
 
