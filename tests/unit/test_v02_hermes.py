@@ -1000,3 +1000,38 @@ class TestTimeout:
             with pytest.raises(AgentTimeoutError):
                 await asyncio.wait_for(slow_consumer(adapter.stream("x", context_id="ctx-1")), 3)
         assert agent.interrupts == 1
+
+
+class TestCloseInterrupts:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [True, False])
+    async def test_close_interrupts_running_agents(self, adapter, blocking_agents, streaming):
+        agent = blocking_agents()
+        with patch.object(adapter, "_make_agent", return_value=agent):
+            coro = (
+                _collect(adapter.stream("x", context_id="ctx-1"))
+                if streaming
+                else adapter.invoke("x", context_id="ctx-1")
+            )
+            turn = asyncio.create_task(coro)
+            await _started(agent)
+            await adapter.close()
+            assert agent.interrupts == 1
+            agent.release.set()
+            await asyncio.wait_for(turn, 5)
+
+    @pytest.mark.asyncio
+    async def test_close_survives_a_failing_interrupt(self, adapter, blocking_agents):
+        class BrokenInterrupt(_BlockingAgent):
+            def interrupt(self):
+                super().interrupt()
+                raise OSError("interrupt broke")
+
+        agent = blocking_agents(BrokenInterrupt)
+        with patch.object(adapter, "_make_agent", return_value=agent):
+            turn = asyncio.create_task(adapter.invoke("x", context_id="ctx-1"))
+            await _started(agent)
+            await adapter.close()
+            assert agent.interrupts == 1
+            agent.release.set()
+            await asyncio.wait_for(turn, 5)

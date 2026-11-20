@@ -98,11 +98,15 @@ class _Turn:
             self._release()
             return
         self._abandoned = True
+        self.interrupt("Interrupting an abandoned Hermes run failed")
+
+    def interrupt(self, failure_message: str) -> None:
+        """Interrupt the run if its thread is running; log a failure."""
         if self._started and not self._finished:
             try:
                 self._agent.interrupt()
             except Exception:
-                logger.warning("Interrupting an abandoned Hermes run failed", exc_info=True)
+                logger.warning(failure_message, exc_info=True)
 
     def _release(self) -> None:
         if self._lock is not None:
@@ -161,6 +165,7 @@ class HermesAdapter(BaseA2AAdapter):
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="hermes")
         self._session_db = None  # lazy — see _ensure_session_db()
         self._running_agents: dict[str, object] = {}  # task_id → AIAgent
+        self._turns: dict[str, _Turn] = {}  # task_id → turn, while a call waits on it
         # context_id → lock. Weak: an entry lives only while a holder or waiter
         # references the lock.
         self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
@@ -366,6 +371,7 @@ class HermesAdapter(BaseA2AAdapter):
 
             agent = self._make_agent(session_id)
             self._running_agents[task_id] = agent
+            self._turns[task_id] = turn
 
             future = turn.submit(
                 self._executor,
@@ -385,6 +391,7 @@ class HermesAdapter(BaseA2AAdapter):
             raise
         finally:
             self._running_agents.pop(task_id, None)
+            self._turns.pop(task_id, None)
 
         return self._check_hermes_result(result, session_id)
 
@@ -409,6 +416,7 @@ class HermesAdapter(BaseA2AAdapter):
 
             agent = self._make_agent(session_id)
             self._running_agents[task_id] = agent
+            self._turns[task_id] = turn
 
             loop = asyncio.get_running_loop()
             queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -485,6 +493,7 @@ class HermesAdapter(BaseA2AAdapter):
             raise
         finally:
             self._running_agents.pop(task_id, None)
+            self._turns.pop(task_id, None)
 
     # ──── Optional: cancel ────
 
@@ -523,6 +532,12 @@ class HermesAdapter(BaseA2AAdapter):
     # ──── Optional: cleanup ────
 
     async def close(self) -> None:
-        """Shut down the thread pool executor and release internal state."""
+        """Interrupt running agents, then shut down the thread pool.
+
+        Without the interrupt a run keeps its worker thread busy, and the
+        interpreter waits for pool threads at exit.
+        """
+        for turn in list(self._turns.values()):
+            turn.interrupt("Interrupting a Hermes run on close failed")
         self._executor.shutdown(wait=False, cancel_futures=True)
         self._session_locks.clear()
