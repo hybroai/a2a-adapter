@@ -8,6 +8,13 @@ Conventional Commits. Earlier entries follow
 [Keep a Changelog](https://keepachangelog.com/). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.7](https://github.com/hybroai/a2a-adapter/compare/v0.4.6...v0.4.7) (2026-11-20)
+
+
+### Documentation
+
+* add AGENTS.md with code review rules ([c3d3439](https://github.com/hybroai/a2a-adapter/commit/c3d343915276d1f7646ee76c46b9d648104dcbac))
+
 ## [0.4.6](https://github.com/hybroai/a2a-adapter/compare/v0.4.5...v0.4.6) (2026-11-20)
 
 
