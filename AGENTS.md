@@ -18,6 +18,7 @@ Run these from the repo root; they match `.github/workflows/ci.yml`.
 - Format check: `uv run black --check .` (line length 100).
 - Tests: `uv run pytest` (runs everything under `tests/`). CI runs the tests on Python 3.11, 3.12 and 3.13 and lint on 3.12.
 - Run a single file with `uv run pytest tests/unit/test_v02_n8n.py`.
+- Before committing a change to the runtime (`server.py`, `executor.py`, `base_adapter.py`, `adapter.py`, `cli.py` or a CLI-backed integration), run the verify skill: `uv run python .claude/skills/verify/verify.py` (see `.claude/skills/verify/SKILL.md`). It drives the real server through the Claude Code and Codex adapters only. A failure means fixing the code; change a check only when the behaviour is meant to change, in the same commit.
 - mypy is configured in `pyproject.toml` but CI does not run it; do not treat a mypy result as a CI gate.
 - `deepseek-harness` is not in `[all]`, so CI runs its tests without the SDK installed. Keep those tests passing without it.
 
