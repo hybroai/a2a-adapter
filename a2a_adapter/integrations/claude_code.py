@@ -170,13 +170,16 @@ class ClaudeCodeAdapter(BaseA2AAdapter):
                 )
                 raise RuntimeError(f"Claude Code error: {error_msg}")
             if obj_type == "assistant":
-                accumulated.extend(self._extract_text(obj))
+                text = "".join(self._extract_text(obj))
+                if text:
+                    accumulated.append(text)
             if obj_type == "result":
                 session_id = obj.get("session_id") or None
 
         if not accumulated:
             raise RuntimeError("Claude Code returned no output")
-        return ParseResult(text="".join(accumulated), session_id=session_id)
+        # Each assistant event is a separate message: one paragraph each.
+        return ParseResult(text="\n\n".join(accumulated), session_id=session_id)
 
     def _handle_stream_line(self, line: str) -> StreamEvent | None:
         try:
@@ -195,7 +198,7 @@ class ClaudeCodeAdapter(BaseA2AAdapter):
         if obj_type == "assistant":
             chunks = self._extract_text(obj)
             if chunks:
-                return StreamEvent(text="".join(chunks))
+                return StreamEvent(text="".join(chunks), new_message=True)
             return None
         if obj_type == "result":
             if obj.get("is_error") and obj.get("result"):

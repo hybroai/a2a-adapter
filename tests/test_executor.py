@@ -146,7 +146,11 @@ class TestConcatenateChunks:
         assert self.executor._concatenate_chunks(chunks) == "ab"
 
     def test_empty_list(self):
-        assert self.executor._concatenate_chunks([]) == "[Streamed non-text content]"
+        assert self.executor._concatenate_chunks([]) == "[Empty response]"
+
+    def test_only_non_text_chunks(self):
+        chunks = [Part(url="https://example.com/a.png", media_type="image/png")]
+        assert self.executor._concatenate_chunks(chunks) == "[Streamed non-text content]"
 
 
 # ── _extract_text_from_parts ─────────────────────────────────

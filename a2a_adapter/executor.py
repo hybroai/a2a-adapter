@@ -512,9 +512,12 @@ class AdapterAgentExecutor(AgentExecutor):
             chunks: List of chunks (str or Part objects)
 
         Returns:
-            Concatenated text from all text chunks, or a placeholder
-            if no text content is found.
+            Concatenated text from all text chunks; "[Empty response]" when
+            there were no chunks (as for an empty invoke() result), or
+            "[Streamed non-text content]" when no chunk carried text.
         """
+        if not chunks:
+            return "[Empty response]"
         texts = []
         for chunk in chunks:
             if isinstance(chunk, str):

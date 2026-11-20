@@ -304,6 +304,33 @@ class TestStream:
                 chunks.append(chunk)
         assert chunks == ["ok"]
 
+    @pytest.mark.asyncio
+    async def test_stream_yields_final_response_when_nothing_streamed(self, adapter):
+        """Hermes may never call stream_callback (e.g. a non-streaming
+        provider); the final response must still reach the client."""
+        mock_agent = _make_mock_agent(response="Only the final text")
+        with patch.object(adapter, "_make_agent", return_value=mock_agent):
+            chunks = [c async for c in adapter.stream("Hi", context_id="c1")]
+        assert chunks == ["Only the final text"]
+
+    @pytest.mark.asyncio
+    async def test_stream_does_not_repeat_final_response_after_chunks(self, adapter):
+        mock_agent = _make_mock_agent(response="Hello world", chunks=["Hello", " world"])
+        with patch.object(adapter, "_make_agent", return_value=mock_agent):
+            chunks = [c async for c in adapter.stream("Hi", context_id="c1")]
+        assert chunks == ["Hello", " world"]
+
+    @pytest.mark.asyncio
+    async def test_stream_raises_when_run_failed_without_output(self, adapter):
+        mock_agent = MagicMock()
+        mock_agent.run_conversation = MagicMock(
+            return_value={"final_response": "", "failed": True, "error": "quota"}
+        )
+        with patch.object(adapter, "_make_agent", return_value=mock_agent):
+            with pytest.raises(RuntimeError, match="quota"):
+                async for _ in adapter.stream("Hi", context_id="c1"):
+                    pass
+
 
 # ══════════════════════════════════════════════════════════════
 # cancel
@@ -801,3 +828,210 @@ class TestCancelledTurn:
                 await adapter.invoke("x", context_id="ctx-1")
         agent.interrupt.assert_not_called()
         await _until(lambda: not lock.locked())
+
+
+# ══════════════════════════════════════════════════════════════
+# Turn timeout
+# ══════════════════════════════════════════════════════════════
+
+
+async def _collect(stream):
+    return [c async for c in stream]
+
+
+@pytest.fixture
+def blocking_agents():
+    """Blocking agents that are always released at teardown, so a failing
+    test cannot leave pool threads waiting."""
+    made = []
+
+    def make(cls=None):
+        agent = (cls or _BlockingAgent)()
+        made.append(agent)
+        return agent
+
+    yield make
+    for agent in made:
+        agent.release.set()
+
+
+class TestTimeout:
+    def test_default_timeout(self):
+        assert HermesAdapter().timeout == 600
+
+    def test_load_adapter_passes_timeout(self):
+        from a2a_adapter import load_adapter
+
+        assert load_adapter({"adapter": "hermes", "timeout": 5}).timeout == 5
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [True, False])
+    async def test_a_stuck_run_times_out_and_is_interrupted(
+        self, adapter, blocking_agents, streaming
+    ):
+        from a2a_adapter.exceptions import AgentTimeoutError
+
+        adapter.timeout = 0.5  # long enough for the pool thread to start
+        agent = blocking_agents()
+        lock = adapter._session_lock(adapter._session_key("ctx-1"))
+        with patch.object(adapter, "_make_agent", return_value=agent):
+            coro = (
+                _collect(adapter.stream("x", context_id="ctx-1"))
+                if streaming
+                else adapter.invoke("x", context_id="ctx-1")
+            )
+            with pytest.raises(AgentTimeoutError, match="timed out after 0.5 seconds"):
+                await asyncio.wait_for(coro, 5)
+        assert agent.interrupts == 1
+        # The thread is still running, so the conversation stays locked.
+        assert lock.locked()
+        agent.release.set()
+        await _until(lambda: not lock.locked())
+
+    @pytest.mark.asyncio
+    async def test_the_deadline_covers_the_whole_stream(self, adapter, blocking_agents):
+        """Chunks that keep arriving must not extend the turn past the timeout."""
+        from a2a_adapter.exceptions import AgentTimeoutError
+
+        class Trickle(_BlockingAgent):
+            def run_conversation(self, **kwargs):
+                self.started.set()
+                while not self.release.wait(0.05):
+                    kwargs["stream_callback"]("tick")
+                return {"final_response": "done", "completed": True}
+
+        adapter.timeout = 0.5
+        agent = blocking_agents(Trickle)
+        with patch.object(adapter, "_make_agent", return_value=agent):
+            with pytest.raises(AgentTimeoutError):
+                await asyncio.wait_for(_collect(adapter.stream("x", context_id="ctx-1")), 5)
+        assert agent.interrupts == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [True, False])
+    async def test_a_turn_queued_behind_a_stuck_run_times_out(
+        self, adapter, blocking_agents, streaming
+    ):
+        """A run that ignores interrupt() keeps the conversation's lock; the
+        next message on it must time out, not wait forever."""
+        from a2a_adapter.exceptions import AgentTimeoutError
+
+        adapter.timeout = 0.2
+        stuck, queued = blocking_agents(), _make_mock_agent()
+        with patch.object(adapter, "_make_agent", side_effect=[stuck, queued]):
+            with pytest.raises(AgentTimeoutError):
+                await asyncio.wait_for(adapter.invoke("one", context_id="ctx-1"), 5)
+            coro = (
+                _collect(adapter.stream("two", context_id="ctx-1"))
+                if streaming
+                else adapter.invoke("two", context_id="ctx-1")
+            )
+            with pytest.raises(AgentTimeoutError):
+                await asyncio.wait_for(coro, 5)
+        queued.run_conversation.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [True, False])
+    async def test_no_timeout(self, adapter, streaming):
+        adapter.timeout = None
+        agent = _make_mock_agent(response="ok")
+        with patch.object(adapter, "_make_agent", return_value=agent):
+            if streaming:
+                assert await _collect(adapter.stream("x", context_id="ctx-1")) == ["ok"]
+            else:
+                assert await adapter.invoke("x", context_id="ctx-1") == "ok"
+
+    @pytest.mark.asyncio
+    async def test_the_deadline_covers_waiting_for_a_pool_worker(
+        self, single_worker, blocking_agents
+    ):
+        from a2a_adapter.exceptions import AgentTimeoutError
+
+        adapter = single_worker
+        adapter.timeout = 0.3
+        blocker, queued = blocking_agents(), _make_mock_agent()
+        with patch.object(adapter, "_make_agent", side_effect=[blocker, queued]):
+            first = asyncio.create_task(adapter.invoke("x", context_id="other"))
+            await _started(blocker)
+            with pytest.raises(AgentTimeoutError):
+                await asyncio.wait_for(adapter.invoke("y", context_id="ctx-1"), 5)
+            with pytest.raises(AgentTimeoutError):
+                await asyncio.wait_for(first, 5)
+            blocker.release.set()
+            lock = adapter._session_lock(adapter._session_key("ctx-1"))
+            await _until(lambda: not lock.locked())
+        queued.run_conversation.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_output_queued_before_the_deadline_is_not_lost(self, adapter):
+        """A run that finished while the consumer held a chunk past the
+        deadline still delivers the rest of its output."""
+        adapter.timeout = 0.2
+        agent = _make_mock_agent(response="ab", chunks=["a", "b"])
+        with patch.object(adapter, "_make_agent", return_value=agent):
+            stream = adapter.stream("x", context_id="ctx-1")
+            assert await anext(stream) == "a"
+            await asyncio.sleep(0.4)
+            assert await _collect(stream) == ["b"]
+        agent.interrupt.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_slow_consumer_of_a_flooding_run_still_times_out(
+        self, adapter, blocking_agents
+    ):
+        """The queue never empties when the run outpaces the consumer; the
+        deadline must still apply while the run is going."""
+        from a2a_adapter.exceptions import AgentTimeoutError
+
+        class Flood(_BlockingAgent):
+            def run_conversation(self, **kwargs):
+                self.started.set()
+                while not self.release.wait(0.001):
+                    kwargs["stream_callback"]("tick")
+                return {"final_response": "done", "completed": True}
+
+        async def slow_consumer(stream):
+            async for _ in stream:
+                await asyncio.sleep(0.02)
+
+        adapter.timeout = 0.5
+        agent = blocking_agents(Flood)
+        with patch.object(adapter, "_make_agent", return_value=agent):
+            with pytest.raises(AgentTimeoutError):
+                await asyncio.wait_for(slow_consumer(adapter.stream("x", context_id="ctx-1")), 3)
+        assert agent.interrupts == 1
+
+
+class TestCloseInterrupts:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [True, False])
+    async def test_close_interrupts_running_agents(self, adapter, blocking_agents, streaming):
+        agent = blocking_agents()
+        with patch.object(adapter, "_make_agent", return_value=agent):
+            coro = (
+                _collect(adapter.stream("x", context_id="ctx-1"))
+                if streaming
+                else adapter.invoke("x", context_id="ctx-1")
+            )
+            turn = asyncio.create_task(coro)
+            await _started(agent)
+            await adapter.close()
+            assert agent.interrupts == 1
+            agent.release.set()
+            await asyncio.wait_for(turn, 5)
+
+    @pytest.mark.asyncio
+    async def test_close_survives_a_failing_interrupt(self, adapter, blocking_agents):
+        class BrokenInterrupt(_BlockingAgent):
+            def interrupt(self):
+                super().interrupt()
+                raise OSError("interrupt broke")
+
+        agent = blocking_agents(BrokenInterrupt)
+        with patch.object(adapter, "_make_agent", return_value=agent):
+            turn = asyncio.create_task(adapter.invoke("x", context_id="ctx-1"))
+            await _started(agent)
+            await adapter.close()
+            assert agent.interrupts == 1
+            agent.release.set()
+            await asyncio.wait_for(turn, 5)

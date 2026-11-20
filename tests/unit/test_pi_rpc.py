@@ -854,3 +854,94 @@ def test_turn_timeout_is_readable_for_clients():
 
     assert issubclass(PiTurnTimeoutError, UserFacingError)
     assert issubclass(PiTurnTimeoutError, PiRpcError)
+
+
+# ── Turn timeout ─────────────────────────────────────────────
+
+
+def _prompt_process(events: list[dict]) -> FakeProcess:
+    """A fake Pi that accepts the prompt, emits ``events`` and then stays silent."""
+    process: FakeProcess
+
+    def on_command(command: dict) -> None:
+        if command["type"] == "get_state":
+            process.stdout.feed_json(
+                {
+                    "id": command["id"],
+                    "type": "response",
+                    "command": "get_state",
+                    "success": True,
+                    "data": {"sessionId": "session-1"},
+                }
+            )
+        elif command["type"] == "prompt":
+            process.stdout.feed_json(
+                {"id": command["id"], "type": "response", "command": "prompt", "success": True}
+            )
+            for event in events:
+                process.stdout.feed_json(event)
+
+    process = FakeProcess(on_command)
+    return process
+
+
+def _text(delta: str) -> dict:
+    return {
+        "type": "message_update",
+        "assistantMessageEvent": {"type": "text_delta", "delta": delta},
+    }
+
+
+@pytest.mark.asyncio
+async def test_turn_timeout_while_suspended_at_yield_is_reported_not_a_cancel(tmp_path):
+    """The deadline passing while the consumer holds a chunk must not cancel
+    the consumer's own unrelated awaits; the next read reports the timeout."""
+    from a2a_adapter.integrations.pi import PiTurnTimeoutError
+
+    process = _prompt_process([_text("partial")])
+    rpc = _rpc(tmp_path, timeout=0.2)
+
+    with patch("a2a_adapter.integrations.pi.create_subprocess_exec", return_value=process):
+        await rpc.start()
+        stream = rpc.prompt("work")
+        assert await anext(stream) == "partial"
+        # Unrelated consumer work that outlasts the deadline.
+        await asyncio.wait_for(asyncio.sleep(0.4), 2)
+        with pytest.raises(PiTurnTimeoutError, match="timed out after 0.2 seconds"):
+            await asyncio.wait_for(anext(stream), 2)
+
+    assert rpc.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_turn_timeout_bounds_a_turn_that_keeps_streaming(tmp_path):
+    from a2a_adapter.integrations.pi import PiTurnTimeoutError
+
+    process = _prompt_process([])
+    rpc = _rpc(tmp_path, timeout=0.3)
+
+    async def trickle():
+        while process.returncode is None:
+            process.stdout.feed_json(_text("tick"))
+            await asyncio.sleep(0.05)
+
+    with patch("a2a_adapter.integrations.pi.create_subprocess_exec", return_value=process):
+        await rpc.start()
+        feeder = asyncio.create_task(trickle())
+        try:
+            with pytest.raises(PiTurnTimeoutError):
+                await asyncio.wait_for(_collect(rpc.prompt("work")), 2)
+        finally:
+            feeder.cancel()
+
+
+@pytest.mark.asyncio
+async def test_turn_without_timeout(tmp_path):
+    process = _prompt_process([_text("done"), {"type": "agent_settled"}])
+    rpc = _rpc(tmp_path)
+    rpc.timeout = None
+
+    with patch("a2a_adapter.integrations.pi.create_subprocess_exec", return_value=process):
+        await rpc.start()
+        assert await asyncio.wait_for(_collect(rpc.prompt("work")), 2) == ["done"]
+    await rpc.close()
