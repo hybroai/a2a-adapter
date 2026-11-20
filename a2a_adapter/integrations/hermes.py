@@ -28,6 +28,7 @@ from contextlib import suppress
 from typing import Any, AsyncIterator
 
 from ..base_adapter import AdapterMetadata, BaseA2AAdapter
+from ..exceptions import AgentTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,7 @@ class HermesAdapter(BaseA2AAdapter):
         enabled_toolsets: list[str] | None = None,
         max_workers: int = 4,
         *,
+        timeout: float | None = 600,
         name: str = "",
         description: str = "",
         skills: list[dict] | None = None,
@@ -145,6 +147,10 @@ class HermesAdapter(BaseA2AAdapter):
         self._model = model
         self._provider_name = provider
         self._enabled_toolsets = enabled_toolsets
+        # Seconds one call may take, waiting for the conversation's lock and a
+        # pool worker included (None: no limit). On expiry the run is
+        # interrupted and the call raises AgentTimeoutError.
+        self.timeout = timeout
         self._name = name
         self._description = description
         self._skills = skills or []
@@ -269,13 +275,42 @@ class HermesAdapter(BaseA2AAdapter):
             return context.task_id
         return uuid.uuid4().hex
 
-    async def _begin_turn(self, session_id: str, context_id: str | None) -> _Turn:
+    async def _begin_turn(
+        self, session_id: str, context_id: str | None, deadline: float | None
+    ) -> _Turn:
         # A one-off session (no context_id) is never shared, so it needs no
         # lock, and skipping it keeps _session_locks from growing per call.
         lock = self._session_lock(session_id) if context_id else None
         if lock is not None:
-            await lock.acquire()
+            # Bounded too: a timed-out run whose tool ignores interrupt()
+            # keeps the lock until its thread ends.
+            # asyncio.timeout, not wait_for: on Python 3.11 wait_for can drop
+            # a cancellation that races the acquire.
+            try:
+                async with asyncio.timeout(self._remaining(deadline)):
+                    await lock.acquire()
+            except TimeoutError:
+                raise self._timeout_error() from None
         return _Turn(asyncio.get_running_loop(), lock)
+
+    def _deadline(self) -> float | None:
+        """When this call times out (None: never). It covers waiting for the
+        conversation's lock, for a pool worker and for the run itself."""
+        if self.timeout is None:
+            return None
+        return asyncio.get_running_loop().time() + self.timeout
+
+    def _remaining(self, deadline: float | None) -> float | None:
+        """Seconds left before ``deadline``; raises once it has passed."""
+        if deadline is None:
+            return None
+        left = deadline - asyncio.get_running_loop().time()
+        if left <= 0:
+            raise self._timeout_error()
+        return left
+
+    def _timeout_error(self) -> AgentTimeoutError:
+        return AgentTimeoutError(f"Hermes turn timed out after {self.timeout} seconds")
 
     # ──── Internal: result inspection ────
 
@@ -322,7 +357,8 @@ class HermesAdapter(BaseA2AAdapter):
         in a thread, and lets the agent persist updates internally.
         """
         session_id = self._session_key(context_id)
-        turn = await self._begin_turn(session_id, context_id)
+        deadline = self._deadline()
+        turn = await self._begin_turn(session_id, context_id, deadline)
         task_id = self._extract_task_id(kwargs)
         try:
             db = self._ensure_session_db()
@@ -340,7 +376,9 @@ class HermesAdapter(BaseA2AAdapter):
                     task_id=session_id,
                 ),
             )
-            await asyncio.wait({future})
+            done, _ = await asyncio.wait({future}, timeout=self._remaining(deadline))
+            if not done:
+                raise self._timeout_error()  # abandon() below interrupts the run
             result = turn.result(future)
         except BaseException:
             turn.abandon()
@@ -362,7 +400,8 @@ class HermesAdapter(BaseA2AAdapter):
         async iterator for the bridge layer.
         """
         session_id = self._session_key(context_id)
-        turn = await self._begin_turn(session_id, context_id)
+        deadline = self._deadline()
+        turn = await self._begin_turn(session_id, context_id, deadline)
         task_id = self._extract_task_id(kwargs)
         try:
             db = self._ensure_session_db()
@@ -378,6 +417,13 @@ class HermesAdapter(BaseA2AAdapter):
                 with suppress(RuntimeError):  # an abandoned run can outlive the loop
                     loop.call_soon_threadsafe(queue.put_nowait, item)
 
+            ended = False  # set on the loop together with queueing the sentinel
+
+            def finish() -> None:
+                nonlocal ended
+                ended = True
+                queue.put_nowait(_SENTINEL)
+
             def _run():
                 try:
                     return agent.run_conversation(
@@ -387,19 +433,36 @@ class HermesAdapter(BaseA2AAdapter):
                         stream_callback=post,
                     )
                 finally:
-                    post(_SENTINEL)
+                    with suppress(RuntimeError):  # an abandoned run can outlive the loop
+                        loop.call_soon_threadsafe(finish)
 
             future = turn.submit(self._executor, agent, _run)
+            # The timeout bounds the whole call, so each await gets the time
+            # that is left. One asyncio.timeout() around the loop would fire
+            # while this generator is suspended at ``yield`` and cancel the
+            # consumer at an unrelated await.
 
             def wake_if_dropped(done: asyncio.Future) -> None:
                 if done.cancelled():  # _run never ran, so it sent no sentinel
-                    queue.put_nowait(_SENTINEL)
+                    finish()
 
             future.add_done_callback(wake_if_dropped)
 
             streamed = False
             while True:
-                chunk = await queue.get()
+                # Once the run has ended its output is all queued (the
+                # sentinel last), so it is read without a deadline: a deadline
+                # that passed while this generator was suspended at ``yield``
+                # must not discard a finished answer. While the run goes on,
+                # the deadline is checked on every read.
+                remaining = None if ended else self._remaining(deadline)
+                try:
+                    async with asyncio.timeout(remaining):
+                        chunk = await queue.get()
+                except TimeoutError:
+                    if ended:  # the run ended as the deadline passed
+                        continue
+                    raise self._timeout_error() from None
                 if chunk is _SENTINEL:
                     break
                 if not chunk:
@@ -407,6 +470,9 @@ class HermesAdapter(BaseA2AAdapter):
                 streamed = True
                 yield chunk
 
+            # The sentinel means the run has ended (or never started), so its
+            # future resolves at once: no deadline here, which could otherwise
+            # discard a finished answer.
             await asyncio.wait({future})
             result = turn.result(future)
             if result:
