@@ -645,6 +645,19 @@ class _ReadyServer(uvicorn.Server):
                 logger.exception("Stopping running agents on interrupt failed")
 
 
+def _served_url(host: str, port: int, uvicorn_kwargs: dict[str, Any]) -> str:
+    """The URL clients reach ``serve_agent``'s server at, for the agent card."""
+    # Uvicorn serves TLS when either file is given (one PEM may hold both).
+    tls = uvicorn_kwargs.get("ssl_certfile") or uvicorn_kwargs.get("ssl_keyfile")
+    scheme = "https" if tls else "http"
+    if host in ("0.0.0.0", "::"):
+        host = "localhost"
+    elif ":" in host and not host.startswith("["):
+        # An IPv6 literal goes in brackets, its zone's "%" encoded (RFC 6874).
+        host = f"[{host.replace('%', '%25')}]"
+    return f"{scheme}://{host}:{port}/"
+
+
 def serve_agent(
     adapter: BaseA2AAdapter,
     agent_card: AgentCard | None = None,
@@ -706,10 +719,9 @@ def serve_agent(
     """
     _check_auth_token(auth_token)
     if agent_card is None:
-        display_host = "localhost" if host in ("0.0.0.0", "::") else host
         agent_card = build_agent_card(
             adapter,
-            url=f"http://{display_host}:{port}/",
+            url=_served_url(host, port, kwargs),
             bearer_auth=auth_token is not None,
             push_notifications=bool(push_notifications),
         )

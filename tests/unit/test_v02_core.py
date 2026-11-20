@@ -297,6 +297,27 @@ def test_serve_agent_ipv6_wildcard_normalized():
             assert card.supported_interfaces[0].url == "http://localhost:9005/"
 
 
+@pytest.mark.parametrize(
+    "host,kwargs,expected",
+    [
+        ("::1", {}, "http://[::1]:9005/"),
+        ("fe80::1%en0", {}, "http://[fe80::1%25en0]:9005/"),
+        ("127.0.0.1", {"ssl_certfile": "c.pem", "ssl_keyfile": "k.pem"}, "https://127.0.0.1:9005/"),
+        ("127.0.0.1", {"ssl_certfile": "both.pem"}, "https://127.0.0.1:9005/"),
+        ("127.0.0.1", {"ssl_keyfile": None, "ssl_certfile": None}, "http://127.0.0.1:9005/"),
+        ("::1", {"ssl_certfile": "c.pem"}, "https://[::1]:9005/"),
+    ],
+)
+def test_serve_agent_card_url_brackets_ipv6_and_follows_tls(host, kwargs, expected):
+    with patch("a2a_adapter.server._ReadyServer.run", _fake_run):
+        with patch("a2a_adapter.server.to_a2a") as mock_to_a2a:
+            mock_to_a2a.return_value = MagicMock()
+            serve_agent(MinimalAdapter(), host=host, port=9005, **kwargs)
+
+            card = mock_to_a2a.call_args[1].get("agent_card") or mock_to_a2a.call_args[0][1]
+            assert card.supported_interfaces[0].url == expected
+
+
 def test_serve_agent_custom_host_preserved():
     """Non-wildcard hosts should be preserved in the card URL."""
     with patch("a2a_adapter.server._ReadyServer.run", _fake_run):
